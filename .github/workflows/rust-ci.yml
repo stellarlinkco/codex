@@ -492,9 +492,19 @@ jobs:
 
           # Forks/community runners are GitHub-hosted and can OOM during link when
           # building the full workspace test suite with all features.
-          if [[ "${{ github.repository }}" == "openai/codex" ]]; then
+          is_upstream_repo="${{ github.repository == 'openai/codex' }}"
+          is_fork_pr="${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}"
+
+          if [[ "${is_upstream_repo}" == "true" && "${is_fork_pr}" != "true" ]]; then
             cargo nextest run --all-features --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings
           else
+            # Some codex-core tests require workspace binaries that are not in the selected
+            # package set below. Pre-build them so `cargo_bin(...)` can find the executables.
+            cargo build --all-features --target ${{ matrix.target }} --profile ci-test --bins \
+              -p codex-exec \
+              -p codex-linux-sandbox \
+              -p codex-rmcp-client
+
             cargo nextest run --all-features --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings \
               -p codex-core \
               -p codex-cli \
