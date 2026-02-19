@@ -2,42 +2,51 @@ use crate::memories::memory_root;
 use crate::memories::phase_one;
 use crate::truncate::TruncationPolicy;
 use crate::truncate::truncate_text;
-use askama::Template;
 use codex_protocol::openai_models::ModelInfo;
 use std::path::Path;
 use tokio::fs;
-use tracing::warn;
 
-#[derive(Template)]
-#[template(path = "memories/consolidation.md", escape = "none")]
-struct ConsolidationPromptTemplate<'a> {
-    memory_root: &'a str,
-}
+const CONSOLIDATION_PROMPT_TEMPLATE: &str =
+    include_str!("../../templates/memories/consolidation.md");
+const STAGE_ONE_INPUT_MESSAGE_TEMPLATE: &str =
+    include_str!("../../templates/memories/stage_one_input.md");
+const MEMORY_TOOL_DEVELOPER_INSTRUCTIONS_TEMPLATE: &str =
+    include_str!("../../templates/memories/read_path.md");
 
-#[derive(Template)]
-#[template(path = "memories/stage_one_input.md", escape = "none")]
-struct StageOneInputTemplate<'a> {
-    rollout_path: &'a str,
-    rollout_cwd: &'a str,
-    rollout_contents: &'a str,
-}
+fn render_template<'a>(template: &str, mut lookup: impl FnMut(&str) -> Option<&'a str>) -> String {
+    let mut out = String::with_capacity(template.len());
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        let (before, after_start) = rest.split_at(start);
+        out.push_str(before);
 
-#[derive(Template)]
-#[template(path = "memories/read_path.md", escape = "none")]
-struct MemoryToolDeveloperInstructionsTemplate<'a> {
-    base_path: &'a str,
-    memory_summary: &'a str,
+        let Some(end) = after_start.find("}}") else {
+            out.push_str(after_start);
+            return out;
+        };
+
+        let (placeholder, after_end) = after_start.split_at(end + 2);
+        let key = placeholder
+            .trim_start_matches("{{")
+            .trim_end_matches("}}")
+            .trim();
+        if let Some(value) = lookup(key) {
+            out.push_str(value);
+        } else {
+            out.push_str(placeholder);
+        }
+        rest = after_end;
+    }
+    out.push_str(rest);
+    out
 }
 
 /// Builds the consolidation subagent prompt for a specific memory root.
 pub(super) fn build_consolidation_prompt(memory_root: &Path) -> String {
     let memory_root = memory_root.display().to_string();
-    let template = ConsolidationPromptTemplate {
-        memory_root: &memory_root,
-    };
-    template.render().unwrap_or_else(|err| {
-        warn!("failed to render memories consolidation prompt template: {err}");
-        format!("## Memory Phase 2 (Consolidation)\nConsolidate Codex memories in: {memory_root}")
+    render_template(CONSOLIDATION_PROMPT_TEMPLATE, |key| match key {
+        "memory_root" => Some(memory_root.as_str()),
+        _ => None,
     })
 }
 
@@ -65,12 +74,15 @@ pub(super) fn build_stage_one_input_message(
 
     let rollout_path = rollout_path.display().to_string();
     let rollout_cwd = rollout_cwd.display().to_string();
-    Ok(StageOneInputTemplate {
-        rollout_path: &rollout_path,
-        rollout_cwd: &rollout_cwd,
-        rollout_contents: &truncated_rollout_contents,
-    }
-    .render()?)
+    Ok(render_template(
+        STAGE_ONE_INPUT_MESSAGE_TEMPLATE,
+        |key| match key {
+            "rollout_path" => Some(rollout_path.as_str()),
+            "rollout_cwd" => Some(rollout_cwd.as_str()),
+            "rollout_contents" => Some(truncated_rollout_contents.as_str()),
+            _ => None,
+        },
+    ))
 }
 
 /// Build prompt used for read path. This prompt must be added to the developer instructions. In
@@ -92,11 +104,14 @@ pub(crate) async fn build_memory_tool_developer_instructions(codex_home: &Path) 
         return None;
     }
     let base_path = base_path.display().to_string();
-    let template = MemoryToolDeveloperInstructionsTemplate {
-        base_path: &base_path,
-        memory_summary: &memory_summary,
-    };
-    template.render().ok()
+    Some(render_template(
+        MEMORY_TOOL_DEVELOPER_INSTRUCTIONS_TEMPLATE,
+        |key| match key {
+            "base_path" => Some(base_path.as_str()),
+            "memory_summary" => Some(memory_summary.as_str()),
+            _ => None,
+        },
+    ))
 }
 
 #[cfg(test)]
