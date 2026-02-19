@@ -43,9 +43,11 @@ use codex_core::protocol::ExecPolicyAmendment;
 use codex_core::protocol::ExitedReviewModeEvent;
 use codex_core::protocol::FileChange;
 use codex_core::protocol::ItemCompletedEvent;
+use codex_core::protocol::McpInvocation;
 use codex_core::protocol::McpStartupCompleteEvent;
 use codex_core::protocol::McpStartupStatus;
 use codex_core::protocol::McpStartupUpdateEvent;
+use codex_core::protocol::McpToolCallBeginEvent;
 use codex_core::protocol::Op;
 use codex_core::protocol::PatchApplyBeginEvent;
 use codex_core::protocol::PatchApplyEndEvent;
@@ -66,6 +68,7 @@ use codex_core::protocol::UndoCompletedEvent;
 use codex_core::protocol::UndoStartedEvent;
 use codex_core::protocol::ViewImageToolCallEvent;
 use codex_core::protocol::WarningEvent;
+use codex_core::protocol::WebSearchBeginEvent;
 use codex_core::skills::model::SkillMetadata;
 use codex_otel::OtelManager;
 use codex_otel::RuntimeMetricsSummary;
@@ -2281,6 +2284,134 @@ async fn plan_implementation_popup_skips_replayed_turn_complete() {
     assert!(
         !popup.contains(PLAN_IMPLEMENTATION_TITLE),
         "expected no plan popup for replayed turn, got {popup:?}"
+    );
+}
+
+#[tokio::test]
+async fn replay_initial_messages_clears_stale_turn_running_state() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+
+    chat.replay_initial_messages(vec![EventMsg::TurnStarted(TurnStartedEvent {
+        turn_id: "turn-1".to_string(),
+        model_context_window: None,
+        collaboration_mode_kind: ModeKind::Default,
+    })]);
+
+    assert_eq!(chat.agent_turn_running, false);
+    assert_eq!(chat.bottom_pane.is_task_running(), false);
+}
+
+#[tokio::test]
+async fn replay_initial_messages_recovers_stale_web_search_cell() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+
+    chat.replay_initial_messages(vec![
+        EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        }),
+        EventMsg::WebSearchBegin(WebSearchBeginEvent {
+            call_id: "web-1".to_string(),
+        }),
+    ]);
+
+    assert!(!chat.agent_turn_running);
+    assert!(!chat.bottom_pane.is_task_running());
+    assert!(chat.active_cell.is_none());
+
+    let rendered = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert!(
+        rendered.contains("Searched"),
+        "expected stale web search cell to be finalized, got {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Searching the web"),
+        "expected no stale in-progress web search text, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn replay_initial_messages_recovers_stale_exec_cell() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+    let command = vec!["bash".to_string(), "-lc".to_string(), "sleep 1".to_string()];
+    let parsed_cmd = codex_core::parse_command::parse_command(&command);
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+
+    chat.replay_initial_messages(vec![
+        EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        }),
+        EventMsg::ExecCommandBegin(ExecCommandBeginEvent {
+            call_id: "exec-1".to_string(),
+            process_id: None,
+            turn_id: "turn-1".to_string(),
+            command,
+            cwd,
+            parsed_cmd,
+            source: ExecCommandSource::Agent,
+            interaction_input: None,
+        }),
+    ]);
+
+    assert!(!chat.agent_turn_running);
+    assert!(!chat.bottom_pane.is_task_running());
+    assert!(chat.active_cell.is_none());
+
+    let rendered = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert!(
+        rendered.contains("Ran sleep 1"),
+        "expected stale exec cell to be finalized, got {rendered:?}"
+    );
+    assert!(
+        !rendered.contains("Running sleep 1"),
+        "expected no stale in-progress exec text, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
+async fn replay_initial_messages_recovers_stale_mcp_cell() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(Some("gpt-5")).await;
+
+    chat.replay_initial_messages(vec![
+        EventMsg::TurnStarted(TurnStartedEvent {
+            turn_id: "turn-1".to_string(),
+            model_context_window: None,
+            collaboration_mode_kind: ModeKind::Default,
+        }),
+        EventMsg::McpToolCallBegin(McpToolCallBeginEvent {
+            call_id: "mcp-1".to_string(),
+            invocation: McpInvocation {
+                server: "demo".to_string(),
+                tool: "echo".to_string(),
+                arguments: None,
+            },
+        }),
+    ]);
+
+    assert!(!chat.agent_turn_running);
+    assert!(!chat.bottom_pane.is_task_running());
+    assert!(chat.active_cell.is_none());
+
+    let rendered = drain_insert_history(&mut rx)
+        .iter()
+        .map(|lines| lines_to_single_string(lines))
+        .collect::<String>();
+    assert!(
+        rendered.contains("Called"),
+        "expected stale mcp cell to be finalized, got {rendered:?}"
+    );
+    assert!(
+        rendered.contains("interrupted"),
+        "expected stale mcp cell to be marked interrupted, got {rendered:?}"
     );
 }
 

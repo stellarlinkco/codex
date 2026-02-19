@@ -74,6 +74,7 @@ use color_eyre::eyre::WrapErr;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::KeyModifiers;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
@@ -97,6 +98,7 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::mpsc::unbounded_channel;
+use tokio_stream::StreamExt;
 use toml::Value as TomlValue;
 
 const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
@@ -999,6 +1001,60 @@ impl App {
         waiting_for_initial_session_configured && primary_thread_id.is_some()
     }
 
+    fn is_startup_cancel_key(key_event: &KeyEvent) -> bool {
+        if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return false;
+        }
+
+        if key_event.code == KeyCode::Esc {
+            return true;
+        }
+
+        key_event.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key_event.code, KeyCode::Char('c') | KeyCode::Char('d'))
+    }
+
+    async fn await_startup_task_or_cancel_with_events<T, Fut, S>(
+        tui_events: &mut S,
+        future: Fut,
+    ) -> Result<Option<T>>
+    where
+        Fut: std::future::Future<Output = Result<T>>,
+        S: tokio_stream::Stream<Item = TuiEvent> + Unpin,
+    {
+        tokio::pin!(future);
+
+        loop {
+            select! {
+                result = &mut future => return result.map(Some),
+                event = tui_events.next() => {
+                    let Some(event) = event else {
+                        return Err(color_eyre::eyre::eyre!(
+                            "TUI event stream ended while waiting for a cancellable operation"
+                        ));
+                    };
+                    if let TuiEvent::Key(key_event) = &event
+                        && Self::is_startup_cancel_key(key_event)
+                    {
+                        return Ok(None);
+                    }
+                }
+            }
+        }
+    }
+
+    async fn await_startup_task_or_cancel<T, Fut>(
+        tui: &mut tui::Tui,
+        future: Fut,
+    ) -> Result<Option<T>>
+    where
+        Fut: std::future::Future<Output = Result<T>>,
+    {
+        let tui_events = tui.event_stream();
+        tokio::pin!(tui_events);
+        Self::await_startup_task_or_cancel_with_events(&mut tui_events, future).await
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub async fn run(
         tui: &mut tui::Tui,
@@ -1014,7 +1070,6 @@ impl App {
         is_first_run: bool,
         should_prompt_windows_sandbox_nux_at_startup: bool,
     ) -> Result<AppExitInfo> {
-        use tokio_stream::StreamExt;
         let (app_event_tx, mut app_event_rx) = unbounded_channel();
         let app_event_tx = AppEventSender::new(app_event_tx);
         emit_project_config_warnings(&app_event_tx, &config);
@@ -1116,13 +1171,29 @@ impl App {
                 ChatWidget::new(init, thread_manager.clone())
             }
             SessionSelection::Resume(path) => {
-                let resumed = thread_manager
-                    .resume_thread_from_rollout(config.clone(), path.clone(), auth_manager.clone())
-                    .await
-                    .wrap_err_with(|| {
-                        let path_display = path.display();
-                        format!("Failed to resume session from {path_display}")
-                    })?;
+                let resume_fut = async {
+                    thread_manager
+                        .resume_thread_from_rollout(
+                            config.clone(),
+                            path.clone(),
+                            auth_manager.clone(),
+                        )
+                        .await
+                        .wrap_err_with(|| {
+                            let path_display = path.display();
+                            format!("Failed to resume session from {path_display}")
+                        })
+                };
+                let Some(resumed) = Self::await_startup_task_or_cancel(tui, resume_fut).await?
+                else {
+                    return Ok(AppExitInfo {
+                        token_usage: TokenUsage::default(),
+                        thread_id: None,
+                        thread_name: None,
+                        update_action: None,
+                        exit_reason: ExitReason::UserRequested,
+                    });
+                };
                 let init = crate::chatwidget::ChatWidgetInit {
                     config: config.clone(),
                     frame_requester: tui.frame_requester(),
@@ -1147,13 +1218,24 @@ impl App {
             }
             SessionSelection::Fork(path) => {
                 otel_manager.counter("codex.thread.fork", 1, &[("source", "cli_subcommand")]);
-                let forked = thread_manager
-                    .fork_thread(usize::MAX, config.clone(), path.clone(), false)
-                    .await
-                    .wrap_err_with(|| {
-                        let path_display = path.display();
-                        format!("Failed to fork session from {path_display}")
-                    })?;
+                let fork_fut = async {
+                    thread_manager
+                        .fork_thread(usize::MAX, config.clone(), path.clone(), false)
+                        .await
+                        .wrap_err_with(|| {
+                            let path_display = path.display();
+                            format!("Failed to fork session from {path_display}")
+                        })
+                };
+                let Some(forked) = Self::await_startup_task_or_cancel(tui, fork_fut).await? else {
+                    return Ok(AppExitInfo {
+                        token_usage: TokenUsage::default(),
+                        thread_id: None,
+                        thread_name: None,
+                        update_action: None,
+                        exit_reason: ExitReason::UserRequested,
+                    });
+                };
                 let init = crate::chatwidget::ChatWidgetInit {
                     config: config.clone(),
                     frame_requester: tui.frame_requester(),
@@ -1478,15 +1560,24 @@ impl App {
                             self.chat_widget.thread_id(),
                             self.chat_widget.thread_name(),
                         );
-                        match self
-                            .server
-                            .resume_thread_from_rollout(
-                                resume_config.clone(),
-                                path.clone(),
-                                self.auth_manager.clone(),
-                            )
-                            .await
-                        {
+                        let resume_fut = async {
+                            Ok(self
+                                .server
+                                .resume_thread_from_rollout(
+                                    resume_config.clone(),
+                                    path.clone(),
+                                    self.auth_manager.clone(),
+                                )
+                                .await)
+                        };
+                        let Some(resumed) =
+                            Self::await_startup_task_or_cancel(tui, resume_fut).await?
+                        else {
+                            self.chat_widget
+                                .add_info_message("Resume cancelled.".to_string(), None);
+                            return Ok(AppRunControl::Continue);
+                        };
+                        match resumed {
                             Ok(resumed) => {
                                 self.shutdown_current_thread().await;
                                 self.config = resume_config;
@@ -1545,11 +1636,21 @@ impl App {
                     // Fresh threads expose a precomputed path, but the file is
                     // materialized lazily on first user message.
                     if path.exists() {
-                        match self
-                            .server
-                            .fork_thread(usize::MAX, self.config.clone(), path.clone(), false)
-                            .await
-                        {
+                        let fork_fut = async {
+                            Ok(self
+                                .server
+                                .fork_thread(usize::MAX, self.config.clone(), path.clone(), false)
+                                .await)
+                        };
+                        let Some(forked) =
+                            Self::await_startup_task_or_cancel(tui, fork_fut).await?
+                        else {
+                            self.chat_widget
+                                .add_info_message("Fork cancelled.".to_string(), None);
+                            tui.frame_requester().schedule_frame();
+                            return Ok(AppRunControl::Continue);
+                        };
+                        match forked {
                             Ok(forked) => {
                                 self.shutdown_current_thread().await;
                                 let init = self.chatwidget_init_for_forked_or_resumed_thread(
@@ -2927,6 +3028,7 @@ mod tests {
     use std::sync::atomic::AtomicBool;
     use tempfile::tempdir;
     use tokio::time;
+    use tokio::time::timeout;
 
     #[test]
     fn normalize_harness_overrides_resolves_relative_add_dirs() -> Result<()> {
@@ -3055,6 +3157,82 @@ mod tests {
             .expect("timed out waiting for second event")
             .expect("channel closed unexpectedly");
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_wait_helper_returns_none_on_escape() -> Result<()> {
+        let mut events = tokio_stream::iter([TuiEvent::Key(KeyEvent::new(
+            KeyCode::Esc,
+            KeyModifiers::NONE,
+        ))]);
+        let future = std::future::pending::<Result<()>>();
+        let result = timeout(
+            Duration::from_millis(50),
+            App::await_startup_task_or_cancel_with_events(&mut events, future),
+        )
+        .await
+        .expect("await helper should return on Esc")?;
+        assert_eq!(result, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_wait_helper_returns_none_on_ctrl_c() -> Result<()> {
+        let mut events = tokio_stream::iter([TuiEvent::Key(KeyEvent::new(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+        ))]);
+        let future = std::future::pending::<Result<()>>();
+        let result = timeout(
+            Duration::from_millis(50),
+            App::await_startup_task_or_cancel_with_events(&mut events, future),
+        )
+        .await
+        .expect("await helper should return on Ctrl+C")?;
+        assert_eq!(result, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_wait_helper_returns_none_on_ctrl_d() -> Result<()> {
+        let mut events = tokio_stream::iter([TuiEvent::Key(KeyEvent::new(
+            KeyCode::Char('d'),
+            KeyModifiers::CONTROL,
+        ))]);
+        let future = std::future::pending::<Result<()>>();
+        let result = timeout(
+            Duration::from_millis(50),
+            App::await_startup_task_or_cancel_with_events(&mut events, future),
+        )
+        .await
+        .expect("await helper should return on Ctrl+D")?;
+        assert_eq!(result, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_wait_helper_errors_when_event_stream_ends() -> Result<()> {
+        let mut events = tokio_stream::empty::<TuiEvent>();
+        let future = std::future::pending::<Result<()>>();
+        let err = App::await_startup_task_or_cancel_with_events(&mut events, future)
+            .await
+            .expect_err("expected error when event stream ends");
+        assert!(
+            err.to_string().contains("event stream ended"),
+            "unexpected error: {err}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_wait_helper_returns_value_when_future_completes() -> Result<()> {
+        let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<TuiEvent>();
+        let _tx = tx;
+        let mut events = tokio_stream::wrappers::UnboundedReceiverStream::new(rx);
+        let future = async { Ok::<_, color_eyre::Report>(123u32) };
+        let result = App::await_startup_task_or_cancel_with_events(&mut events, future).await?;
+        assert_eq!(result, Some(123));
         Ok(())
     }
 

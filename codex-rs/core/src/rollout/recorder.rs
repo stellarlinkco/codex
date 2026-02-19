@@ -15,7 +15,9 @@ use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::format_description::well_known::Rfc3339;
 use time::macros::format_description;
+use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncWriteExt;
+use tokio::io::BufReader;
 use tokio::sync::mpsc::Sender;
 use tokio::sync::mpsc::{self};
 use tokio::sync::oneshot;
@@ -515,56 +517,54 @@ impl RolloutRecorder {
         path: &Path,
     ) -> std::io::Result<(Vec<RolloutItem>, Option<ThreadId>, usize)> {
         trace!("Resuming rollout from {path:?}");
-        let text = tokio::fs::read_to_string(path).await?;
-        if text.trim().is_empty() {
-            return Err(IoError::other("empty session file"));
-        }
+        let file = tokio::fs::File::open(path).await?;
+        let mut lines = BufReader::new(file).lines();
 
         let mut items: Vec<RolloutItem> = Vec::new();
         let mut thread_id: Option<ThreadId> = None;
         let mut parse_errors = 0usize;
-        for line in text.lines() {
+        let mut saw_non_empty_line = false;
+        while let Some(line) = lines.next_line().await? {
             if line.trim().is_empty() {
                 continue;
             }
-            let v: Value = match serde_json::from_str(line) {
-                Ok(v) => v,
-                Err(e) => {
-                    warn!("failed to parse line as JSON: {line:?}, error: {e}");
+            saw_non_empty_line = true;
+
+            // Parse the rollout line structure
+            let rollout_line = match serde_json::from_str::<RolloutLine>(&line) {
+                Ok(line) => line,
+                Err(err) => {
+                    match err.classify() {
+                        serde_json::error::Category::Syntax | serde_json::error::Category::Eof => {
+                            warn!("failed to parse line as JSON: {line:?}, error: {err}");
+                        }
+                        _ => {
+                            trace!("failed to parse rollout line: {err}");
+                        }
+                    }
                     parse_errors = parse_errors.saturating_add(1);
                     continue;
                 }
             };
 
-            // Parse the rollout line structure
-            match serde_json::from_value::<RolloutLine>(v.clone()) {
-                Ok(rollout_line) => match rollout_line.item {
-                    RolloutItem::SessionMeta(session_meta_line) => {
-                        // Use the FIRST SessionMeta encountered in the file as the canonical
-                        // thread id and main session information. Keep all items intact.
-                        if thread_id.is_none() {
-                            thread_id = Some(session_meta_line.meta.id);
-                        }
-                        items.push(RolloutItem::SessionMeta(session_meta_line));
+            match rollout_line.item {
+                RolloutItem::SessionMeta(session_meta_line) => {
+                    // Use the FIRST SessionMeta encountered in the file as the canonical
+                    // thread id and main session information. Keep all items intact.
+                    if thread_id.is_none() {
+                        thread_id = Some(session_meta_line.meta.id);
                     }
-                    RolloutItem::ResponseItem(item) => {
-                        items.push(RolloutItem::ResponseItem(item));
-                    }
-                    RolloutItem::Compacted(item) => {
-                        items.push(RolloutItem::Compacted(item));
-                    }
-                    RolloutItem::TurnContext(item) => {
-                        items.push(RolloutItem::TurnContext(item));
-                    }
-                    RolloutItem::EventMsg(_ev) => {
-                        items.push(RolloutItem::EventMsg(_ev));
-                    }
-                },
-                Err(e) => {
-                    trace!("failed to parse rollout line: {e}");
-                    parse_errors = parse_errors.saturating_add(1);
+                    items.push(RolloutItem::SessionMeta(session_meta_line));
                 }
-            }
+                RolloutItem::ResponseItem(item) => items.push(RolloutItem::ResponseItem(item)),
+                RolloutItem::Compacted(item) => items.push(RolloutItem::Compacted(item)),
+                RolloutItem::TurnContext(item) => items.push(RolloutItem::TurnContext(item)),
+                RolloutItem::EventMsg(ev) => items.push(RolloutItem::EventMsg(ev)),
+            };
+        }
+
+        if !saw_non_empty_line {
+            return Err(IoError::other("empty session file"));
         }
 
         tracing::debug!(
@@ -1038,6 +1038,72 @@ mod tests {
         });
         writeln!(file, "{user_event}")?;
         Ok(path)
+    }
+
+    #[tokio::test]
+    async fn load_rollout_items_errors_on_empty_file() -> std::io::Result<()> {
+        let root = TempDir::new().expect("temp dir");
+        let path = root.path().join("empty.jsonl");
+        fs::write(&path, " \n\n\t")?;
+        let err = RolloutRecorder::load_rollout_items(&path)
+            .await
+            .expect_err("expected empty session file error");
+        assert_eq!(err.to_string(), "empty session file");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn load_rollout_items_counts_parse_errors_and_uses_first_session_meta()
+    -> std::io::Result<()> {
+        let root = TempDir::new().expect("temp dir");
+        let path = root.path().join("mixed.jsonl");
+        let ts = "2025-01-03T00:00:00Z";
+        let first = Uuid::new_v4();
+        let second = Uuid::new_v4();
+
+        let meta = |uuid| {
+            serde_json::json!({
+                "timestamp": ts,
+                "type": "session_meta",
+                "payload": {
+                    "id": uuid,
+                    "timestamp": ts,
+                    "cwd": ".",
+                    "originator": "test_originator",
+                    "cli_version": "test_version",
+                    "source": "cli",
+                    "model_provider": "test-provider",
+                },
+            })
+        };
+        let user_event = serde_json::json!({
+            "timestamp": ts,
+            "type": "event_msg",
+            "payload": {
+                "type": "user_message",
+                "message": "Hello from user",
+                "kind": "plain",
+            },
+        });
+
+        let mut file = File::create(&path)?;
+        writeln!(file, "{{")?;
+        writeln!(file, "{}", meta(first))?;
+        writeln!(file, "{user_event}")?;
+        write!(file, "{}", meta(second))?;
+        drop(file);
+
+        let (items, thread_id, parse_errors) = RolloutRecorder::load_rollout_items(&path).await?;
+        assert_eq!(parse_errors, 1);
+        assert_eq!(
+            thread_id,
+            Some(ThreadId::try_from(first.to_string()).expect("thread id"))
+        );
+        assert_eq!(items.len(), 3);
+        assert!(matches!(items.first(), Some(RolloutItem::SessionMeta(_))));
+        assert!(matches!(items.get(1), Some(RolloutItem::EventMsg(_))));
+        assert!(matches!(items.get(2), Some(RolloutItem::SessionMeta(_))));
+        Ok(())
     }
 
     #[tokio::test]

@@ -3946,6 +3946,32 @@ impl ChatWidget {
             // `id: None` indicates a synthetic/fake id coming from replay.
             self.dispatch_event_msg(None, msg, true);
         }
+
+        // If the rollout log ended mid-turn (for example after a crash/kill),
+        // replay can leave the UI in an in-progress state even though there is
+        // no live work to interrupt. Clear stale state so resume remains usable
+        // (and quit shortcuts work as expected).
+        if self.agent_turn_running || self.mcp_startup_status.is_some() {
+            self.recover_from_incomplete_replayed_work();
+        }
+    }
+
+    fn recover_from_incomplete_replayed_work(&mut self) {
+        self.flush_answer_stream_with_separator();
+        if let Some(mut controller) = self.plan_stream_controller.take()
+            && let Some(cell) = controller.finalize()
+        {
+            self.add_boxed_history(cell);
+        }
+        self.flush_unified_exec_wait_streak();
+        self.mcp_startup_status = None;
+        self.finalize_turn();
+        self.clear_unified_exec_processes();
+        self.add_to_history(history_cell::new_warning_event(
+            "Recovered an incomplete turn while resuming; cleared stale in-progress state."
+                .to_string(),
+        ));
+        self.request_redraw();
     }
 
     pub(crate) fn handle_codex_event(&mut self, event: Event) {
@@ -4265,6 +4291,9 @@ impl ChatWidget {
                 exec.mark_failed();
             } else if let Some(tool) = cell.as_any_mut().downcast_mut::<McpToolCallCell>() {
                 tool.mark_failed();
+            } else if let Some(web_search) = cell.as_any_mut().downcast_mut::<WebSearchCell>() {
+                // Replay recovery/interrupt paths should not leave a stale searching spinner behind.
+                web_search.complete();
             }
             self.add_boxed_history(cell);
         }
