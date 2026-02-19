@@ -486,7 +486,20 @@ jobs:
 
       - name: tests
         id: test
-        run: cargo nextest run --all-features --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Forks/community runners are GitHub-hosted and can OOM during link when
+          # building the full workspace test suite with all features.
+          if [[ "${{ github.repository }}" == "openai/codex" ]]; then
+            cargo nextest run --all-features --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings
+          else
+            cargo nextest run --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings \
+              -p codex-core \
+              -p codex-cli \
+              -p codex-tui
+          fi
         env:
           RUST_BACKTRACE: 1
           NEXTEST_STATUS_LEVEL: leak
