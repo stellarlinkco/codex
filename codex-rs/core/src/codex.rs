@@ -2447,7 +2447,12 @@ impl Session {
         rollout_items: &[RolloutItem],
     ) -> Vec<ResponseItem> {
         let mut history = ContextManager::new();
-        for item in rollout_items {
+        for (idx, item) in rollout_items.iter().enumerate() {
+            // Avoid starving the executor when rebuilding very large histories (e.g. `codex resume`
+            // on long sessions). This keeps the TUI responsive so users can interrupt startup.
+            if idx % 256 == 0 {
+                tokio::task::yield_now().await;
+            }
             match item {
                 RolloutItem::ResponseItem(response_item) => {
                     history.record_items(
