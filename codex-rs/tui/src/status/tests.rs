@@ -24,11 +24,14 @@ use std::path::PathBuf;
 use tempfile::TempDir;
 
 async fn test_config(temp_home: &TempDir) -> Config {
-    ConfigBuilder::default()
+    let mut config = ConfigBuilder::default()
         .codex_home(temp_home.path().to_path_buf())
         .build()
         .await
-        .expect("load config")
+        .expect("load config");
+    // Keep snapshots deterministic even when the host exports OPENAI_BASE_URL.
+    config.model_provider.base_url = None;
+    config
 }
 
 fn test_auth_manager(config: &Config) -> AuthManager {

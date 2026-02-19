@@ -2395,11 +2395,14 @@ mod tests {
     const SMALL_PNG_BASE64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==";
     async fn test_config() -> Config {
         let codex_home = std::env::temp_dir();
-        ConfigBuilder::default()
+        let mut config = ConfigBuilder::default()
             .codex_home(codex_home.clone())
             .build()
             .await
-            .expect("config")
+            .expect("config");
+        // Keep snapshots deterministic even when the host exports OPENAI_BASE_URL.
+        config.model_provider.base_url = None;
+        config
     }
 
     fn render_lines(lines: &[Line<'static>]) -> Vec<String> {
