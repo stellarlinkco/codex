@@ -23,6 +23,7 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::SystemTime;
 use tokio::fs;
 use tokio::time::Duration;
 use tokio::time::Instant;
@@ -55,10 +56,24 @@ async fn wait_for_snapshot(codex_home: &Path) -> Result<PathBuf> {
     let snapshot_dir = codex_home.join("shell_snapshots");
     let deadline = Instant::now() + SNAPSHOT_WAIT_TIMEOUT;
     loop {
-        if let Ok(mut entries) = fs::read_dir(&snapshot_dir).await
-            && let Some(entry) = entries.next_entry().await?
-        {
-            return Ok(entry.path());
+        if let Ok(mut entries) = fs::read_dir(&snapshot_dir).await {
+            let mut newest: Option<(SystemTime, PathBuf)> = None;
+            while let Some(entry) = entries.next_entry().await? {
+                let modified = entry
+                    .metadata()
+                    .await
+                    .and_then(|metadata| metadata.modified())
+                    .unwrap_or(SystemTime::UNIX_EPOCH);
+                match newest.as_ref() {
+                    Some((newest_modified, _)) if *newest_modified >= modified => {}
+                    _ => {
+                        newest = Some((modified, entry.path()));
+                    }
+                }
+            }
+            if let Some((_modified, path)) = newest {
+                return Ok(path);
+            }
         }
 
         if Instant::now() >= deadline {
@@ -101,7 +116,7 @@ fn snapshot_override_content_for_policy_test() -> String {
 
 fn command_asserting_policy_after_snapshot() -> String {
     format!(
-        "if [ \"${{{SNAPSHOT_MARKER_VAR}:-}}\" = \"{SNAPSHOT_MARKER_VALUE}\" ] && [ \"$PATH\" != \"{SNAPSHOT_PATH_FOR_TEST}\" ]; then case \":$PATH:\" in *\":{POLICY_PATH_FOR_TEST}:\"*) printf \"{POLICY_SUCCESS_OUTPUT}\" ;; *) printf \"path=%s marker=%s\" \"$PATH\" \"${{{SNAPSHOT_MARKER_VAR}:-missing}}\" ;; esac; else printf \"path=%s marker=%s\" \"$PATH\" \"${{{SNAPSHOT_MARKER_VAR}:-missing}}\"; fi"
+        "if [ \"${{{SNAPSHOT_MARKER_VAR}:-}}\" = \"{SNAPSHOT_MARKER_VALUE}\" ] && [ \"$PATH\" != \"{SNAPSHOT_PATH_FOR_TEST}\" ]; then case \":$PATH:\" in *\":{POLICY_PATH_FOR_TEST}:\"*) printf \"{POLICY_SUCCESS_OUTPUT}\" ;; *) printf \"shell0=%s path=%s marker=%s\" \"$0\" \"$PATH\" \"${{{SNAPSHOT_MARKER_VAR}:-missing}}\" ;; esac; else printf \"shell0=%s path=%s marker=%s\" \"$0\" \"$PATH\" \"${{{SNAPSHOT_MARKER_VAR}:-missing}}\"; fi"
     )
 }
 
