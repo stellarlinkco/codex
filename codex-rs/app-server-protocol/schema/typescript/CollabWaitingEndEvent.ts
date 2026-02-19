@@ -16,4 +16,8 @@ call_id: string,
 /**
  * Last known status of the receiver agents reported to the sender agent.
  */
-statuses: { [key in ThreadId]?: AgentStatus }, };
+statuses: { [key in ThreadId]?: AgentStatus }, 
+/**
+ * Optional display name for receiver agents keyed by thread ID.
+ */
+receiver_names?: { [key in ThreadId]?: string }, };

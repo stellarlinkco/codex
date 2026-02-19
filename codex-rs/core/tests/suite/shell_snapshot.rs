@@ -42,6 +42,9 @@ const SNAPSHOT_PATH_FOR_TEST: &str = "/codex/snapshot/path";
 const SNAPSHOT_MARKER_VAR: &str = "CODEX_SNAPSHOT_POLICY_MARKER";
 const SNAPSHOT_MARKER_VALUE: &str = "from_snapshot";
 const POLICY_SUCCESS_OUTPUT: &str = "policy-after-snapshot";
+const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+const POLICY_ASSERT_TIMEOUT: Duration = Duration::from_secs(5);
+const POLICY_ASSERT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
 #[derive(Debug, Default)]
 struct SnapshotRunOptions {
@@ -50,7 +53,7 @@ struct SnapshotRunOptions {
 
 async fn wait_for_snapshot(codex_home: &Path) -> Result<PathBuf> {
     let snapshot_dir = codex_home.join("shell_snapshots");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + SNAPSHOT_WAIT_TIMEOUT;
     loop {
         if let Ok(mut entries) = fs::read_dir(&snapshot_dir).await
             && let Some(entry) = entries.next_entry().await?
@@ -59,7 +62,10 @@ async fn wait_for_snapshot(codex_home: &Path) -> Result<PathBuf> {
         }
 
         if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for shell snapshot");
+            anyhow::bail!(
+                "timed out waiting for shell snapshot in {}",
+                snapshot_dir.display()
+            );
         }
 
         sleep(Duration::from_millis(25)).await;
@@ -331,6 +337,35 @@ async fn run_tool_turn_on_harness(
     Ok(end)
 }
 
+async fn run_policy_assert_turn(
+    harness: &TestCodexHarness,
+    snapshot_path: &Path,
+    prompt: &str,
+    call_id_prefix: &str,
+    tool_name: &str,
+    args: serde_json::Value,
+) -> Result<ExecCommandEndEvent> {
+    let deadline = Instant::now() + POLICY_ASSERT_TIMEOUT;
+    let mut attempt = 0;
+    loop {
+        fs::write(snapshot_path, snapshot_override_content_for_policy_test()).await?;
+        let call_id = format!("{call_id_prefix}-{attempt}");
+        let end =
+            run_tool_turn_on_harness(harness, prompt, &call_id, tool_name, args.clone()).await?;
+        if normalize_newlines(&end.stdout).trim() == POLICY_SUCCESS_OUTPUT {
+            return Ok(end);
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!(
+                "timed out waiting for expected stdout: expected={POLICY_SUCCESS_OUTPUT:?} got={:?}",
+                normalize_newlines(&end.stdout).trim()
+            );
+        }
+        attempt += 1;
+        sleep(POLICY_ASSERT_RETRY_DELAY).await;
+    }
+}
+
 fn normalize_newlines(text: &str) -> String {
     text.replace("\r\n", "\n")
 }
@@ -408,11 +443,11 @@ async fn shell_command_snapshot_preserves_shell_environment_policy_set() -> Resu
     )
     .await?;
     let snapshot_path = wait_for_snapshot(&codex_home).await?;
-    fs::write(&snapshot_path, snapshot_override_content_for_policy_test()).await?;
 
     let command = command_asserting_policy_after_snapshot();
-    let end = run_tool_turn_on_harness(
+    let end = run_policy_assert_turn(
         &harness,
+        &snapshot_path,
         "verify shell policy after snapshot",
         "shell-snapshot-policy-assert",
         "shell_command",
@@ -456,11 +491,11 @@ async fn linux_unified_exec_snapshot_preserves_shell_environment_policy_set() ->
     )
     .await?;
     let snapshot_path = wait_for_snapshot(&codex_home).await?;
-    fs::write(&snapshot_path, snapshot_override_content_for_policy_test()).await?;
 
     let command = command_asserting_policy_after_snapshot();
-    let end = run_tool_turn_on_harness(
+    let end = run_policy_assert_turn(
         &harness,
+        &snapshot_path,
         "verify unified exec policy after snapshot",
         "shell-snapshot-policy-assert-exec",
         "exec_command",

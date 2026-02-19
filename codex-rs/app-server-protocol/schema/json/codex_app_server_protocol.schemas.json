@@ -4698,6 +4698,13 @@
               "description": "ID of the waiting call.",
               "type": "string"
             },
+            "receiver_names": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Optional display name for receiver agents keyed by thread ID.",
+              "type": "object"
+            },
             "receiver_thread_ids": {
               "description": "Thread ID of the receivers.",
               "items": {
@@ -4736,6 +4743,13 @@
             "call_id": {
               "description": "ID of the waiting call.",
               "type": "string"
+            },
+            "receiver_names": {
+              "additionalProperties": {
+                "type": "string"
+              },
+              "description": "Optional display name for receiver agents keyed by thread ID.",
+              "type": "object"
             },
             "sender_thread_id": {
               "allOf": [
@@ -10922,7 +10936,10 @@
           "sendInput",
           "resumeAgent",
           "wait",
-          "closeAgent"
+          "closeAgent",
+          "spawnTeam",
+          "waitTeam",
+          "closeTeam"
         ],
         "type": "string"
       },

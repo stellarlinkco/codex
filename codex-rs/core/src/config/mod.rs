@@ -234,6 +234,9 @@ pub struct Config {
     /// If unset the feature is disabled.
     pub notify: Option<Vec<String>>,
 
+    /// Optional command hooks that run at specific lifecycle events.
+    pub hooks: Option<HooksToml>,
+
     /// TUI notifications preference. When set, the TUI will send terminal notifications on
     /// approvals and turn completions when not focused.
     pub tui_notifications: Notifications,
@@ -915,6 +918,10 @@ pub struct ConfigToml {
     #[serde(default)]
     pub notify: Option<Vec<String>>,
 
+    /// Optional command hooks that run at specific lifecycle events.
+    #[serde(default)]
+    pub hooks: Option<HooksToml>,
+
     /// System instructions.
     pub instructions: Option<String>,
 
@@ -1167,6 +1174,106 @@ pub struct ToolsToml {
     /// Enable the `view_image` tool that lets the agent attach local images.
     #[serde(default)]
     pub view_image: Option<bool>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct HookMatcherToml {
+    /// Exact match on tool name.
+    pub tool_name: Option<String>,
+    /// Regex match on tool name.
+    pub tool_name_regex: Option<String>,
+    /// Regex match on the submitted user prompt text.
+    pub prompt_regex: Option<String>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct HookCommandToml {
+    /// Optional hook display name used in logs.
+    pub name: Option<String>,
+    /// Command argv to execute without a shell wrapper.
+    pub command: Vec<String>,
+    /// Optional timeout in milliseconds.
+    pub timeout_ms: Option<u64>,
+    /// Run this hook asynchronously (fire-and-forget).
+    #[serde(default)]
+    pub run_async: bool,
+    /// Treat execution failures as aborting errors.
+    #[serde(default)]
+    pub abort_on_error: bool,
+    /// Optional matcher restricting when this hook runs.
+    #[serde(default)]
+    pub matcher: Option<HookMatcherToml>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct HooksToml {
+    #[serde(default)]
+    pub session_start: Vec<HookCommandToml>,
+    #[serde(default)]
+    pub session_end: Vec<HookCommandToml>,
+    #[serde(default)]
+    pub user_prompt_submit: Vec<HookCommandToml>,
+    #[serde(default)]
+    pub pre_tool_use: Vec<HookCommandToml>,
+    #[serde(default)]
+    pub post_tool_use: Vec<HookCommandToml>,
+    #[serde(default)]
+    pub stop: Vec<HookCommandToml>,
+    #[serde(default)]
+    pub subagent_stop: Vec<HookCommandToml>,
+    #[serde(default)]
+    pub pre_compact: Vec<HookCommandToml>,
+    #[serde(default)]
+    pub after_agent: Vec<HookCommandToml>,
+    #[serde(default)]
+    pub after_tool_use: Vec<HookCommandToml>,
+}
+
+impl From<HookMatcherToml> for codex_hooks::HookMatcherConfig {
+    fn from(value: HookMatcherToml) -> Self {
+        Self {
+            tool_name: value.tool_name,
+            tool_name_regex: value.tool_name_regex,
+            prompt_regex: value.prompt_regex,
+        }
+    }
+}
+
+impl From<HookCommandToml> for codex_hooks::CommandHookConfig {
+    fn from(value: HookCommandToml) -> Self {
+        Self {
+            name: value.name,
+            command: value.command,
+            timeout_ms: value.timeout_ms,
+            run_async: value.run_async,
+            abort_on_error: value.abort_on_error,
+            matcher: value.matcher.map(Into::into).unwrap_or_default(),
+        }
+    }
+}
+
+impl From<HooksToml> for codex_hooks::CommandHooksConfig {
+    fn from(value: HooksToml) -> Self {
+        Self {
+            session_start: value.session_start.into_iter().map(Into::into).collect(),
+            session_end: value.session_end.into_iter().map(Into::into).collect(),
+            user_prompt_submit: value
+                .user_prompt_submit
+                .into_iter()
+                .map(Into::into)
+                .collect(),
+            pre_tool_use: value.pre_tool_use.into_iter().map(Into::into).collect(),
+            post_tool_use: value.post_tool_use.into_iter().map(Into::into).collect(),
+            stop: value.stop.into_iter().map(Into::into).collect(),
+            subagent_stop: value.subagent_stop.into_iter().map(Into::into).collect(),
+            pre_compact: value.pre_compact.into_iter().map(Into::into).collect(),
+            after_agent: value.after_agent.into_iter().map(Into::into).collect(),
+            after_tool_use: value.after_tool_use.into_iter().map(Into::into).collect(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -1858,6 +1965,7 @@ impl Config {
             enforce_residency: enforce_residency.value,
             did_user_set_custom_approval_policy_or_sandbox_mode,
             notify: cfg.notify,
+            hooks: cfg.hooks,
             user_instructions,
             base_instructions,
             personality,
@@ -2672,6 +2780,54 @@ trust_level = "trusted"
         )?;
 
         assert_eq!(config.feedback_enabled, true);
+
+        Ok(())
+    }
+
+    #[test]
+    fn config_loads_hooks_table() -> std::io::Result<()> {
+        let codex_home = TempDir::new()?;
+        let cfg = ConfigToml {
+            hooks: Some(HooksToml {
+                pre_tool_use: vec![HookCommandToml {
+                    name: Some("check-tool".to_string()),
+                    command: vec!["echo".to_string(), "ok".to_string()],
+                    timeout_ms: Some(5000),
+                    run_async: false,
+                    abort_on_error: true,
+                    matcher: Some(HookMatcherToml {
+                        tool_name: Some("shell".to_string()),
+                        tool_name_regex: None,
+                        prompt_regex: None,
+                    }),
+                }],
+                ..HooksToml::default()
+            }),
+            ..Default::default()
+        };
+
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+        let hooks = config.hooks.expect("hooks should be loaded");
+        assert_eq!(hooks.pre_tool_use.len(), 1);
+        assert_eq!(
+            hooks.pre_tool_use[0],
+            HookCommandToml {
+                name: Some("check-tool".to_string()),
+                command: vec!["echo".to_string(), "ok".to_string()],
+                timeout_ms: Some(5000),
+                run_async: false,
+                abort_on_error: true,
+                matcher: Some(HookMatcherToml {
+                    tool_name: Some("shell".to_string()),
+                    tool_name_regex: None,
+                    prompt_regex: None,
+                }),
+            }
+        );
 
         Ok(())
     }
@@ -4306,6 +4462,7 @@ model_verbosity = "high"
                 did_user_set_custom_approval_policy_or_sandbox_mode: true,
                 user_instructions: None,
                 notify: None,
+                hooks: None,
                 cwd: fixture.cwd(),
                 cli_auth_credentials_store_mode: Default::default(),
                 mcp_servers: Constrained::allow_any(HashMap::new()),
@@ -4420,6 +4577,7 @@ model_verbosity = "high"
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             user_instructions: None,
             notify: None,
+            hooks: None,
             cwd: fixture.cwd(),
             cli_auth_credentials_store_mode: Default::default(),
             mcp_servers: Constrained::allow_any(HashMap::new()),
@@ -4532,6 +4690,7 @@ model_verbosity = "high"
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             user_instructions: None,
             notify: None,
+            hooks: None,
             cwd: fixture.cwd(),
             cli_auth_credentials_store_mode: Default::default(),
             mcp_servers: Constrained::allow_any(HashMap::new()),
@@ -4630,6 +4789,7 @@ model_verbosity = "high"
             did_user_set_custom_approval_policy_or_sandbox_mode: true,
             user_instructions: None,
             notify: None,
+            hooks: None,
             cwd: fixture.cwd(),
             cli_auth_credentials_store_mode: Default::default(),
             mcp_servers: Constrained::allow_any(HashMap::new()),

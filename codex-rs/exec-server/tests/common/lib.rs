@@ -26,6 +26,17 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use tokio::process::Command;
 
+pub fn dotslash_available() -> bool {
+    std::process::Command::new("dotslash")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+}
+
 pub async fn create_transport<P>(
     codex_home: P,
     dotslash_cache: P,
@@ -33,6 +44,15 @@ pub async fn create_transport<P>(
 where
     P: AsRef<Path>,
 {
+    if !dotslash_available() {
+        return create_transport_with_shell_path(
+            codex_home,
+            dotslash_cache,
+            Path::new("/bin/bash"),
+        )
+        .await;
+    }
+
     // `bash` is a test resource rather than a binary target, so we must use
     // `find_resource!` to locate it instead of `cargo_bin()`.
     let bash = find_resource!("../suite/bash")?;

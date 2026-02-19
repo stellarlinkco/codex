@@ -1937,6 +1937,7 @@ dependencies = [
  "codex-protocol",
  "futures",
  "pretty_assertions",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

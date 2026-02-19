@@ -39,6 +39,22 @@ use codex_protocol::protocol::WebSearchEndEvent;
 use std::collections::HashMap;
 use uuid::Uuid;
 
+const TEAM_SPAWN_CALL_PREFIX: &str = "team/spawn:";
+const TEAM_WAIT_CALL_PREFIX: &str = "team/wait:";
+const TEAM_CLOSE_CALL_PREFIX: &str = "team/close:";
+
+fn collab_wait_tool_from_call_id(call_id: &str) -> CollabAgentTool {
+    if call_id.starts_with(TEAM_SPAWN_CALL_PREFIX) {
+        CollabAgentTool::SpawnTeam
+    } else if call_id.starts_with(TEAM_WAIT_CALL_PREFIX) {
+        CollabAgentTool::WaitTeam
+    } else if call_id.starts_with(TEAM_CLOSE_CALL_PREFIX) {
+        CollabAgentTool::CloseTeam
+    } else {
+        CollabAgentTool::Wait
+    }
+}
+
 #[cfg(test)]
 use codex_protocol::protocol::ExecCommandStatus as CoreExecCommandStatus;
 #[cfg(test)]
@@ -411,7 +427,7 @@ impl ThreadHistoryBuilder {
             .items
             .push(ThreadItem::CollabAgentToolCall {
                 id: payload.call_id.clone(),
-                tool: CollabAgentTool::Wait,
+                tool: collab_wait_tool_from_call_id(&payload.call_id),
                 status,
                 sender_thread_id: payload.sender_thread_id.to_string(),
                 receiver_thread_ids,
@@ -1604,6 +1620,55 @@ mod tests {
                 prompt: None,
                 agents_states: [(
                     "00000000-0000-0000-0000-000000000002".into(),
+                    CollabAgentState {
+                        status: crate::protocol::v2::CollabAgentStatus::Completed,
+                        message: None,
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            }
+        );
+    }
+
+    #[test]
+    fn reconstructs_prefixed_team_wait_item() {
+        let receiver = ThreadId::try_from("00000000-0000-0000-0000-000000000003")
+            .expect("valid receiver thread id");
+        let events = vec![
+            EventMsg::UserMessage(UserMessageEvent {
+                message: "wait team".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            }),
+            EventMsg::CollabWaitingEnd(codex_protocol::protocol::CollabWaitingEndEvent {
+                sender_thread_id: ThreadId::try_from("00000000-0000-0000-0000-000000000001")
+                    .expect("valid sender thread id"),
+                call_id: format!("{TEAM_WAIT_CALL_PREFIX}wait-1"),
+                statuses: HashMap::from([(receiver, AgentStatus::Completed(None))]),
+                receiver_names: HashMap::new(),
+            }),
+        ];
+
+        let items = events
+            .into_iter()
+            .map(RolloutItem::EventMsg)
+            .collect::<Vec<_>>();
+        let turns = build_turns_from_rollout_items(&items);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].items.len(), 2);
+        assert_eq!(
+            turns[0].items[1],
+            ThreadItem::CollabAgentToolCall {
+                id: format!("{TEAM_WAIT_CALL_PREFIX}wait-1"),
+                tool: CollabAgentTool::WaitTeam,
+                status: CollabAgentToolCallStatus::Completed,
+                sender_thread_id: "00000000-0000-0000-0000-000000000001".into(),
+                receiver_thread_ids: vec!["00000000-0000-0000-0000-000000000003".into()],
+                prompt: None,
+                agents_states: [(
+                    "00000000-0000-0000-0000-000000000003".into(),
                     CollabAgentState {
                         status: crate::protocol::v2::CollabAgentStatus::Completed,
                         message: None,

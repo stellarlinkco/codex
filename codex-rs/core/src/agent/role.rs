@@ -268,15 +268,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn apply_explorer_role_sets_model_and_adds_session_flags_layer() {
+    async fn apply_explorer_role_keeps_model_and_adds_session_flags_layer() {
         let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
         let before_layers = session_flags_layer_count(&config);
+        let model_before = config.model.clone();
 
         apply_role_to_config(&mut config, Some("explorer"))
             .await
             .expect("explorer role should apply");
 
-        assert_eq!(config.model.as_deref(), Some("gpt-5.1-codex-mini"));
+        assert_eq!(config.model, model_before);
         assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::Medium));
         assert_eq!(session_flags_layer_count(&config), before_layers + 1);
     }

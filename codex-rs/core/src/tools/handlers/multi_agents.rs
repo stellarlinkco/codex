@@ -31,8 +31,18 @@ use codex_protocol::protocol::CollabWaitingEndEvent;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::user_input::UserInput;
+use futures::FutureExt;
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use serde::Deserialize;
 use serde::Serialize;
+use std::collections::HashMap;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::time::Duration;
+use tokio::sync::watch::Receiver;
+use tokio::time::Instant;
+use tokio::time::timeout_at;
 
 pub struct MultiAgentHandler;
 
@@ -40,10 +50,37 @@ pub struct MultiAgentHandler;
 pub(crate) const MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
 pub(crate) const DEFAULT_WAIT_TIMEOUT_MS: i64 = 30_000;
 pub(crate) const MAX_WAIT_TIMEOUT_MS: i64 = 300_000;
+pub(crate) const TEAM_SPAWN_CALL_PREFIX: &str = "team/spawn:";
+pub(crate) const TEAM_WAIT_CALL_PREFIX: &str = "team/wait:";
+pub(crate) const TEAM_CLOSE_CALL_PREFIX: &str = "team/close:";
 
 #[derive(Debug, Deserialize)]
 struct CloseAgentArgs {
     id: String,
+}
+
+#[derive(Debug, Clone)]
+struct TeamMember {
+    name: String,
+    agent_id: ThreadId,
+}
+
+#[derive(Debug, Clone)]
+struct TeamRecord {
+    members: Vec<TeamMember>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WaitMode {
+    Any,
+    All,
+}
+
+type TeamRegistry = HashMap<ThreadId, HashMap<String, TeamRecord>>;
+
+fn team_registry() -> &'static Mutex<TeamRegistry> {
+    static REGISTRY: OnceLock<Mutex<TeamRegistry>> = OnceLock::new();
+    REGISTRY.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
 #[async_trait]
@@ -81,6 +118,9 @@ impl ToolHandler for MultiAgentHandler {
             "resume_agent" => resume_agent::handle(session, turn, call_id, arguments).await,
             "wait" => wait::handle(session, turn, call_id, arguments).await,
             "close_agent" => close_agent::handle(session, turn, call_id, arguments).await,
+            "spawn_team" => spawn_team::handle(session, turn, call_id, arguments).await,
+            "wait_team" => wait_team::handle(session, turn, call_id, arguments).await,
+            "close_team" => close_team::handle(session, turn, call_id, arguments).await,
             other => Err(FunctionCallError::RespondToModel(format!(
                 "unsupported collab tool {other}"
             ))),
@@ -101,6 +141,8 @@ mod spawn {
         message: Option<String>,
         items: Option<Vec<UserInput>>,
         agent_type: Option<String>,
+        model_provider: Option<String>,
+        model: Option<String>,
     }
 
     #[derive(Debug, Serialize)]
@@ -120,6 +162,8 @@ mod spawn {
             .as_deref()
             .map(str::trim)
             .filter(|role| !role.is_empty());
+        let model_provider = optional_non_empty(&args.model_provider, "model_provider")?;
+        let model = optional_non_empty(&args.model, "model")?;
         let input_items = parse_collab_input(args.message, args.items)?;
         let prompt = input_preview(&input_items);
         let session_source = turn.session_source.clone();
@@ -148,6 +192,7 @@ mod spawn {
         apply_role_to_config(&mut config, role_name)
             .await
             .map_err(FunctionCallError::RespondToModel)?;
+        apply_member_model_overrides(&mut config, model_provider, model)?;
         apply_spawn_agent_overrides(&mut config, child_depth);
 
         let result = session
@@ -429,17 +474,8 @@ mod resume_agent {
 
 mod wait {
     use super::*;
-    use crate::agent::status::is_final;
-    use futures::FutureExt;
-    use futures::StreamExt;
-    use futures::stream::FuturesUnordered;
     use std::collections::HashMap;
     use std::sync::Arc;
-    use std::time::Duration;
-    use tokio::sync::watch::Receiver;
-    use tokio::time::Instant;
-
-    use tokio::time::timeout_at;
 
     #[derive(Debug, Deserialize)]
     struct WaitArgs {
@@ -470,19 +506,7 @@ mod wait {
             .iter()
             .map(|id| agent_id(id))
             .collect::<Result<Vec<_>, _>>()?;
-
-        // Validate timeout.
-        // Very short timeouts encourage busy-polling loops in the orchestrator prompt and can
-        // cause high CPU usage even with a single active worker, so clamp to a minimum.
-        let timeout_ms = args.timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
-        let timeout_ms = match timeout_ms {
-            ms if ms <= 0 => {
-                return Err(FunctionCallError::RespondToModel(
-                    "timeout_ms must be greater than zero".to_owned(),
-                ));
-            }
-            ms => ms.clamp(MIN_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS),
-        };
+        let timeout_ms = normalize_wait_timeout(args.timeout_ms)?;
 
         session
             .send_event(
@@ -490,84 +514,50 @@ mod wait {
                 CollabWaitingBeginEvent {
                     sender_thread_id: session.conversation_id,
                     receiver_thread_ids: receiver_thread_ids.clone(),
+                    receiver_names: HashMap::new(),
                     call_id: call_id.clone(),
                 }
                 .into(),
             )
             .await;
 
-        let mut status_rxs = Vec::with_capacity(receiver_thread_ids.len());
-        let mut initial_final_statuses = Vec::new();
-        for id in &receiver_thread_ids {
-            match session.services.agent_control.subscribe_status(*id).await {
-                Ok(rx) => {
-                    let status = rx.borrow().clone();
-                    if is_final(&status) {
-                        initial_final_statuses.push((*id, status));
-                    }
-                    status_rxs.push((*id, rx));
-                }
-                Err(CodexErr::ThreadNotFound(_)) => {
-                    initial_final_statuses.push((*id, AgentStatus::NotFound));
-                }
-                Err(err) => {
-                    let mut statuses = HashMap::with_capacity(1);
-                    statuses.insert(*id, session.services.agent_control.get_status(*id).await);
-                    session
-                        .send_event(
-                            &turn,
-                            CollabWaitingEndEvent {
-                                sender_thread_id: session.conversation_id,
-                                call_id: call_id.clone(),
-                                statuses,
-                            }
-                            .into(),
-                        )
-                        .await;
-                    return Err(collab_agent_error(*id, err));
-                }
+        let wait_result = match wait_for_agents(
+            session.clone(),
+            &receiver_thread_ids,
+            timeout_ms,
+            WaitMode::Any,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err((id, err)) => {
+                let statuses =
+                    HashMap::from([(id, session.services.agent_control.get_status(id).await)]);
+                session
+                    .send_event(
+                        &turn,
+                        CollabWaitingEndEvent {
+                            sender_thread_id: session.conversation_id,
+                            call_id: call_id.clone(),
+                            statuses,
+                            receiver_names: HashMap::new(),
+                        }
+                        .into(),
+                    )
+                    .await;
+                return Err(collab_agent_error(id, err));
             }
-        }
-
-        let statuses = if !initial_final_statuses.is_empty() {
-            initial_final_statuses
-        } else {
-            // Wait for the first agent to reach a final status.
-            let mut futures = FuturesUnordered::new();
-            for (id, rx) in status_rxs.into_iter() {
-                let session = session.clone();
-                futures.push(wait_for_final_status(session, id, rx));
-            }
-            let mut results = Vec::new();
-            let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-            loop {
-                match timeout_at(deadline, futures.next()).await {
-                    Ok(Some(Some(result))) => {
-                        results.push(result);
-                        break;
-                    }
-                    Ok(Some(None)) => continue,
-                    Ok(None) | Err(_) => break,
-                }
-            }
-            if !results.is_empty() {
-                // Drain the unlikely last elements to prevent race.
-                loop {
-                    match futures.next().now_or_never() {
-                        Some(Some(Some(result))) => results.push(result),
-                        Some(Some(None)) => continue,
-                        Some(None) | None => break,
-                    }
-                }
-            }
-            results
         };
 
         // Convert payload.
-        let statuses_map = statuses.clone().into_iter().collect::<HashMap<_, _>>();
+        let statuses_map = wait_result
+            .statuses
+            .iter()
+            .cloned()
+            .collect::<HashMap<_, _>>();
         let result = WaitResult {
             status: statuses_map.clone(),
-            timed_out: statuses.is_empty(),
+            timed_out: wait_result.timed_out,
         };
 
         // Final event emission.
@@ -578,6 +568,7 @@ mod wait {
                     sender_thread_id: session.conversation_id,
                     call_id,
                     statuses: statuses_map,
+                    receiver_names: HashMap::new(),
                 }
                 .into(),
             )
@@ -592,27 +583,871 @@ mod wait {
             success: None,
         })
     }
+}
 
-    async fn wait_for_final_status(
-        session: Arc<Session>,
-        thread_id: ThreadId,
-        mut status_rx: Receiver<AgentStatus>,
-    ) -> Option<(ThreadId, AgentStatus)> {
-        let mut status = status_rx.borrow().clone();
-        if is_final(&status) {
+#[derive(Debug)]
+struct WaitForAgentsResult {
+    statuses: Vec<(ThreadId, AgentStatus)>,
+    timed_out: bool,
+}
+
+fn normalize_wait_timeout(timeout_ms: Option<i64>) -> Result<i64, FunctionCallError> {
+    let timeout_ms = timeout_ms.unwrap_or(DEFAULT_WAIT_TIMEOUT_MS);
+    match timeout_ms {
+        ms if ms <= 0 => Err(FunctionCallError::RespondToModel(
+            "timeout_ms must be greater than zero".to_owned(),
+        )),
+        ms => Ok(ms.clamp(MIN_WAIT_TIMEOUT_MS, MAX_WAIT_TIMEOUT_MS)),
+    }
+}
+
+async fn wait_for_final_status(
+    session: std::sync::Arc<Session>,
+    thread_id: ThreadId,
+    mut status_rx: Receiver<AgentStatus>,
+) -> Option<(ThreadId, AgentStatus)> {
+    let mut status = status_rx.borrow().clone();
+    if crate::agent::status::is_final(&status) {
+        return Some((thread_id, status));
+    }
+
+    loop {
+        if status_rx.changed().await.is_err() {
+            let latest = session.services.agent_control.get_status(thread_id).await;
+            return crate::agent::status::is_final(&latest).then_some((thread_id, latest));
+        }
+        status = status_rx.borrow().clone();
+        if crate::agent::status::is_final(&status) {
             return Some((thread_id, status));
         }
+    }
+}
 
-        loop {
-            if status_rx.changed().await.is_err() {
-                let latest = session.services.agent_control.get_status(thread_id).await;
-                return is_final(&latest).then_some((thread_id, latest));
+async fn wait_for_agents(
+    session: std::sync::Arc<Session>,
+    receiver_thread_ids: &[ThreadId],
+    timeout_ms: i64,
+    mode: WaitMode,
+) -> Result<WaitForAgentsResult, (ThreadId, CodexErr)> {
+    let mut status_rxs = Vec::with_capacity(receiver_thread_ids.len());
+    let mut final_statuses = HashMap::new();
+
+    for id in receiver_thread_ids {
+        match session.services.agent_control.subscribe_status(*id).await {
+            Ok(rx) => {
+                let status = rx.borrow().clone();
+                if crate::agent::status::is_final(&status) {
+                    final_statuses.insert(*id, status);
+                } else {
+                    status_rxs.push((*id, rx));
+                }
             }
-            status = status_rx.borrow().clone();
-            if is_final(&status) {
-                return Some((thread_id, status));
+            Err(CodexErr::ThreadNotFound(_)) => {
+                final_statuses.insert(*id, AgentStatus::NotFound);
+            }
+            Err(err) => return Err((*id, err)),
+        }
+    }
+
+    let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+    match mode {
+        WaitMode::Any => {
+            if final_statuses.is_empty() {
+                let mut futures = FuturesUnordered::new();
+                for (id, rx) in status_rxs {
+                    let session = session.clone();
+                    futures.push(wait_for_final_status(session, id, rx));
+                }
+
+                let mut results = Vec::new();
+                loop {
+                    match timeout_at(deadline, futures.next()).await {
+                        Ok(Some(Some(result))) => {
+                            results.push(result);
+                            break;
+                        }
+                        Ok(Some(None)) => continue,
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+
+                if !results.is_empty() {
+                    loop {
+                        match futures.next().now_or_never() {
+                            Some(Some(Some(result))) => results.push(result),
+                            Some(Some(None)) => continue,
+                            Some(None) | None => break,
+                        }
+                    }
+                }
+
+                for (id, status) in results {
+                    final_statuses.insert(id, status);
+                }
+            }
+
+            let statuses = receiver_thread_ids
+                .iter()
+                .filter_map(|id| final_statuses.get(id).cloned().map(|status| (*id, status)))
+                .collect::<Vec<_>>();
+            Ok(WaitForAgentsResult {
+                timed_out: statuses.is_empty(),
+                statuses,
+            })
+        }
+        WaitMode::All => {
+            if final_statuses.len() < receiver_thread_ids.len() {
+                let mut futures = FuturesUnordered::new();
+                for (id, rx) in status_rxs {
+                    let session = session.clone();
+                    futures.push(wait_for_final_status(session, id, rx));
+                }
+
+                while final_statuses.len() < receiver_thread_ids.len() {
+                    match timeout_at(deadline, futures.next()).await {
+                        Ok(Some(Some((id, status)))) => {
+                            final_statuses.insert(id, status);
+                        }
+                        Ok(Some(None)) => continue,
+                        Ok(None) | Err(_) => break,
+                    }
+                }
+            }
+
+            let timed_out = final_statuses.len() < receiver_thread_ids.len();
+            let statuses = receiver_thread_ids
+                .iter()
+                .filter_map(|id| final_statuses.get(id).cloned().map(|status| (*id, status)))
+                .collect::<Vec<_>>();
+
+            Ok(WaitForAgentsResult {
+                statuses,
+                timed_out,
+            })
+        }
+    }
+}
+
+fn normalized_team_id(team_id: &str) -> Result<String, FunctionCallError> {
+    let team_id = team_id.trim();
+    if team_id.is_empty() {
+        return Err(FunctionCallError::RespondToModel(
+            "team_id must be non-empty".to_string(),
+        ));
+    }
+    Ok(team_id.to_string())
+}
+
+fn optional_non_empty<'a>(
+    value: &'a Option<String>,
+    field: &str,
+) -> Result<Option<&'a str>, FunctionCallError> {
+    match value {
+        Some(raw) => {
+            let trimmed = raw.trim();
+            if trimmed.is_empty() {
+                Err(FunctionCallError::RespondToModel(format!(
+                    "{field} must be non-empty when provided"
+                )))
+            } else {
+                Ok(Some(trimmed))
             }
         }
+        None => Ok(None),
+    }
+}
+
+fn apply_member_model_overrides(
+    config: &mut Config,
+    model_provider_id: Option<&str>,
+    model: Option<&str>,
+) -> Result<(), FunctionCallError> {
+    if let Some(provider_id) = model_provider_id {
+        let provider = config
+            .model_providers
+            .get(provider_id)
+            .cloned()
+            .ok_or_else(|| {
+                FunctionCallError::RespondToModel(format!(
+                    "model_provider `{provider_id}` not found"
+                ))
+            })?;
+        config.model_provider_id = provider_id.to_string();
+        config.model_provider = provider;
+    }
+
+    if let Some(model) = model {
+        config.model = Some(model.to_string());
+    }
+
+    Ok(())
+}
+
+fn prefixed_team_call_id(prefix: &str, call_id: &str) -> String {
+    format!("{prefix}{call_id}")
+}
+
+fn team_member_names(members: &[TeamMember]) -> HashMap<ThreadId, String> {
+    members
+        .iter()
+        .map(|member| (member.agent_id, member.name.clone()))
+        .collect()
+}
+
+fn get_team_record(
+    sender_thread_id: ThreadId,
+    team_id: &str,
+) -> Result<TeamRecord, FunctionCallError> {
+    let registry = team_registry()
+        .lock()
+        .map_err(|_| FunctionCallError::Fatal("team registry poisoned".to_string()))?;
+    let Some(teams) = registry.get(&sender_thread_id) else {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "team `{team_id}` not found"
+        )));
+    };
+    teams
+        .get(team_id)
+        .cloned()
+        .ok_or_else(|| FunctionCallError::RespondToModel(format!("team `{team_id}` not found")))
+}
+
+fn insert_team_record(
+    sender_thread_id: ThreadId,
+    team_id: String,
+    record: TeamRecord,
+) -> Result<(), FunctionCallError> {
+    let mut registry = team_registry()
+        .lock()
+        .map_err(|_| FunctionCallError::Fatal("team registry poisoned".to_string()))?;
+    let teams = registry.entry(sender_thread_id).or_default();
+    if teams.contains_key(&team_id) {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "team `{team_id}` already exists"
+        )));
+    }
+    teams.insert(team_id, record);
+    Ok(())
+}
+
+fn remove_members_from_team(
+    sender_thread_id: ThreadId,
+    team_id: &str,
+    member_names: &[String],
+) -> Result<(), FunctionCallError> {
+    let mut registry = team_registry()
+        .lock()
+        .map_err(|_| FunctionCallError::Fatal("team registry poisoned".to_string()))?;
+    let teams = registry.entry(sender_thread_id).or_default();
+    let team = teams
+        .get_mut(team_id)
+        .ok_or_else(|| FunctionCallError::RespondToModel(format!("team `{team_id}` not found")))?;
+
+    team.members
+        .retain(|member| !member_names.iter().any(|name| name == &member.name));
+    if team.members.is_empty() {
+        teams.remove(team_id);
+    }
+    if teams.is_empty() {
+        registry.remove(&sender_thread_id);
+    }
+    Ok(())
+}
+
+async fn shutdown_team_members(session: &std::sync::Arc<Session>, members: &[TeamMember]) {
+    for member in members {
+        let _ = session
+            .services
+            .agent_control
+            .shutdown_agent(member.agent_id)
+            .await;
+    }
+}
+
+mod spawn_team {
+    use super::*;
+    use crate::agent::next_thread_spawn_depth;
+    use crate::agent::role::apply_role_to_config;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    #[derive(Debug, Deserialize)]
+    struct SpawnTeamArgs {
+        team_id: Option<String>,
+        members: Vec<SpawnTeamMemberArgs>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SpawnTeamMemberArgs {
+        name: String,
+        task: String,
+        agent_type: Option<String>,
+        model_provider: Option<String>,
+        model: Option<String>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct SpawnTeamMemberResult {
+        name: String,
+        agent_id: String,
+        status: AgentStatus,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct SpawnTeamResult {
+        team_id: String,
+        members: Vec<SpawnTeamMemberResult>,
+    }
+
+    pub async fn handle(
+        session: Arc<Session>,
+        turn: Arc<TurnContext>,
+        call_id: String,
+        arguments: String,
+    ) -> Result<ToolOutput, FunctionCallError> {
+        let args: SpawnTeamArgs = parse_arguments(&arguments)?;
+        if args.members.is_empty() {
+            return Err(FunctionCallError::RespondToModel(
+                "members must be non-empty".to_string(),
+            ));
+        }
+
+        let mut seen_names = HashSet::new();
+        for member in &args.members {
+            let name = member.name.trim();
+            if name.is_empty() {
+                return Err(FunctionCallError::RespondToModel(
+                    "member name must be non-empty".to_string(),
+                ));
+            }
+            if !seen_names.insert(name.to_string()) {
+                return Err(FunctionCallError::RespondToModel(format!(
+                    "duplicate member name `{name}`"
+                )));
+            }
+            if member.task.trim().is_empty() {
+                return Err(FunctionCallError::RespondToModel(format!(
+                    "task for member `{name}` must be non-empty"
+                )));
+            }
+        }
+
+        let team_id = match args.team_id {
+            Some(team_id) => normalized_team_id(&team_id)?,
+            None => ThreadId::new().to_string(),
+        };
+
+        let child_depth = next_thread_spawn_depth(&turn.session_source);
+        if exceeds_thread_spawn_depth_limit(child_depth) {
+            return Err(FunctionCallError::RespondToModel(
+                "Agent depth limit reached. Solve the task yourself.".to_string(),
+            ));
+        }
+
+        let event_call_id = prefixed_team_call_id(TEAM_SPAWN_CALL_PREFIX, &call_id);
+        session
+            .send_event(
+                &turn,
+                CollabWaitingBeginEvent {
+                    sender_thread_id: session.conversation_id,
+                    receiver_thread_ids: Vec::new(),
+                    receiver_names: HashMap::new(),
+                    call_id: event_call_id.clone(),
+                }
+                .into(),
+            )
+            .await;
+
+        let mut statuses = HashMap::new();
+        let mut spawned_members = Vec::new();
+
+        for member in args.members {
+            let member_name = member.name.trim().to_string();
+            let role_name = optional_non_empty(&member.agent_type, "agent_type")?;
+            let model_provider = optional_non_empty(&member.model_provider, "model_provider")?;
+            let model = optional_non_empty(&member.model, "model")?;
+
+            let mut config = build_agent_spawn_config(
+                &session.get_base_instructions().await,
+                turn.as_ref(),
+                child_depth,
+            )?;
+            apply_role_to_config(&mut config, role_name)
+                .await
+                .map_err(FunctionCallError::RespondToModel)?;
+            apply_member_model_overrides(&mut config, model_provider, model)?;
+            apply_spawn_agent_overrides(&mut config, child_depth);
+
+            let input_items = vec![UserInput::Text {
+                text: member.task.trim().to_string(),
+                text_elements: Vec::new(),
+            }];
+            let spawn_result = session
+                .services
+                .agent_control
+                .spawn_agent(
+                    config,
+                    input_items,
+                    Some(thread_spawn_source(session.conversation_id, child_depth)),
+                )
+                .await
+                .map_err(collab_spawn_error);
+
+            let agent_id = match spawn_result {
+                Ok(agent_id) => agent_id,
+                Err(err) => {
+                    shutdown_team_members(&session, &spawned_members).await;
+                    session
+                        .send_event(
+                            &turn,
+                            CollabWaitingEndEvent {
+                                sender_thread_id: session.conversation_id,
+                                call_id: event_call_id,
+                                statuses,
+                                receiver_names: team_member_names(&spawned_members),
+                            }
+                            .into(),
+                        )
+                        .await;
+                    return Err(err);
+                }
+            };
+
+            let status = session.services.agent_control.get_status(agent_id).await;
+            statuses.insert(agent_id, status);
+            spawned_members.push(TeamMember {
+                name: member_name,
+                agent_id,
+            });
+        }
+
+        if let Err(err) = insert_team_record(
+            session.conversation_id,
+            team_id.clone(),
+            TeamRecord {
+                members: spawned_members.clone(),
+            },
+        ) {
+            shutdown_team_members(&session, &spawned_members).await;
+            session
+                .send_event(
+                    &turn,
+                    CollabWaitingEndEvent {
+                        sender_thread_id: session.conversation_id,
+                        call_id: event_call_id,
+                        statuses,
+                        receiver_names: team_member_names(&spawned_members),
+                    }
+                    .into(),
+                )
+                .await;
+            return Err(err);
+        }
+
+        session
+            .send_event(
+                &turn,
+                CollabWaitingEndEvent {
+                    sender_thread_id: session.conversation_id,
+                    call_id: event_call_id,
+                    statuses: statuses.clone(),
+                    receiver_names: team_member_names(&spawned_members),
+                }
+                .into(),
+            )
+            .await;
+
+        let members = spawned_members
+            .into_iter()
+            .map(|member| SpawnTeamMemberResult {
+                status: statuses
+                    .get(&member.agent_id)
+                    .cloned()
+                    .unwrap_or(AgentStatus::NotFound),
+                name: member.name,
+                agent_id: member.agent_id.to_string(),
+            })
+            .collect::<Vec<_>>();
+        let content =
+            serde_json::to_string(&SpawnTeamResult { team_id, members }).map_err(|err| {
+                FunctionCallError::Fatal(format!("failed to serialize spawn_team result: {err}"))
+            })?;
+
+        Ok(ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(content),
+            success: Some(true),
+        })
+    }
+}
+
+mod wait_team {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    enum WaitTeamModeArg {
+        Any,
+        All,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct WaitTeamArgs {
+        team_id: String,
+        mode: Option<WaitTeamModeArg>,
+        timeout_ms: Option<i64>,
+    }
+
+    #[derive(Debug, Serialize)]
+    #[serde(rename_all = "lowercase")]
+    enum WaitTeamMode {
+        Any,
+        All,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct WaitTeamTriggeredMember {
+        name: String,
+        agent_id: String,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct WaitTeamMemberStatus {
+        name: String,
+        agent_id: String,
+        state: AgentStatus,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct WaitTeamResult {
+        completed: bool,
+        mode: WaitTeamMode,
+        triggered_member: Option<WaitTeamTriggeredMember>,
+        member_statuses: Vec<WaitTeamMemberStatus>,
+    }
+
+    pub async fn handle(
+        session: Arc<Session>,
+        turn: Arc<TurnContext>,
+        call_id: String,
+        arguments: String,
+    ) -> Result<ToolOutput, FunctionCallError> {
+        let args: WaitTeamArgs = parse_arguments(&arguments)?;
+        let team_id = normalized_team_id(&args.team_id)?;
+        let team = get_team_record(session.conversation_id, &team_id)?;
+        if team.members.is_empty() {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "team `{team_id}` has no members"
+            )));
+        }
+
+        let (wait_mode, output_mode) = match args.mode.unwrap_or(WaitTeamModeArg::All) {
+            WaitTeamModeArg::Any => (WaitMode::Any, WaitTeamMode::Any),
+            WaitTeamModeArg::All => (WaitMode::All, WaitTeamMode::All),
+        };
+        let timeout_ms = normalize_wait_timeout(args.timeout_ms)?;
+        let receiver_thread_ids = team
+            .members
+            .iter()
+            .map(|member| member.agent_id)
+            .collect::<Vec<_>>();
+        let receiver_names = team_member_names(&team.members);
+        let event_call_id = prefixed_team_call_id(TEAM_WAIT_CALL_PREFIX, &call_id);
+
+        session
+            .send_event(
+                &turn,
+                CollabWaitingBeginEvent {
+                    sender_thread_id: session.conversation_id,
+                    receiver_thread_ids: receiver_thread_ids.clone(),
+                    receiver_names: receiver_names.clone(),
+                    call_id: event_call_id.clone(),
+                }
+                .into(),
+            )
+            .await;
+
+        let wait_result =
+            match wait_for_agents(session.clone(), &receiver_thread_ids, timeout_ms, wait_mode)
+                .await
+            {
+                Ok(result) => result,
+                Err((id, err)) => {
+                    let statuses =
+                        HashMap::from([(id, session.services.agent_control.get_status(id).await)]);
+                    session
+                        .send_event(
+                            &turn,
+                            CollabWaitingEndEvent {
+                                sender_thread_id: session.conversation_id,
+                                call_id: event_call_id,
+                                statuses,
+                                receiver_names: receiver_names.clone(),
+                            }
+                            .into(),
+                        )
+                        .await;
+                    return Err(collab_agent_error(id, err));
+                }
+            };
+
+        let final_statuses = wait_result
+            .statuses
+            .iter()
+            .cloned()
+            .collect::<HashMap<_, _>>();
+        session
+            .send_event(
+                &turn,
+                CollabWaitingEndEvent {
+                    sender_thread_id: session.conversation_id,
+                    call_id: event_call_id,
+                    statuses: final_statuses.clone(),
+                    receiver_names: receiver_names.clone(),
+                }
+                .into(),
+            )
+            .await;
+
+        let mut member_statuses = Vec::with_capacity(team.members.len());
+        for member in &team.members {
+            let state = match final_statuses.get(&member.agent_id) {
+                Some(state) => state.clone(),
+                None => {
+                    session
+                        .services
+                        .agent_control
+                        .get_status(member.agent_id)
+                        .await
+                }
+            };
+            member_statuses.push(WaitTeamMemberStatus {
+                name: member.name.clone(),
+                agent_id: member.agent_id.to_string(),
+                state,
+            });
+        }
+
+        let triggered_member = if wait_mode == WaitMode::Any && !wait_result.statuses.is_empty() {
+            let (triggered_id, _) = wait_result.statuses[0];
+            team.members
+                .iter()
+                .find(|member| member.agent_id == triggered_id)
+                .map(|member| WaitTeamTriggeredMember {
+                    name: member.name.clone(),
+                    agent_id: member.agent_id.to_string(),
+                })
+        } else {
+            None
+        };
+
+        let completed = match wait_mode {
+            WaitMode::Any => !wait_result.timed_out && !wait_result.statuses.is_empty(),
+            WaitMode::All => {
+                !wait_result.timed_out
+                    && member_statuses
+                        .iter()
+                        .all(|entry| crate::agent::status::is_final(&entry.state))
+            }
+        };
+
+        let content = serde_json::to_string(&WaitTeamResult {
+            completed,
+            mode: output_mode,
+            triggered_member,
+            member_statuses,
+        })
+        .map_err(|err| {
+            FunctionCallError::Fatal(format!("failed to serialize wait_team result: {err}"))
+        })?;
+
+        Ok(ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(content),
+            success: Some(true),
+        })
+    }
+}
+
+mod close_team {
+    use super::*;
+    use std::collections::HashMap;
+    use std::collections::HashSet;
+    use std::sync::Arc;
+
+    #[derive(Debug, Deserialize)]
+    struct CloseTeamArgs {
+        team_id: String,
+        members: Option<Vec<String>>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct CloseTeamMemberResult {
+        name: String,
+        agent_id: String,
+        ok: bool,
+        status: AgentStatus,
+        error: Option<String>,
+    }
+
+    #[derive(Debug, Serialize)]
+    struct CloseTeamResult {
+        team_id: String,
+        closed: Vec<CloseTeamMemberResult>,
+    }
+
+    pub async fn handle(
+        session: Arc<Session>,
+        turn: Arc<TurnContext>,
+        call_id: String,
+        arguments: String,
+    ) -> Result<ToolOutput, FunctionCallError> {
+        let args: CloseTeamArgs = parse_arguments(&arguments)?;
+        let team_id = normalized_team_id(&args.team_id)?;
+        let team = get_team_record(session.conversation_id, &team_id)?;
+        if team.members.is_empty() {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "team `{team_id}` has no members"
+            )));
+        }
+
+        let selected_names = match args.members {
+            Some(names) => {
+                if names.is_empty() {
+                    return Err(FunctionCallError::RespondToModel(
+                        "members must be non-empty when provided".to_string(),
+                    ));
+                }
+                let mut selected = HashSet::new();
+                for name in names {
+                    let name = name.trim().to_string();
+                    if name.is_empty() {
+                        return Err(FunctionCallError::RespondToModel(
+                            "member name must be non-empty".to_string(),
+                        ));
+                    }
+                    selected.insert(name);
+                }
+                selected
+            }
+            None => team
+                .members
+                .iter()
+                .map(|member| member.name.clone())
+                .collect(),
+        };
+
+        let selected_members = team
+            .members
+            .iter()
+            .filter(|member| selected_names.contains(&member.name))
+            .cloned()
+            .collect::<Vec<_>>();
+        if selected_members.is_empty() {
+            return Err(FunctionCallError::RespondToModel(
+                "no matching team members found".to_string(),
+            ));
+        }
+
+        let event_call_id = prefixed_team_call_id(TEAM_CLOSE_CALL_PREFIX, &call_id);
+        let receiver_names = team_member_names(&selected_members);
+        session
+            .send_event(
+                &turn,
+                CollabWaitingBeginEvent {
+                    sender_thread_id: session.conversation_id,
+                    receiver_thread_ids: selected_members
+                        .iter()
+                        .map(|member| member.agent_id)
+                        .collect(),
+                    receiver_names: receiver_names.clone(),
+                    call_id: event_call_id.clone(),
+                }
+                .into(),
+            )
+            .await;
+
+        let mut statuses = HashMap::new();
+        let mut closed = Vec::with_capacity(selected_members.len());
+        for member in &selected_members {
+            let status_before = session
+                .services
+                .agent_control
+                .get_status(member.agent_id)
+                .await;
+            let close_result =
+                if matches!(status_before, AgentStatus::Shutdown | AgentStatus::NotFound) {
+                    Ok(String::new())
+                } else {
+                    session
+                        .services
+                        .agent_control
+                        .shutdown_agent(member.agent_id)
+                        .await
+                };
+            let status_after = session
+                .services
+                .agent_control
+                .get_status(member.agent_id)
+                .await;
+            let event_status = match (&status_before, &close_result, status_after) {
+                (_, Err(_), status_after) => status_after,
+                (AgentStatus::NotFound, Ok(_), _) => AgentStatus::NotFound,
+                (AgentStatus::Shutdown, Ok(_), _) => AgentStatus::Shutdown,
+                (_, Ok(_), AgentStatus::NotFound) => AgentStatus::Shutdown,
+                (_, Ok(_), status_after) => status_after,
+            };
+            statuses.insert(member.agent_id, event_status);
+
+            match close_result {
+                Ok(_) => closed.push(CloseTeamMemberResult {
+                    name: member.name.clone(),
+                    agent_id: member.agent_id.to_string(),
+                    ok: true,
+                    status: status_before,
+                    error: None,
+                }),
+                Err(err) => closed.push(CloseTeamMemberResult {
+                    name: member.name.clone(),
+                    agent_id: member.agent_id.to_string(),
+                    ok: false,
+                    status: status_before,
+                    error: Some(format!("{err}")),
+                }),
+            }
+        }
+
+        remove_members_from_team(
+            session.conversation_id,
+            &team_id,
+            &selected_members
+                .iter()
+                .map(|member| member.name.clone())
+                .collect::<Vec<_>>(),
+        )?;
+
+        session
+            .send_event(
+                &turn,
+                CollabWaitingEndEvent {
+                    sender_thread_id: session.conversation_id,
+                    call_id: event_call_id,
+                    statuses,
+                    receiver_names,
+                }
+                .into(),
+            )
+            .await;
+
+        let content =
+            serde_json::to_string(&CloseTeamResult { team_id, closed }).map_err(|err| {
+                FunctionCallError::Fatal(format!("failed to serialize close_team result: {err}"))
+            })?;
+
+        Ok(ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(content),
+            success: Some(true),
+        })
     }
 }
 
@@ -999,6 +1834,7 @@ mod tests {
         let (mut session, mut turn) = make_session_and_context().await;
         let manager = thread_manager();
         session.services.agent_control = manager.agent_control();
+        let expected_model = turn.model_info.slug.clone();
         let mut config = (*turn.config).clone();
         config
             .permissions
@@ -1036,8 +1872,83 @@ mod tests {
             .expect("spawned agent thread should exist")
             .config_snapshot()
             .await;
-        assert_eq!(snapshot.model, "gpt-5.1-codex-mini");
+        assert_eq!(snapshot.model, expected_model);
+        assert_eq!(
+            snapshot.reasoning_effort,
+            Some(codex_protocol::openai_models::ReasoningEffort::Medium)
+        );
         assert_eq!(snapshot.approval_policy, AskForApproval::Never);
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_accepts_model_provider_and_model_overrides() {
+        #[derive(Debug, Deserialize)]
+        struct SpawnAgentResult {
+            agent_id: String,
+        }
+
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+
+        let invocation = invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "model_provider": "openai",
+                "model": "gpt-5"
+            })),
+        );
+        let output = MultiAgentHandler
+            .handle(invocation)
+            .await
+            .expect("spawn_agent should succeed");
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(content),
+            ..
+        } = output
+        else {
+            panic!("expected function output");
+        };
+        let result: SpawnAgentResult =
+            serde_json::from_str(&content).expect("spawn_agent result should be json");
+        let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
+        let snapshot = manager
+            .get_thread(agent_id)
+            .await
+            .expect("spawned agent thread should exist")
+            .config_snapshot()
+            .await;
+        assert_eq!(snapshot.model_provider_id, "openai");
+        assert_eq!(snapshot.model, "gpt-5");
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_rejects_unknown_model_provider_override() {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+
+        let invocation = invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "model_provider": "missing-provider"
+            })),
+        );
+        let Err(err) = MultiAgentHandler.handle(invocation).await else {
+            panic!("unknown model provider should be rejected");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "model_provider `missing-provider` not found".to_string()
+            )
+        );
     }
 
     #[tokio::test]
@@ -1747,6 +2658,300 @@ mod tests {
 
         let status_after = manager.agent_control().get_status(agent_id).await;
         assert_eq!(status_after, AgentStatus::NotFound);
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SpawnTeamResult {
+        team_id: String,
+        members: Vec<SpawnTeamMemberResult>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct SpawnTeamMemberResult {
+        name: String,
+        agent_id: String,
+        status: AgentStatus,
+    }
+
+    #[derive(Debug, Deserialize)]
+    #[serde(rename_all = "lowercase")]
+    enum WaitTeamMode {
+        Any,
+        All,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct WaitTeamTriggeredMember {
+        name: String,
+        agent_id: String,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct WaitTeamMemberStatus {
+        name: String,
+        agent_id: String,
+        state: AgentStatus,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct WaitTeamResult {
+        completed: bool,
+        mode: WaitTeamMode,
+        triggered_member: Option<WaitTeamTriggeredMember>,
+        member_statuses: Vec<WaitTeamMemberStatus>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct CloseTeamResult {
+        team_id: String,
+        closed: Vec<CloseTeamMemberResult>,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct CloseTeamMemberResult {
+        name: String,
+        agent_id: String,
+        ok: bool,
+        status: AgentStatus,
+        error: Option<String>,
+    }
+
+    #[tokio::test]
+    async fn spawn_team_wait_team_and_close_team_flow() {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        let spawn_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_team",
+            function_payload(json!({
+                "members": [
+                    {"name": "planner", "task": "plan the work"},
+                    {"name": "worker", "task": "execute the task"}
+                ]
+            })),
+        );
+        let spawn_output = MultiAgentHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("spawn_team should succeed");
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(spawn_content),
+            success: spawn_success,
+            ..
+        } = spawn_output
+        else {
+            panic!("expected function output");
+        };
+        let spawn_result: SpawnTeamResult =
+            serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
+        assert_eq!(spawn_success, Some(true));
+        assert_eq!(spawn_result.members.len(), 2);
+        assert_eq!(
+            spawn_result
+                .members
+                .iter()
+                .map(|member| member.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["planner".to_string(), "worker".to_string()]
+        );
+        for member in &spawn_result.members {
+            assert_eq!(member.status, AgentStatus::PendingInit);
+        }
+
+        for member in &spawn_result.members {
+            let agent_id = agent_id(&member.agent_id).expect("valid agent id");
+            let _ = manager
+                .agent_control()
+                .shutdown_agent(agent_id)
+                .await
+                .expect("shutdown spawned team member");
+        }
+
+        let wait_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "wait_team",
+            function_payload(json!({
+                "team_id": spawn_result.team_id,
+                "mode": "all",
+                "timeout_ms": 1_000
+            })),
+        );
+        let wait_output = MultiAgentHandler
+            .handle(wait_invocation)
+            .await
+            .expect("wait_team should succeed");
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(wait_content),
+            success: wait_success,
+            ..
+        } = wait_output
+        else {
+            panic!("expected function output");
+        };
+        let wait_result: WaitTeamResult =
+            serde_json::from_str(&wait_content).expect("wait_team result should be json");
+        assert_eq!(wait_success, Some(true));
+        assert_eq!(wait_result.completed, true);
+        assert!(matches!(wait_result.mode, WaitTeamMode::All));
+        assert!(wait_result.triggered_member.is_none());
+        assert_eq!(wait_result.member_statuses.len(), 2);
+        for status in &wait_result.member_statuses {
+            assert!(matches!(
+                status.state,
+                AgentStatus::NotFound | AgentStatus::Shutdown
+            ));
+        }
+
+        let close_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({
+                "team_id": spawn_result.team_id
+            })),
+        );
+        let close_output = MultiAgentHandler
+            .handle(close_invocation)
+            .await
+            .expect("close_team should succeed");
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(close_content),
+            success: close_success,
+            ..
+        } = close_output
+        else {
+            panic!("expected function output");
+        };
+        let close_result: CloseTeamResult =
+            serde_json::from_str(&close_content).expect("close_team result should be json");
+        assert_eq!(close_success, Some(true));
+        assert_eq!(close_result.closed.len(), 2);
+        assert_eq!(
+            close_result
+                .closed
+                .iter()
+                .map(|member| member.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["planner".to_string(), "worker".to_string()]
+        );
+        for member in &close_result.closed {
+            assert_eq!(member.ok, true);
+            assert_eq!(member.error, None);
+            assert!(!member.agent_id.is_empty());
+            assert!(matches!(
+                member.status,
+                AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::NotFound
+            ));
+        }
+
+        let wait_missing_invocation = invocation(
+            session,
+            turn,
+            "wait_team",
+            function_payload(json!({
+                "team_id": close_result.team_id
+            })),
+        );
+        let Err(err) = MultiAgentHandler.handle(wait_missing_invocation).await else {
+            panic!("wait_team should fail after close_team removed the team");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(format!("team `{}` not found", close_result.team_id))
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_team_any_returns_triggered_member() {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        let spawn_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_team",
+            function_payload(json!({
+                "members": [
+                    {"name": "worker", "task": "do work"}
+                ]
+            })),
+        );
+        let spawn_output = MultiAgentHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("spawn_team should succeed");
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(spawn_content),
+            ..
+        } = spawn_output
+        else {
+            panic!("expected function output");
+        };
+        let spawn_result: SpawnTeamResult =
+            serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
+        let member = &spawn_result.members[0];
+        let member_id = agent_id(&member.agent_id).expect("valid agent id");
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(member_id)
+            .await
+            .expect("shutdown spawned team member");
+
+        let wait_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "wait_team",
+            function_payload(json!({
+                "team_id": spawn_result.team_id,
+                "mode": "any",
+                "timeout_ms": 1_000
+            })),
+        );
+        let wait_output = MultiAgentHandler
+            .handle(wait_invocation)
+            .await
+            .expect("wait_team should succeed");
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(wait_content),
+            ..
+        } = wait_output
+        else {
+            panic!("expected function output");
+        };
+        let wait_result: WaitTeamResult =
+            serde_json::from_str(&wait_content).expect("wait_team result should be json");
+        assert_eq!(wait_result.completed, true);
+        assert!(matches!(wait_result.mode, WaitTeamMode::Any));
+        let triggered = wait_result
+            .triggered_member
+            .expect("any mode should set triggered_member");
+        assert_eq!(triggered.name, "worker".to_string());
+        assert_eq!(triggered.agent_id, member.agent_id);
+        assert_eq!(wait_result.member_statuses.len(), 1);
+        assert_eq!(wait_result.member_statuses[0].name, "worker".to_string());
+        assert_eq!(wait_result.member_statuses[0].agent_id, member.agent_id);
+
+        let close_invocation = invocation(
+            session,
+            turn,
+            "close_team",
+            function_payload(json!({
+                "team_id": spawn_result.team_id
+            })),
+        );
+        MultiAgentHandler
+            .handle(close_invocation)
+            .await
+            .expect("close_team should clean up");
     }
 
     #[tokio::test]

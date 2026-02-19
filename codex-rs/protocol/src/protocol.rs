@@ -2730,6 +2730,9 @@ pub struct CollabWaitingBeginEvent {
     pub sender_thread_id: ThreadId,
     /// Thread ID of the receivers.
     pub receiver_thread_ids: Vec<ThreadId>,
+    /// Optional display name for receiver agents keyed by thread ID.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub receiver_names: HashMap<ThreadId, String>,
     /// ID of the waiting call.
     pub call_id: String,
 }
@@ -2742,6 +2745,9 @@ pub struct CollabWaitingEndEvent {
     pub call_id: String,
     /// Last known status of the receiver agents reported to the sender agent.
     pub statuses: HashMap<ThreadId, AgentStatus>,
+    /// Optional display name for receiver agents keyed by thread ID.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub receiver_names: HashMap<ThreadId, String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]

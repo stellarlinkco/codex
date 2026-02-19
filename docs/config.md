@@ -18,9 +18,27 @@ Use `$` in the composer to insert a ChatGPT connector; the popover lists accessi
 apps. The `/apps` command lists available and installed apps. Connected apps appear first
 and are labeled as connected; others are marked as can be installed.
 
-## Notify
+## Hooks
 
-Codex can run a notification hook when the agent finishes a turn. See the configuration reference for the latest notification settings:
+Codex can run command hooks at lifecycle boundaries such as `session_start`, `user_prompt_submit`, `pre_tool_use`, `post_tool_use`, and `stop`.
+
+Example:
+
+```toml
+[hooks]
+
+[[hooks.pre_tool_use]]
+command = ["python3", "/Users/me/.codex/hooks/check_tool.py"]
+timeout_ms = 5000
+abort_on_error = true
+
+[hooks.pre_tool_use.matcher]
+tool_name_regex = "^shell|exec"
+```
+
+For backward compatibility, `notify = ["..."]` is still supported and mapped to turn-complete hooks.
+
+See the configuration reference for the latest hook settings:
 
 - https://developers.openai.com/codex/config-reference
 

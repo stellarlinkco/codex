@@ -115,9 +115,12 @@ impl ShellSnapshot {
             ShellType::PowerShell => "ps1",
             _ => "sh",
         };
+        let snapshot_nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map_or(0, |duration| duration.as_nanos());
         let path = codex_home
             .join(SNAPSHOT_DIR)
-            .join(format!("{session_id}.{extension}"));
+            .join(format!("{session_id}__{snapshot_nonce}.{extension}"));
 
         // Clean the (unlikely) leaked snapshot files.
         let codex_home = codex_home.to_path_buf();
@@ -477,13 +480,14 @@ pub async fn cleanup_stale_snapshots(codex_home: &Path, active_session_id: Threa
 
         let file_name = entry.file_name();
         let file_name = file_name.to_string_lossy();
-        let (session_id, _) = match file_name.rsplit_once('.') {
+        let (stem, _) = match file_name.rsplit_once('.') {
             Some((stem, ext)) => (stem, ext),
             None => {
                 remove_snapshot_file(&path).await;
                 continue;
             }
         };
+        let session_id = stem.split_once("__").map_or(stem, |(id, _)| id);
         if session_id == active_session_id {
             continue;
         }

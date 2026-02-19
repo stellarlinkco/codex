@@ -1,11 +1,14 @@
 use crate::agent::AgentStatus;
 use crate::agent::guards::Guards;
+use crate::agent::guards::exceeds_thread_spawn_depth_limit;
+use crate::agent::guards::next_thread_spawn_depth;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
 use crate::thread_manager::ThreadManagerState;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SubAgentSource;
 use codex_protocol::protocol::TokenUsage;
 use codex_protocol::user_input::UserInput;
 use std::path::PathBuf;
@@ -45,6 +48,16 @@ impl AgentControl {
         session_source: Option<SessionSource>,
     ) -> CodexResult<ThreadId> {
         let state = self.upgrade()?;
+        let child_depth = match session_source.as_ref() {
+            Some(SessionSource::SubAgent(SubAgentSource::ThreadSpawn { depth, .. })) => *depth,
+            Some(session_source) => next_thread_spawn_depth(session_source),
+            None => 1,
+        };
+        if exceeds_thread_spawn_depth_limit(child_depth) {
+            return Err(CodexErr::InvalidRequest(
+                "Agent depth limit reached. Solve the task yourself.".to_string(),
+            ));
+        }
         let reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
 
         // The same `AgentControl` is sent to spawn the thread.
@@ -76,6 +89,15 @@ impl AgentControl {
         session_source: SessionSource,
     ) -> CodexResult<ThreadId> {
         let state = self.upgrade()?;
+        let child_depth = match &session_source {
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn { depth, .. }) => *depth,
+            _ => next_thread_spawn_depth(&session_source),
+        };
+        if exceeds_thread_spawn_depth_limit(child_depth) {
+            return Err(CodexErr::InvalidRequest(
+                "Agent depth limit reached. Solve the task yourself.".to_string(),
+            ));
+        }
         let reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
 
         let resumed_thread = state
@@ -110,7 +132,10 @@ impl AgentControl {
                 },
             )
             .await;
-        if matches!(result, Err(CodexErr::InternalAgentDied)) {
+        if matches!(
+            result,
+            Err(CodexErr::InternalAgentDied | CodexErr::ThreadNotFound(_))
+        ) {
             let _ = state.remove_thread(&agent_id).await;
             self.state.release_spawned_thread(agent_id);
         }
@@ -184,6 +209,7 @@ mod tests {
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::protocol::ErrorEvent;
     use codex_protocol::protocol::EventMsg;
+    use codex_protocol::protocol::SubAgentSource;
     use codex_protocol::protocol::TurnAbortReason;
     use codex_protocol::protocol::TurnAbortedEvent;
     use codex_protocol::protocol::TurnCompleteEvent;
@@ -357,6 +383,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawn_agent_rejects_when_thread_spawn_depth_limit_exceeded() {
+        let harness = AgentControlHarness::new().await;
+        let source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 2,
+        });
+        let err = harness
+            .control
+            .spawn_agent(harness.config.clone(), text_input("hello"), Some(source))
+            .await
+            .expect_err("spawn_agent should reject depth above limit");
+        assert_matches!(
+            err,
+            CodexErr::InvalidRequest(message)
+                if message == "Agent depth limit reached. Solve the task yourself."
+        );
+    }
+
+    #[tokio::test]
+    async fn resume_agent_rejects_when_thread_spawn_depth_limit_exceeded() {
+        let harness = AgentControlHarness::new().await;
+        let source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+            parent_thread_id: ThreadId::new(),
+            depth: 2,
+        });
+        let err = harness
+            .control
+            .resume_agent_from_rollout(
+                harness.config.clone(),
+                harness
+                    .config
+                    .codex_home
+                    .join("sessions/missing-rollout.jsonl"),
+                source,
+            )
+            .await
+            .expect_err("resume_agent should reject depth above limit");
+        assert_matches!(
+            err,
+            CodexErr::InvalidRequest(message)
+                if message == "Agent depth limit reached. Solve the task yourself."
+        );
+    }
+
+    #[tokio::test]
     async fn send_input_errors_when_thread_missing() {
         let harness = AgentControlHarness::new().await;
         let thread_id = ThreadId::new();
@@ -372,6 +443,43 @@ mod tests {
             .await
             .expect_err("send_input should fail for missing thread");
         assert_matches!(err, CodexErr::ThreadNotFound(id) if id == thread_id);
+    }
+
+    #[tokio::test]
+    async fn send_input_releases_slot_when_thread_is_missing() {
+        let max_threads = 1usize;
+        let (_home, config) = test_config_with_cli_overrides(vec![(
+            "agents.max_threads".to_string(),
+            TomlValue::Integer(max_threads as i64),
+        )])
+        .await;
+        let manager = ThreadManager::with_models_provider_and_home_for_tests(
+            CodexAuth::from_api_key("dummy"),
+            config.model_provider.clone(),
+            config.codex_home.clone(),
+        );
+        let control = manager.agent_control();
+
+        let first_agent_id = control
+            .spawn_agent(config.clone(), text_input("hello"), None)
+            .await
+            .expect("spawn_agent should succeed");
+        let _ = manager.remove_thread(&first_agent_id).await;
+
+        let err = control
+            .send_input(first_agent_id, text_input("hello again"))
+            .await
+            .expect_err("send_input should fail for removed thread");
+        assert_matches!(err, CodexErr::ThreadNotFound(id) if id == first_agent_id);
+
+        let second_agent_id = control
+            .spawn_agent(config.clone(), text_input("new agent"), None)
+            .await
+            .expect("spawn_agent should succeed after slot release");
+        let _ = control
+            .shutdown_agent(second_agent_id)
+            .await
+            .expect("shutdown second agent");
     }
 
     #[tokio::test]

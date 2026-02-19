@@ -15,6 +15,7 @@ use crate::tools::context::ToolPayload;
 use async_trait::async_trait;
 use codex_hooks::HookEvent;
 use codex_hooks::HookEventAfterToolUse;
+use codex_hooks::HookEventPreToolUse;
 use codex_hooks::HookPayload;
 use codex_hooks::HookResult;
 use codex_hooks::HookToolInput;
@@ -136,6 +137,15 @@ impl ToolRegistry {
         }
 
         let is_mutating = handler.is_mutating(&invocation).await;
+        if let Some(err) = dispatch_pre_tool_use_hook(PreToolUseHookDispatch {
+            invocation: &invocation,
+            mutating: is_mutating,
+        })
+        .await
+        {
+            return Err(err);
+        }
+
         let output_cell = tokio::sync::Mutex::new(None);
         let invocation_for_tool = invocation.clone();
 
@@ -337,6 +347,79 @@ fn hook_tool_kind(tool_input: &HookToolInput) -> HookToolKind {
     }
 }
 
+struct PreToolUseHookDispatch<'a> {
+    invocation: &'a ToolInvocation,
+    mutating: bool,
+}
+
+async fn dispatch_pre_tool_use_hook(
+    dispatch: PreToolUseHookDispatch<'_>,
+) -> Option<FunctionCallError> {
+    let PreToolUseHookDispatch {
+        invocation,
+        mutating,
+    } = dispatch;
+    let session = invocation.session.as_ref();
+    let turn = invocation.turn.as_ref();
+    let tool_input = HookToolInput::from(&invocation.payload);
+    let hook_outcomes = session
+        .hooks()
+        .dispatch(HookPayload {
+            session_id: session.conversation_id,
+            cwd: turn.cwd.clone(),
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::PreToolUse {
+                event: HookEventPreToolUse {
+                    turn_id: turn.sub_id.clone(),
+                    call_id: invocation.call_id.clone(),
+                    tool_name: invocation.tool_name.clone(),
+                    tool_kind: hook_tool_kind(&tool_input),
+                    tool_input,
+                    mutating,
+                    sandbox: sandbox_tag(
+                        &turn.sandbox_policy,
+                        turn.windows_sandbox_level,
+                        turn.features.enabled(Feature::UseLinuxSandboxBwrap),
+                    )
+                    .to_string(),
+                    sandbox_policy: sandbox_policy_tag(&turn.sandbox_policy).to_string(),
+                },
+            },
+        })
+        .await;
+
+    for hook_outcome in hook_outcomes {
+        let hook_name = hook_outcome.hook_name;
+        match hook_outcome.result {
+            HookResult::Success => {}
+            HookResult::FailedContinue(error) => {
+                warn!(
+                    call_id = %invocation.call_id,
+                    tool_name = %invocation.tool_name,
+                    hook_name = %hook_name,
+                    error = %error,
+                    "pre_tool_use hook failed; continuing"
+                );
+            }
+            HookResult::FailedAbort(error) => {
+                warn!(
+                    call_id = %invocation.call_id,
+                    tool_name = %invocation.tool_name,
+                    hook_name = %hook_name,
+                    error = %error,
+                    "pre_tool_use hook blocked tool invocation"
+                );
+                return Some(FunctionCallError::Fatal(format!(
+                    "pre_tool_use hook '{hook_name}' blocked tool '{tool_name}': {error}",
+                    tool_name = invocation.tool_name
+                )));
+            }
+        }
+    }
+
+    None
+}
+
 struct AfterToolUseHookDispatch<'a> {
     invocation: &'a ToolInvocation,
     output_preview: String,
@@ -359,7 +442,7 @@ async fn dispatch_after_tool_use_hook(
             session_id: session.conversation_id,
             cwd: turn.cwd.clone(),
             triggered_at: chrono::Utc::now(),
-            hook_event: HookEvent::AfterToolUse {
+            hook_event: HookEvent::PostToolUse {
                 event: HookEventAfterToolUse {
                     turn_id: turn.sub_id.clone(),
                     call_id: invocation.call_id.clone(),
@@ -393,7 +476,7 @@ async fn dispatch_after_tool_use_hook(
                     tool_name = %invocation.tool_name,
                     hook_name = %hook_name,
                     error = %error,
-                    "after_tool_use hook failed; continuing"
+                    "post_tool_use hook failed; continuing"
                 );
             }
             HookResult::FailedAbort(error) => {
@@ -402,10 +485,10 @@ async fn dispatch_after_tool_use_hook(
                     tool_name = %invocation.tool_name,
                     hook_name = %hook_name,
                     error = %error,
-                    "after_tool_use hook failed; aborting operation"
+                    "post_tool_use hook failed; aborting operation"
                 );
                 return Some(FunctionCallError::Fatal(format!(
-                    "after_tool_use hook '{hook_name}' failed and aborted operation: {error}"
+                    "post_tool_use hook '{hook_name}' failed and aborted operation: {error}"
                 )));
             }
         }

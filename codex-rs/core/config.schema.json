@@ -481,6 +481,145 @@
         }
       ]
     },
+    "HookCommandToml": {
+      "additionalProperties": false,
+      "properties": {
+        "abort_on_error": {
+          "default": false,
+          "description": "Treat execution failures as aborting errors.",
+          "type": "boolean"
+        },
+        "command": {
+          "description": "Command argv to execute without a shell wrapper.",
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        },
+        "matcher": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HookMatcherToml"
+            }
+          ],
+          "default": null,
+          "description": "Optional matcher restricting when this hook runs."
+        },
+        "name": {
+          "description": "Optional hook display name used in logs.",
+          "type": "string"
+        },
+        "run_async": {
+          "default": false,
+          "description": "Run this hook asynchronously (fire-and-forget).",
+          "type": "boolean"
+        },
+        "timeout_ms": {
+          "description": "Optional timeout in milliseconds.",
+          "format": "uint64",
+          "minimum": 0.0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "command"
+      ],
+      "type": "object"
+    },
+    "HookMatcherToml": {
+      "additionalProperties": false,
+      "properties": {
+        "prompt_regex": {
+          "description": "Regex match on the submitted user prompt text.",
+          "type": "string"
+        },
+        "tool_name": {
+          "description": "Exact match on tool name.",
+          "type": "string"
+        },
+        "tool_name_regex": {
+          "description": "Regex match on tool name.",
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "HooksToml": {
+      "additionalProperties": false,
+      "properties": {
+        "after_agent": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/HookCommandToml"
+          },
+          "type": "array"
+        },
+        "after_tool_use": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/HookCommandToml"
+          },
+          "type": "array"
+        },
+        "post_tool_use": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/HookCommandToml"
+          },
+          "type": "array"
+        },
+        "pre_compact": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/HookCommandToml"
+          },
+          "type": "array"
+        },
+        "pre_tool_use": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/HookCommandToml"
+          },
+          "type": "array"
+        },
+        "session_end": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/HookCommandToml"
+          },
+          "type": "array"
+        },
+        "session_start": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/HookCommandToml"
+          },
+          "type": "array"
+        },
+        "stop": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/HookCommandToml"
+          },
+          "type": "array"
+        },
+        "subagent_stop": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/HookCommandToml"
+          },
+          "type": "array"
+        },
+        "user_prompt_submit": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/HookCommandToml"
+          },
+          "type": "array"
+        }
+      },
+      "type": "object"
+    },
     "MemoriesToml": {
       "additionalProperties": false,
       "description": "Memories settings loaded from config.toml.",
@@ -1520,6 +1659,15 @@
       ],
       "default": null,
       "description": "Settings that govern if and what will be written to `~/.codex/history.jsonl`."
+    },
+    "hooks": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/HooksToml"
+        }
+      ],
+      "default": null,
+      "description": "Optional command hooks that run at specific lifecycle events."
     },
     "instructions": {
       "description": "System instructions.",

@@ -256,10 +256,29 @@ pub(crate) fn skill_roots_from_layer_stack_with_agents(
     config_layer_stack: &ConfigLayerStack,
     cwd: &Path,
 ) -> Vec<SkillRoot> {
-    let mut roots = skill_roots_from_layer_stack_inner(config_layer_stack, home_dir().as_deref());
+    let user_home_dir = user_home_dir_from_layer_stack(config_layer_stack).or_else(home_dir);
+    let mut roots =
+        skill_roots_from_layer_stack_inner(config_layer_stack, user_home_dir.as_deref());
     roots.extend(repo_agents_skill_roots(config_layer_stack, cwd));
     dedupe_skill_roots_by_path(&mut roots);
     roots
+}
+
+fn user_home_dir_from_layer_stack(config_layer_stack: &ConfigLayerStack) -> Option<PathBuf> {
+    config_layer_stack
+        .get_layers(ConfigLayerStackOrdering::HighestPrecedenceFirst, true)
+        .into_iter()
+        .find_map(|layer| match &layer.name {
+            ConfigLayerSource::User { .. } => layer
+                .config_folder()
+                .and_then(|folder| folder.as_path().parent().map(Path::to_path_buf)),
+            ConfigLayerSource::Project { .. }
+            | ConfigLayerSource::System { .. }
+            | ConfigLayerSource::Mdm { .. }
+            | ConfigLayerSource::SessionFlags
+            | ConfigLayerSource::LegacyManagedConfigTomlFromFile { .. }
+            | ConfigLayerSource::LegacyManagedConfigTomlFromMdm => None,
+        })
 }
 
 fn dedupe_skill_roots_by_path(roots: &mut Vec<SkillRoot>) {
@@ -2583,10 +2602,7 @@ permissions:
             .into_iter()
             .map(|root| root.scope)
             .collect();
-        let mut expected = vec![SkillScope::User, SkillScope::System];
-        if home_dir().is_some() {
-            expected.insert(1, SkillScope::User);
-        }
+        let mut expected = vec![SkillScope::User, SkillScope::User, SkillScope::System];
         expected.push(SkillScope::Admin);
         assert_eq!(scopes, expected);
     }

@@ -18,6 +18,9 @@ use std::collections::HashMap;
 const COLLAB_PROMPT_PREVIEW_GRAPHEMES: usize = 160;
 const COLLAB_AGENT_ERROR_PREVIEW_GRAPHEMES: usize = 160;
 const COLLAB_AGENT_RESPONSE_PREVIEW_GRAPHEMES: usize = 240;
+const TEAM_SPAWN_CALL_PREFIX: &str = "team/spawn:";
+const TEAM_WAIT_CALL_PREFIX: &str = "team/wait:";
+const TEAM_CLOSE_CALL_PREFIX: &str = "team/close:";
 
 pub(crate) fn spawn_end(ev: CollabAgentSpawnEndEvent) -> PlainHistoryCell {
     let CollabAgentSpawnEndEvent {
@@ -65,12 +68,25 @@ pub(crate) fn waiting_begin(ev: CollabWaitingBeginEvent) -> PlainHistoryCell {
         call_id,
         sender_thread_id: _,
         receiver_thread_ids,
+        receiver_names,
     } = ev;
+    let title = if call_id.starts_with(TEAM_SPAWN_CALL_PREFIX) {
+        "Spawning team"
+    } else if call_id.starts_with(TEAM_WAIT_CALL_PREFIX) {
+        "Waiting for team"
+    } else if call_id.starts_with(TEAM_CLOSE_CALL_PREFIX) {
+        "Closing team"
+    } else {
+        "Waiting for agents"
+    };
     let details = vec![
         detail_line("call", call_id),
-        detail_line("receivers", format_thread_ids(&receiver_thread_ids)),
+        detail_line(
+            "receivers",
+            format_thread_ids(&receiver_thread_ids, &receiver_names),
+        ),
     ];
-    collab_event("Waiting for agents", details)
+    collab_event(title, details)
 }
 
 pub(crate) fn waiting_end(ev: CollabWaitingEndEvent) -> PlainHistoryCell {
@@ -78,10 +94,20 @@ pub(crate) fn waiting_end(ev: CollabWaitingEndEvent) -> PlainHistoryCell {
         call_id,
         sender_thread_id: _,
         statuses,
+        receiver_names,
     } = ev;
+    let title = if call_id.starts_with(TEAM_SPAWN_CALL_PREFIX) {
+        "Team spawned"
+    } else if call_id.starts_with(TEAM_WAIT_CALL_PREFIX) {
+        "Team wait complete"
+    } else if call_id.starts_with(TEAM_CLOSE_CALL_PREFIX) {
+        "Team close complete"
+    } else {
+        "Wait complete"
+    };
     let mut details = vec![detail_line("call", call_id)];
-    details.extend(wait_complete_lines(&statuses));
-    collab_event("Wait complete", details)
+    details.extend(wait_complete_lines(&statuses, &receiver_names));
+    collab_event(title, details)
 }
 
 pub(crate) fn close_end(ev: CollabCloseEndEvent) -> PlainHistoryCell {
@@ -168,19 +194,32 @@ fn prompt_line(prompt: &str) -> Option<Line<'static>> {
     }
 }
 
-fn format_thread_ids(ids: &[ThreadId]) -> Span<'static> {
+fn receiver_label(id: &ThreadId, receiver_names: &HashMap<ThreadId, String>) -> String {
+    match receiver_names.get(id) {
+        Some(name) if !name.trim().is_empty() => format!("{name} ({id})"),
+        _ => id.to_string(),
+    }
+}
+
+fn format_thread_ids(
+    ids: &[ThreadId],
+    receiver_names: &HashMap<ThreadId, String>,
+) -> Span<'static> {
     if ids.is_empty() {
         return Span::from("none").dim();
     }
     let joined = ids
         .iter()
-        .map(ToString::to_string)
+        .map(|id| receiver_label(id, receiver_names))
         .collect::<Vec<_>>()
         .join(", ");
     Span::from(joined)
 }
 
-fn wait_complete_lines(statuses: &HashMap<ThreadId, AgentStatus>) -> Vec<Line<'static>> {
+fn wait_complete_lines(
+    statuses: &HashMap<ThreadId, AgentStatus>,
+    receiver_names: &HashMap<ThreadId, String>,
+) -> Vec<Line<'static>> {
     if statuses.is_empty() {
         return vec![detail_line("agents", Span::from("none").dim())];
     }
@@ -235,17 +274,28 @@ fn wait_complete_lines(statuses: &HashMap<ThreadId, AgentStatus>) -> Vec<Line<'s
         ratatui::prelude::Stylize::red,
     );
 
-    let mut entries: Vec<(String, &AgentStatus)> = statuses
+    let mut entries: Vec<(String, String, &AgentStatus)> = statuses
         .iter()
-        .map(|(thread_id, status)| (thread_id.to_string(), status))
+        .map(|(thread_id, status)| {
+            let thread_id_str = thread_id.to_string();
+            (
+                receiver_label(thread_id, receiver_names),
+                thread_id_str,
+                status,
+            )
+        })
         .collect();
-    entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+    entries.sort_by(|(left_name, left_id, _), (right_name, right_id, _)| {
+        left_name
+            .cmp(right_name)
+            .then_with(|| left_id.cmp(right_id))
+    });
 
     let mut lines = Vec::with_capacity(entries.len() + 1);
     lines.push(detail_line_spans("agents", summary));
-    lines.extend(entries.into_iter().map(|(thread_id, status)| {
+    lines.extend(entries.into_iter().map(|(receiver, _, status)| {
         let mut spans = vec![
-            Span::from(thread_id).dim(),
+            Span::from(receiver).dim(),
             Span::from(" ").dim(),
             status_span(status),
         ];
@@ -292,4 +342,72 @@ fn detail_line_spans(label: &str, mut value: Vec<Span<'static>>) -> Line<'static
     spans.push(Span::from(format!("{label}: ")).dim());
     spans.append(&mut value);
     spans.into()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::history_cell::HistoryCell;
+    use insta::assert_snapshot;
+
+    fn render_cell(cell: PlainHistoryCell) -> String {
+        cell.display_lines(200)
+            .into_iter()
+            .map(|line| {
+                line.spans
+                    .into_iter()
+                    .map(|span| span.content.to_string())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn waiting_begin_team_close_renders_receiver_name() {
+        let sender_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000001").expect("valid id");
+        let receiver_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000002").expect("valid id");
+        let receiver_names = HashMap::from([(receiver_thread_id, "explorer_agent".to_string())]);
+        let rendered = render_cell(waiting_begin(CollabWaitingBeginEvent {
+            sender_thread_id,
+            receiver_thread_ids: vec![receiver_thread_id],
+            receiver_names,
+            call_id: format!("{TEAM_CLOSE_CALL_PREFIX}call-1"),
+        }));
+        assert_snapshot!(
+            rendered,
+            @r"
+        • Closing team
+          └ call: team/close:call-1
+            receivers: explorer_agent (00000000-0000-0000-0000-000000000002)
+        "
+        );
+    }
+
+    #[test]
+    fn waiting_end_team_close_renders_shutdown_status() {
+        let sender_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000001").expect("valid id");
+        let receiver_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000002").expect("valid id");
+        let statuses = HashMap::from([(receiver_thread_id, AgentStatus::Shutdown)]);
+        let receiver_names = HashMap::from([(receiver_thread_id, "explorer_agent".to_string())]);
+        let rendered = render_cell(waiting_end(CollabWaitingEndEvent {
+            sender_thread_id,
+            call_id: format!("{TEAM_CLOSE_CALL_PREFIX}call-2"),
+            statuses,
+            receiver_names,
+        }));
+        assert_snapshot!(
+            rendered,
+            @r"
+        • Team close complete
+          └ call: team/close:call-2
+            agents: 1 total · 1 shutdown
+            explorer_agent (00000000-0000-0000-0000-000000000002) shutdown
+        "
+        );
+    }
 }

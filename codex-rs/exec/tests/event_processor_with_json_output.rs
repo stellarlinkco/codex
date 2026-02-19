@@ -624,6 +624,7 @@ fn collab_wait_end_without_begin_synthesizes_failed_item() {
             sender_thread_id,
             call_id: "call-11".to_string(),
             statuses: statuses.clone(),
+            receiver_names: std::collections::HashMap::new(),
         }),
     );
     let events = ep.collect_thread_events(&end);

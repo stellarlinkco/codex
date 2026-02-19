@@ -42,8 +42,11 @@ use crate::turn_metadata::TurnMetadataState;
 use crate::util::error_or_panic;
 use async_channel::Receiver;
 use async_channel::Sender;
+use codex_hooks::CommandHooksConfig;
 use codex_hooks::HookEvent;
 use codex_hooks::HookEventAfterAgent;
+use codex_hooks::HookEventPreCompact;
+use codex_hooks::HookEventSessionStart;
 use codex_hooks::HookPayload;
 use codex_hooks::HookResult;
 use codex_hooks::Hooks;
@@ -425,7 +428,7 @@ impl Codex {
             tx_event.clone(),
             agent_status_tx.clone(),
             conversation_history,
-            session_source_clone,
+            session_source_clone.clone(),
             skills_manager,
             file_watcher,
             agent_control,
@@ -437,6 +440,45 @@ impl Codex {
             map_session_init_error(&e, &config.codex_home)
         })?;
         let thread_id = session.conversation_id;
+        let session_start_outcomes = session
+            .hooks()
+            .dispatch(HookPayload {
+                session_id: thread_id,
+                cwd: config.cwd.clone(),
+                triggered_at: chrono::Utc::now(),
+                hook_event: HookEvent::SessionStart {
+                    event: HookEventSessionStart {
+                        source: session_source_clone.to_string(),
+                    },
+                },
+            })
+            .await;
+        for hook_outcome in session_start_outcomes {
+            let hook_name = hook_outcome.hook_name;
+            match hook_outcome.result {
+                HookResult::Success => {}
+                HookResult::FailedContinue(error) => {
+                    warn!(
+                        thread_id = %thread_id,
+                        hook_name = %hook_name,
+                        error = %error,
+                        "session_start hook failed; continuing"
+                    );
+                }
+                HookResult::FailedAbort(error) => {
+                    let message = format!(
+                        "session_start hook '{hook_name}' failed and aborted startup: {error}"
+                    );
+                    warn!(
+                        thread_id = %thread_id,
+                        hook_name = %hook_name,
+                        error = %error,
+                        "session_start hook failed; aborting startup"
+                    );
+                    return Err(CodexErr::InvalidRequest(message));
+                }
+            }
+        }
 
         // This task will run until Op::Shutdown is received.
         let session_loop_span = info_span!("session_loop", thread_id = %thread_id);
@@ -1295,6 +1337,11 @@ impl Session {
             ),
             hooks: Hooks::new(HooksConfig {
                 legacy_notify_argv: config.notify.clone(),
+                command_hooks: config
+                    .hooks
+                    .clone()
+                    .map(CommandHooksConfig::from)
+                    .unwrap_or_default(),
             }),
             rollout: Mutex::new(rollout_recorder),
             user_shell: Arc::new(default_shell),
@@ -3298,6 +3345,11 @@ mod handlers {
     use crate::tasks::UserShellCommandMode;
     use crate::tasks::UserShellCommandTask;
     use crate::tasks::execute_user_shell_command;
+    use codex_hooks::HookEvent;
+    use codex_hooks::HookEventSessionEnd;
+    use codex_hooks::HookEventUserPromptSubmit;
+    use codex_hooks::HookPayload;
+    use codex_hooks::HookResult;
     use codex_protocol::custom_prompts::CustomPrompt;
     use codex_protocol::protocol::CodexErrorInfo;
     use codex_protocol::protocol::ErrorEvent;
@@ -3423,6 +3475,55 @@ mod handlers {
         sess.maybe_emit_unknown_model_warning_for_turn(current_context.as_ref())
             .await;
         current_context.otel_manager.user_prompt(&items);
+        let prompt = render_hook_prompt(&items);
+        let prompt_hook_outcomes = sess
+            .hooks()
+            .dispatch(HookPayload {
+                session_id: sess.conversation_id,
+                cwd: current_context.cwd.clone(),
+                triggered_at: chrono::Utc::now(),
+                hook_event: HookEvent::UserPromptSubmit {
+                    event: HookEventUserPromptSubmit {
+                        turn_id: current_context.sub_id.clone(),
+                        prompt,
+                    },
+                },
+            })
+            .await;
+        for hook_outcome in prompt_hook_outcomes {
+            let hook_name = hook_outcome.hook_name;
+            match hook_outcome.result {
+                HookResult::Success => {}
+                HookResult::FailedContinue(error) => {
+                    warn!(
+                        turn_id = %current_context.sub_id,
+                        hook_name = %hook_name,
+                        error = %error,
+                        "user_prompt_submit hook failed; continuing"
+                    );
+                }
+                HookResult::FailedAbort(error) => {
+                    let message = format!(
+                        "user_prompt_submit hook '{hook_name}' blocked submission: {error}"
+                    );
+                    warn!(
+                        turn_id = %current_context.sub_id,
+                        hook_name = %hook_name,
+                        error = %error,
+                        "user_prompt_submit hook blocked submission"
+                    );
+                    sess.send_event(
+                        &current_context,
+                        EventMsg::Error(ErrorEvent {
+                            message,
+                            codex_error_info: Some(CodexErrorInfo::BadRequest),
+                        }),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        }
 
         // Attempt to inject input into current task.
         if let Err(SteerInputError::NoActiveTurn(items)) = sess.steer_input(items, None).await {
@@ -3445,6 +3546,21 @@ mod handlers {
                 .await;
             *previous_context = Some(current_context);
         }
+    }
+
+    fn render_hook_prompt(items: &[UserInput]) -> String {
+        items
+            .iter()
+            .map(|item| match item {
+                UserInput::Text { text, .. } => text.clone(),
+                UserInput::Image { .. } => "[image]".to_string(),
+                UserInput::LocalImage { path } => format!("[local_image:{}]", path.display()),
+                UserInput::Skill { name, .. } => format!("[skill:{name}]"),
+                UserInput::Mention { name, .. } => format!("[mention:{name}]"),
+                _ => "[unsupported_input]".to_string(),
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
     }
 
     pub async fn run_user_shell_command(
@@ -3998,6 +4114,48 @@ mod handlers {
             .terminate_all_processes()
             .await;
         sess.services.zsh_exec_bridge.shutdown().await;
+        let (session_source, session_cwd) = {
+            let state = sess.state.lock().await;
+            (
+                state.session_configuration.session_source.to_string(),
+                state.session_configuration.cwd.clone(),
+            )
+        };
+        let session_end_outcomes = sess
+            .hooks()
+            .dispatch(HookPayload {
+                session_id: sess.conversation_id,
+                cwd: session_cwd,
+                triggered_at: chrono::Utc::now(),
+                hook_event: HookEvent::SessionEnd {
+                    event: HookEventSessionEnd {
+                        source: session_source,
+                    },
+                },
+            })
+            .await;
+        for hook_outcome in session_end_outcomes {
+            let hook_name = hook_outcome.hook_name;
+            match hook_outcome.result {
+                HookResult::Success => {}
+                HookResult::FailedContinue(error) => {
+                    warn!(
+                        thread_id = %sess.conversation_id,
+                        hook_name = %hook_name,
+                        error = %error,
+                        "session_end hook failed; continuing"
+                    );
+                }
+                HookResult::FailedAbort(error) => {
+                    warn!(
+                        thread_id = %sess.conversation_id,
+                        hook_name = %hook_name,
+                        error = %error,
+                        "session_end hook requested abort; ignoring during shutdown"
+                    );
+                }
+            }
+        }
         info!("Shutting down Codex instance");
         let history = sess.clone_history().await;
         let turn_count = history
@@ -4516,20 +4674,39 @@ pub(crate) async fn run_turn(
 
                 if !needs_follow_up {
                     last_agent_message = sampling_request_last_agent_message;
+                    let is_subagent_stop =
+                        matches!(turn_context.session_source, SessionSource::SubAgent(_));
+                    let hook_event = if is_subagent_stop {
+                        HookEvent::SubagentStop {
+                            event: HookEventAfterAgent {
+                                thread_id: sess.conversation_id,
+                                turn_id: turn_context.sub_id.clone(),
+                                input_messages: sampling_request_input_messages.clone(),
+                                last_assistant_message: last_agent_message.clone(),
+                            },
+                        }
+                    } else {
+                        HookEvent::Stop {
+                            event: HookEventAfterAgent {
+                                thread_id: sess.conversation_id,
+                                turn_id: turn_context.sub_id.clone(),
+                                input_messages: sampling_request_input_messages.clone(),
+                                last_assistant_message: last_agent_message.clone(),
+                            },
+                        }
+                    };
+                    let hook_event_name = if is_subagent_stop {
+                        "subagent_stop"
+                    } else {
+                        "stop"
+                    };
                     let hook_outcomes = sess
                         .hooks()
                         .dispatch(HookPayload {
                             session_id: sess.conversation_id,
                             cwd: turn_context.cwd.clone(),
                             triggered_at: chrono::Utc::now(),
-                            hook_event: HookEvent::AfterAgent {
-                                event: HookEventAfterAgent {
-                                    thread_id: sess.conversation_id,
-                                    turn_id: turn_context.sub_id.clone(),
-                                    input_messages: sampling_request_input_messages,
-                                    last_assistant_message: last_agent_message.clone(),
-                                },
-                            },
+                            hook_event,
                         })
                         .await;
 
@@ -4543,18 +4720,18 @@ pub(crate) async fn run_turn(
                                     turn_id = %turn_context.sub_id,
                                     hook_name = %hook_name,
                                     error = %error,
-                                    "after_agent hook failed; continuing"
+                                    "{hook_event_name} hook failed; continuing"
                                 );
                             }
                             HookResult::FailedAbort(error) => {
                                 let message = format!(
-                                    "after_agent hook '{hook_name}' failed and aborted turn completion: {error}"
+                                    "{hook_event_name} hook '{hook_name}' failed and aborted turn completion: {error}"
                                 );
                                 warn!(
                                     turn_id = %turn_context.sub_id,
                                     hook_name = %hook_name,
                                     error = %error,
-                                    "after_agent hook failed; aborting operation"
+                                    "{hook_event_name} hook failed; aborting operation"
                                 );
                                 if abort_message.is_none() {
                                     abort_message = Some(message);
@@ -4673,6 +4850,45 @@ async fn maybe_run_previous_model_inline_compact(
 }
 
 async fn run_auto_compact(sess: &Arc<Session>, turn_context: &Arc<TurnContext>) -> CodexResult<()> {
+    let hook_outcomes = sess
+        .hooks()
+        .dispatch(HookPayload {
+            session_id: sess.conversation_id,
+            cwd: turn_context.cwd.clone(),
+            triggered_at: chrono::Utc::now(),
+            hook_event: HookEvent::PreCompact {
+                event: HookEventPreCompact {
+                    turn_id: turn_context.sub_id.clone(),
+                    model: turn_context.model_info.slug.clone(),
+                },
+            },
+        })
+        .await;
+    for hook_outcome in hook_outcomes {
+        let hook_name = hook_outcome.hook_name;
+        match hook_outcome.result {
+            HookResult::Success => {}
+            HookResult::FailedContinue(error) => {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    hook_name = %hook_name,
+                    error = %error,
+                    "pre_compact hook failed; continuing"
+                );
+            }
+            HookResult::FailedAbort(error) => {
+                let message = format!("pre_compact hook '{hook_name}' blocked compaction: {error}");
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    hook_name = %hook_name,
+                    error = %error,
+                    "pre_compact hook blocked compaction"
+                );
+                return Err(CodexErr::InvalidRequest(message));
+            }
+        }
+    }
+
     if should_use_remote_compact_task(&turn_context.provider) {
         run_inline_remote_auto_compact_task(Arc::clone(sess), Arc::clone(turn_context)).await?;
     } else {
@@ -7385,6 +7601,11 @@ mod tests {
             ),
             hooks: Hooks::new(HooksConfig {
                 legacy_notify_argv: config.notify.clone(),
+                command_hooks: config
+                    .hooks
+                    .clone()
+                    .map(CommandHooksConfig::from)
+                    .unwrap_or_default(),
             }),
             rollout: Mutex::new(None),
             user_shell: Arc::new(default_user_shell()),
@@ -7534,6 +7755,11 @@ mod tests {
             ),
             hooks: Hooks::new(HooksConfig {
                 legacy_notify_argv: config.notify.clone(),
+                command_hooks: config
+                    .hooks
+                    .clone()
+                    .map(CommandHooksConfig::from)
+                    .unwrap_or_default(),
             }),
             rollout: Mutex::new(None),
             user_shell: Arc::new(default_user_shell()),

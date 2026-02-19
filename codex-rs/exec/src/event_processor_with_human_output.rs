@@ -686,6 +686,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             EventMsg::CollabWaitingBegin(CollabWaitingBeginEvent {
                 sender_thread_id: _,
                 receiver_thread_ids,
+                receiver_names,
                 call_id,
             }) => {
                 ts_msg!(
@@ -696,13 +697,14 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 );
                 eprintln!(
                     "  receivers: {}",
-                    format_receiver_list(&receiver_thread_ids).style(self.dimmed)
+                    format_receiver_list(&receiver_thread_ids, &receiver_names).style(self.dimmed)
                 );
             }
             EventMsg::CollabWaitingEnd(CollabWaitingEndEvent {
                 sender_thread_id: _,
                 call_id,
                 statuses,
+                receiver_names,
             }) => {
                 if statuses.is_empty() {
                     ts_msg!(
@@ -723,13 +725,23 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 ts_msg!(self, "{}", title.style(title_style));
                 let mut sorted = statuses
                     .into_iter()
-                    .map(|(thread_id, status)| (thread_id.to_string(), status))
+                    .map(|(thread_id, status)| {
+                        (
+                            format_receiver(&thread_id, &receiver_names),
+                            thread_id.to_string(),
+                            status,
+                        )
+                    })
                     .collect::<Vec<_>>();
-                sorted.sort_by(|(left, _), (right, _)| left.cmp(right));
-                for (thread_id, status) in sorted {
+                sorted.sort_by(|(left_name, left_id, _), (right_name, right_id, _)| {
+                    left_name
+                        .cmp(right_name)
+                        .then_with(|| left_id.cmp(right_id))
+                });
+                for (receiver, _, status) in sorted {
                     eprintln!(
                         "  {} {}",
-                        thread_id.style(self.dimmed),
+                        receiver.style(self.dimmed),
                         format_collab_status(&status).style(style_for_agent_status(&status, self))
                     );
                 }
@@ -900,12 +912,25 @@ fn is_collab_status_failure(status: &AgentStatus) -> bool {
     matches!(status, AgentStatus::Errored(_) | AgentStatus::NotFound)
 }
 
-fn format_receiver_list(ids: &[codex_protocol::ThreadId]) -> String {
+fn format_receiver(
+    id: &codex_protocol::ThreadId,
+    receiver_names: &HashMap<codex_protocol::ThreadId, String>,
+) -> String {
+    match receiver_names.get(id) {
+        Some(name) if !name.trim().is_empty() => format!("{name} ({id})"),
+        _ => id.to_string(),
+    }
+}
+
+fn format_receiver_list(
+    ids: &[codex_protocol::ThreadId],
+    receiver_names: &HashMap<codex_protocol::ThreadId, String>,
+) -> String {
     if ids.is_empty() {
         return "none".to_string();
     }
     ids.iter()
-        .map(ToString::to_string)
+        .map(|id| format_receiver(id, receiver_names))
         .collect::<Vec<_>>()
         .join(", ")
 }
