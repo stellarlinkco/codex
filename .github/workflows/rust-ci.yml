@@ -495,7 +495,7 @@ jobs:
           if [[ "${{ github.repository }}" == "openai/codex" ]]; then
             cargo nextest run --all-features --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings
           else
-            cargo nextest run --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings \
+            cargo nextest run --all-features --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings \
               -p codex-core \
               -p codex-cli \
               -p codex-tui
