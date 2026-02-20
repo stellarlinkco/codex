@@ -31,6 +31,8 @@ use std::io::Read;
 #[cfg(unix)]
 use std::io::Write;
 #[cfg(unix)]
+use std::os::unix::process::CommandExt;
+#[cfg(unix)]
 use std::time::Instant;
 #[cfg(unix)]
 use tokio::io::AsyncReadExt;
@@ -182,6 +184,8 @@ impl ZshExecBridge {
         );
         cmd.env(EXEC_WRAPPER_ENV_VAR, &wrapper_path);
         cmd.env(ZSH_EXEC_WRAPPER_MODE_ENV_VAR, "1");
+        #[cfg(unix)]
+        cmd.as_std_mut().process_group(0);
 
         let mut child = cmd.spawn().map_err(|err| {
             ToolError::Rejected(format!(
