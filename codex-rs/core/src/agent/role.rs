@@ -9,11 +9,9 @@ use crate::config_loader::resolve_relative_paths_in_config_toml;
 use codex_app_server_protocol::ConfigLayerSource;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use std::path::Path;
 use std::sync::LazyLock;
 use toml::Value as TomlValue;
 
-const BUILT_IN_EXPLORER_CONFIG: &str = include_str!("builtins/explorer.toml");
 const DEFAULT_ROLE_NAME: &str = "default";
 const AGENT_TYPE_UNAVAILABLE_ERROR: &str = "agent type is currently not available";
 
@@ -37,30 +35,36 @@ pub(crate) async fn apply_role_to_config(
         return Ok(());
     };
 
-    let (role_config_contents, role_config_base) = if is_built_in {
-        (
-            built_in::config_file_contents(config_file)
-                .map(str::to_owned)
-                .ok_or_else(|| AGENT_TYPE_UNAVAILABLE_ERROR.to_string())?,
-            config.codex_home.as_path(),
-        )
+    let (role_config_path, role_config_base) = if is_built_in {
+        let role_config_path = if config_file.is_absolute() {
+            config_file.to_path_buf()
+        } else {
+            config.codex_home.join(config_file)
+        };
+        let role_config_base = role_config_path
+            .parent()
+            .unwrap_or(config.codex_home.as_path())
+            .to_path_buf();
+        (role_config_path, role_config_base)
     } else {
-        (
-            tokio::fs::read_to_string(config_file)
-                .await
-                .map_err(|_| AGENT_TYPE_UNAVAILABLE_ERROR.to_string())?,
-            config_file
-                .parent()
-                .ok_or_else(|| AGENT_TYPE_UNAVAILABLE_ERROR.to_string())?,
-        )
+        let role_config_base = config_file
+            .parent()
+            .ok_or_else(|| AGENT_TYPE_UNAVAILABLE_ERROR.to_string())?
+            .to_path_buf();
+        (config_file.to_path_buf(), role_config_base)
     };
+
+    let role_config_contents = tokio::fs::read_to_string(&role_config_path)
+        .await
+        .map_err(|_| AGENT_TYPE_UNAVAILABLE_ERROR.to_string())?;
 
     let role_config_toml: TomlValue = toml::from_str(&role_config_contents)
         .map_err(|_| AGENT_TYPE_UNAVAILABLE_ERROR.to_string())?;
-    deserialize_config_toml_with_base(role_config_toml.clone(), role_config_base)
+    deserialize_config_toml_with_base(role_config_toml.clone(), &role_config_base)
         .map_err(|_| AGENT_TYPE_UNAVAILABLE_ERROR.to_string())?;
-    let role_layer_toml = resolve_relative_paths_in_config_toml(role_config_toml, role_config_base)
-        .map_err(|_| AGENT_TYPE_UNAVAILABLE_ERROR.to_string())?;
+    let role_layer_toml =
+        resolve_relative_paths_in_config_toml(role_config_toml, &role_config_base)
+            .map_err(|_| AGENT_TYPE_UNAVAILABLE_ERROR.to_string())?;
 
     let mut layers: Vec<ConfigLayerEntry> = config
         .config_layer_stack
@@ -171,7 +175,12 @@ Rules:
 - Trust explorer results without verification.
 - Run explorers in parallel when useful.
 - Reuse existing explorers for related questions."#.to_string()),
-                        config_file: Some("explorer.toml".to_string().parse().unwrap_or_default()),
+                        config_file: Some(
+                            "agents/explorer.toml"
+                                .to_string()
+                                .parse()
+                                .unwrap_or_default(),
+                        ),
                     }
                 ),
                 (
@@ -191,14 +200,6 @@ Rules:
             ])
         });
         &CONFIG
-    }
-
-    /// Resolves a built-in role `config_file` path to embedded content.
-    pub(super) fn config_file_contents(path: &Path) -> Option<&'static str> {
-        match path.to_str()? {
-            "explorer.toml" => Some(BUILT_IN_EXPLORER_CONFIG),
-            _ => None,
-        }
     }
 }
 
@@ -229,6 +230,11 @@ mod tests {
 
     async fn write_role_config(home: &TempDir, name: &str, contents: &str) -> PathBuf {
         let role_path = home.path().join(name);
+        if let Some(parent) = role_path.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .expect("create role config parent directory");
+        }
         tokio::fs::write(&role_path, contents)
             .await
             .expect("write role config");
@@ -269,16 +275,22 @@ mod tests {
 
     #[tokio::test]
     async fn apply_explorer_role_keeps_model_and_adds_session_flags_layer() {
-        let (_home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+        let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
         let before_layers = session_flags_layer_count(&config);
         let model_before = config.model.clone();
+        write_role_config(
+            &home,
+            "agents/explorer.toml",
+            "model_reasoning_effort = \"high\"",
+        )
+        .await;
 
         apply_role_to_config(&mut config, Some("explorer"))
             .await
             .expect("explorer role should apply");
 
         assert_eq!(config.model, model_before);
-        assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::Medium));
+        assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::High));
         assert_eq!(session_flags_layer_count(&config), before_layers + 1);
     }
 
@@ -478,17 +490,5 @@ writable_roots = ["./sandbox-root"]
             .expect("find built-in role");
 
         assert!(user_index < built_in_index);
-    }
-
-    #[test]
-    fn built_in_config_file_contents_resolves_explorer_only() {
-        assert_eq!(
-            built_in::config_file_contents(Path::new("explorer.toml")),
-            Some(BUILT_IN_EXPLORER_CONFIG)
-        );
-        assert_eq!(
-            built_in::config_file_contents(Path::new("missing.toml")),
-            None
-        );
     }
 }

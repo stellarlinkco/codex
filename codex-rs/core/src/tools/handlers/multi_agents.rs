@@ -1842,6 +1842,17 @@ mod tests {
             .set(AskForApproval::OnRequest)
             .expect("approval policy should be set");
         turn.config = Arc::new(config);
+        let explorer_config_path = turn.config.codex_home.join("agents").join("explorer.toml");
+        tokio::fs::create_dir_all(
+            explorer_config_path
+                .parent()
+                .expect("explorer config should have a parent dir"),
+        )
+        .await
+        .expect("create agents directory");
+        tokio::fs::write(&explorer_config_path, "model_reasoning_effort = \"high\"")
+            .await
+            .expect("write explorer role config");
 
         let invocation = invocation(
             Arc::new(session),
@@ -1875,7 +1886,7 @@ mod tests {
         assert_eq!(snapshot.model, expected_model);
         assert_eq!(
             snapshot.reasoning_effort,
-            Some(codex_protocol::openai_models::ReasoningEffort::Medium)
+            Some(codex_protocol::openai_models::ReasoningEffort::High)
         );
         assert_eq!(snapshot.approval_policy, AskForApproval::Never);
     }
