@@ -20,7 +20,7 @@ and are labeled as connected; others are marked as can be installed.
 
 ## Hooks
 
-Codex can run command hooks at lifecycle boundaries such as `session_start`, `user_prompt_submit`, `pre_tool_use`, `post_tool_use`, and `stop`.
+Codex can run command hooks at lifecycle boundaries such as `session_start`, `session_end`, `user_prompt_submit`, `pre_tool_use`, `permission_request`, `post_tool_use`, `post_tool_use_failure`, `stop`, `subagent_stop`, and `pre_compact`.
 
 Example:
 
@@ -29,14 +29,20 @@ Example:
 
 [[hooks.pre_tool_use]]
 command = ["python3", "/Users/me/.codex/hooks/check_tool.py"]
-timeout_ms = 5000
-abort_on_error = true
+timeout = 5
+once = true
 
 [hooks.pre_tool_use.matcher]
-tool_name_regex = "^shell|exec"
+tool_name_regex = "^(shell|exec)$"
 ```
 
-For backward compatibility, `notify = ["..."]` is still supported and mapped to turn-complete hooks.
+Hooks receive a JSON payload on `stdin`. If the hook exits with code `0`, Codex will attempt to parse a JSON object from `stdout` (either the full output or the first parseable JSON line). Exit code `2` blocks execution for hook events that support blocking; other non-zero exit codes are treated as non-blocking errors.
+
+`command` can be either an argv list (`["python3", "..."]`) or a shell command string (`"python3 ..."`). Matchers can filter by `tool_name`, `tool_name_regex`, or `prompt_regex`.
+
+See `docs/hooks.md` for hook payload fields and `stdout` response options.
+
+Project hooks can also be configured in `./.codex/config.toml`. If the project directory is untrusted, project layers may load as disabled; mark it trusted via your user config (for example, `[projects."/abs/path"].trust_level = "trusted"`).
 
 See the configuration reference for the latest hook settings:
 

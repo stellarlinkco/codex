@@ -17,6 +17,7 @@ You can also install via Homebrew (`brew install --cask codex`) or download a pl
 
 - First run with Codex? Start with [`docs/getting-started.md`](../docs/getting-started.md) (links to the walkthrough for prompts, keyboard shortcuts, and session management).
 - Want deeper control? See [`docs/config.md`](../docs/config.md) and [`docs/install.md`](../docs/install.md).
+- Working with parallel sub-agents? See [`docs/agent-teams.md`](../docs/agent-teams.md).
 
 ## What's new in the Rust CLI
 
@@ -46,7 +47,7 @@ Use `codex mcp` to add/list/get/remove MCP server launchers defined in `config.t
 
 ### Notifications
 
-You can enable command hooks for events like `pre_tool_use`, `user_prompt_submit`, and turn completion via [`[hooks]`](../docs/config.md#hooks). The same config guide also documents legacy `notify` support (including desktop notifications via [terminal-notifier](https://github.com/julienXX/terminal-notifier) on macOS). When Codex detects that it is running under WSL 2 inside Windows Terminal (`WT_SESSION` is set), the TUI automatically falls back to native Windows toast notifications so approval prompts and completed turns surface even though Windows Terminal does not implement OSC 9.
+You can enable command hooks for events like `pre_tool_use`, `user_prompt_submit`, `permission_request`, `post_tool_use_failure`, and `stop` via [`[hooks]`](../docs/config.md#hooks). See [`docs/hooks.md`](../docs/hooks.md) for the hook payload and response contract. When Codex detects that it is running under WSL 2 inside Windows Terminal (`WT_SESSION` is set), the TUI automatically falls back to native Windows toast notifications so approval prompts and completed turns surface even though Windows Terminal does not implement OSC 9.
 
 ### `codex exec` to run Codex programmatically/non-interactively
 

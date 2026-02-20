@@ -481,20 +481,29 @@
         }
       ]
     },
-    "HookCommandToml": {
-      "additionalProperties": false,
-      "properties": {
-        "abort_on_error": {
-          "default": false,
-          "description": "Treat execution failures as aborting errors.",
-          "type": "boolean"
-        },
-        "command": {
-          "description": "Command argv to execute without a shell wrapper.",
+    "HookCommandSpecToml": {
+      "anyOf": [
+        {
           "items": {
             "type": "string"
           },
           "type": "array"
+        },
+        {
+          "type": "string"
+        }
+      ]
+    },
+    "HookCommandToml": {
+      "additionalProperties": false,
+      "properties": {
+        "command": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/HookCommandSpecToml"
+            }
+          ],
+          "description": "Command argv or shell command string."
         },
         "matcher": {
           "allOf": [
@@ -509,13 +518,13 @@
           "description": "Optional hook display name used in logs.",
           "type": "string"
         },
-        "run_async": {
+        "once": {
           "default": false,
-          "description": "Run this hook asynchronously (fire-and-forget).",
+          "description": "Run this hook at most once per session.",
           "type": "boolean"
         },
-        "timeout_ms": {
-          "description": "Optional timeout in milliseconds.",
+        "timeout": {
+          "description": "Optional timeout in seconds.",
           "format": "uint64",
           "minimum": 0.0,
           "type": "integer"
@@ -547,14 +556,7 @@
     "HooksToml": {
       "additionalProperties": false,
       "properties": {
-        "after_agent": {
-          "default": [],
-          "items": {
-            "$ref": "#/definitions/HookCommandToml"
-          },
-          "type": "array"
-        },
-        "after_tool_use": {
+        "permission_request": {
           "default": [],
           "items": {
             "$ref": "#/definitions/HookCommandToml"
@@ -562,6 +564,13 @@
           "type": "array"
         },
         "post_tool_use": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/HookCommandToml"
+          },
+          "type": "array"
+        },
+        "post_tool_use_failure": {
           "default": [],
           "items": {
             "$ref": "#/definitions/HookCommandToml"
@@ -1786,14 +1795,6 @@
         }
       ],
       "description": "Collection of in-product notices (different from notifications) See [`crate::config::types::Notices`] for more details"
-    },
-    "notify": {
-      "default": null,
-      "description": "Optional external command to spawn for end-user notifications.",
-      "items": {
-        "type": "string"
-      },
-      "type": "array"
     },
     "oss_provider": {
       "description": "Preferred OSS provider for local models, e.g. \"lmstudio\" or \"ollama\".",

@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::io;
 use std::io::ErrorKind;
 use std::process::Output;
@@ -6,15 +7,17 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use regex::Regex;
-use serde::Deserialize;
+use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
+use tokio::sync::Mutex;
 
-use crate::types::Hook;
 use crate::types::HookEvent;
 use crate::types::HookPayload;
+use crate::types::HookPermissionDecision;
 use crate::types::HookResponse;
 use crate::types::HookResult;
+use crate::types::HookResultControl;
 
 #[derive(Debug, Clone, Default)]
 pub struct HookMatcherConfig {
@@ -27,9 +30,9 @@ pub struct HookMatcherConfig {
 pub struct CommandHookConfig {
     pub name: Option<String>,
     pub command: Vec<String>,
-    pub timeout_ms: Option<u64>,
-    pub run_async: bool,
-    pub abort_on_error: bool,
+    /// Timeout in seconds.
+    pub timeout: Option<u64>,
+    pub once: bool,
     pub matcher: HookMatcherConfig,
 }
 
@@ -39,18 +42,28 @@ pub struct CommandHooksConfig {
     pub session_end: Vec<CommandHookConfig>,
     pub user_prompt_submit: Vec<CommandHookConfig>,
     pub pre_tool_use: Vec<CommandHookConfig>,
+    pub permission_request: Vec<CommandHookConfig>,
     pub post_tool_use: Vec<CommandHookConfig>,
+    pub post_tool_use_failure: Vec<CommandHookConfig>,
     pub stop: Vec<CommandHookConfig>,
     pub subagent_stop: Vec<CommandHookConfig>,
     pub pre_compact: Vec<CommandHookConfig>,
-    pub after_agent: Vec<CommandHookConfig>,
-    pub after_tool_use: Vec<CommandHookConfig>,
 }
 
 #[derive(Default, Clone)]
 pub struct HooksConfig {
-    pub legacy_notify_argv: Option<Vec<String>>,
     pub command_hooks: CommandHooksConfig,
+}
+
+#[derive(Clone)]
+struct Hook {
+    name: String,
+    once_key: String,
+    command: Arc<Vec<String>>,
+    timeout: Option<Duration>,
+    matcher: CompiledMatcher,
+    once: bool,
+    config_error: Option<String>,
 }
 
 #[derive(Clone)]
@@ -59,10 +72,13 @@ pub struct Hooks {
     session_end: Vec<Hook>,
     user_prompt_submit: Vec<Hook>,
     pre_tool_use: Vec<Hook>,
-    after_tool_use: Vec<Hook>,
-    after_agent: Vec<Hook>,
+    permission_request: Vec<Hook>,
+    post_tool_use: Vec<Hook>,
+    post_tool_use_failure: Vec<Hook>,
+    stop: Vec<Hook>,
     subagent_stop: Vec<Hook>,
     pre_compact: Vec<Hook>,
+    ran_once: Arc<Mutex<HashSet<String>>>,
 }
 
 #[derive(Clone)]
@@ -139,7 +155,9 @@ enum HookEventKey {
     SessionEnd,
     UserPromptSubmit,
     PreToolUse,
+    PermissionRequest,
     PostToolUse,
+    PostToolUseFailure,
     Stop,
     SubagentStop,
     PreCompact,
@@ -152,18 +170,33 @@ impl HookEventKey {
             HookEventKey::SessionEnd => "session_end",
             HookEventKey::UserPromptSubmit => "user_prompt_submit",
             HookEventKey::PreToolUse => "pre_tool_use",
+            HookEventKey::PermissionRequest => "permission_request",
             HookEventKey::PostToolUse => "post_tool_use",
+            HookEventKey::PostToolUseFailure => "post_tool_use_failure",
             HookEventKey::Stop => "stop",
             HookEventKey::SubagentStop => "subagent_stop",
             HookEventKey::PreCompact => "pre_compact",
         }
     }
 
-    fn supports_block_decision(self) -> bool {
+    fn supports_exit_2_block(self) -> bool {
         matches!(
             self,
             HookEventKey::UserPromptSubmit
                 | HookEventKey::PreToolUse
+                | HookEventKey::PermissionRequest
+                | HookEventKey::Stop
+                | HookEventKey::SubagentStop
+                | HookEventKey::PreCompact
+        )
+    }
+
+    fn supports_output_decisions(self) -> bool {
+        matches!(
+            self,
+            HookEventKey::UserPromptSubmit
+                | HookEventKey::PreToolUse
+                | HookEventKey::PermissionRequest
                 | HookEventKey::Stop
                 | HookEventKey::SubagentStop
                 | HookEventKey::PreCompact
@@ -171,16 +204,10 @@ impl HookEventKey {
     }
 }
 
-#[derive(Debug, Deserialize)]
-struct HookDecisionPayload {
-    decision: Option<String>,
-    reason: Option<String>,
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ParsedDecision {
-    Approve,
-    Block,
+    Allow,
+    Deny,
     Ask,
 }
 
@@ -190,31 +217,11 @@ impl Default for Hooks {
     }
 }
 
-// Hooks are arbitrary, user-specified functions that are deterministically
+// Hooks are arbitrary, user-specified command handlers that are deterministically
 // executed for specific events in the Codex lifecycle.
 impl Hooks {
     pub fn new(config: HooksConfig) -> Self {
-        let HooksConfig {
-            legacy_notify_argv,
-            mut command_hooks,
-        } = config;
-
-        command_hooks.stop.extend(command_hooks.after_agent);
-        command_hooks
-            .post_tool_use
-            .extend(command_hooks.after_tool_use);
-
-        let mut after_agent = build_hooks(command_hooks.stop, HookEventKey::Stop);
-        let mut subagent_stop =
-            build_hooks(command_hooks.subagent_stop, HookEventKey::SubagentStop);
-        if let Some(notify_hook) = legacy_notify_argv
-            .filter(|argv| !argv.is_empty() && !argv[0].is_empty())
-            .map(crate::notify_hook)
-        {
-            after_agent.push(notify_hook.clone());
-            subagent_stop.push(notify_hook);
-        }
-
+        let HooksConfig { command_hooks } = config;
         Self {
             session_start: build_hooks(command_hooks.session_start, HookEventKey::SessionStart),
             session_end: build_hooks(command_hooks.session_end, HookEventKey::SessionEnd),
@@ -223,34 +230,77 @@ impl Hooks {
                 HookEventKey::UserPromptSubmit,
             ),
             pre_tool_use: build_hooks(command_hooks.pre_tool_use, HookEventKey::PreToolUse),
-            after_tool_use: build_hooks(command_hooks.post_tool_use, HookEventKey::PostToolUse),
-            after_agent,
-            subagent_stop,
+            permission_request: build_hooks(
+                command_hooks.permission_request,
+                HookEventKey::PermissionRequest,
+            ),
+            post_tool_use: build_hooks(command_hooks.post_tool_use, HookEventKey::PostToolUse),
+            post_tool_use_failure: build_hooks(
+                command_hooks.post_tool_use_failure,
+                HookEventKey::PostToolUseFailure,
+            ),
+            stop: build_hooks(command_hooks.stop, HookEventKey::Stop),
+            subagent_stop: build_hooks(command_hooks.subagent_stop, HookEventKey::SubagentStop),
             pre_compact: build_hooks(command_hooks.pre_compact, HookEventKey::PreCompact),
+            ran_once: Arc::new(Mutex::new(HashSet::new())),
         }
     }
 
-    fn hooks_for_event(&self, hook_event: &HookEvent) -> &[Hook] {
+    fn hooks_for_event(&self, hook_event: &HookEvent) -> (HookEventKey, &[Hook]) {
         match hook_event {
-            HookEvent::SessionStart { .. } => &self.session_start,
-            HookEvent::SessionEnd { .. } => &self.session_end,
-            HookEvent::UserPromptSubmit { .. } => &self.user_prompt_submit,
-            HookEvent::PreToolUse { .. } => &self.pre_tool_use,
-            HookEvent::PostToolUse { .. } | HookEvent::AfterToolUse { .. } => &self.after_tool_use,
-            HookEvent::Stop { .. } | HookEvent::AfterAgent { .. } => &self.after_agent,
-            HookEvent::SubagentStop { .. } => &self.subagent_stop,
-            HookEvent::PreCompact { .. } => &self.pre_compact,
+            HookEvent::SessionStart { .. } => (HookEventKey::SessionStart, &self.session_start),
+            HookEvent::SessionEnd { .. } => (HookEventKey::SessionEnd, &self.session_end),
+            HookEvent::UserPromptSubmit { .. } => {
+                (HookEventKey::UserPromptSubmit, &self.user_prompt_submit)
+            }
+            HookEvent::PreToolUse { .. } => (HookEventKey::PreToolUse, &self.pre_tool_use),
+            HookEvent::PermissionRequest { .. } => {
+                (HookEventKey::PermissionRequest, &self.permission_request)
+            }
+            HookEvent::PostToolUse { .. } => (HookEventKey::PostToolUse, &self.post_tool_use),
+            HookEvent::PostToolUseFailure { .. } => (
+                HookEventKey::PostToolUseFailure,
+                &self.post_tool_use_failure,
+            ),
+            HookEvent::Stop { .. } => (HookEventKey::Stop, &self.stop),
+            HookEvent::SubagentStop { .. } => (HookEventKey::SubagentStop, &self.subagent_stop),
+            HookEvent::PreCompact { .. } => (HookEventKey::PreCompact, &self.pre_compact),
         }
     }
 
     pub async fn dispatch(&self, hook_payload: HookPayload) -> Vec<HookResponse> {
-        let hooks = self.hooks_for_event(&hook_payload.hook_event);
+        let (event_key, hooks) = self.hooks_for_event(&hook_payload.hook_event);
         let mut outcomes = Vec::with_capacity(hooks.len());
         for hook in hooks {
-            let outcome = hook.execute(&hook_payload).await;
-            let should_abort_operation = outcome.result.should_abort_operation();
-            outcomes.push(outcome);
-            if should_abort_operation {
+            if let Some(error) = hook.config_error.as_deref() {
+                outcomes.push(HookResponse {
+                    hook_name: hook.name.clone(),
+                    result: HookResult {
+                        error: Some(error.to_string()),
+                        ..HookResult::success()
+                    },
+                });
+                continue;
+            }
+
+            if !hook.matcher.matches(&hook_payload.hook_event) {
+                continue;
+            }
+
+            if hook.once {
+                let mut guard = self.ran_once.lock().await;
+                if !guard.insert(hook.once_key.clone()) {
+                    continue;
+                }
+            }
+
+            let result = execute_command_hook(&hook_payload, hook, event_key).await;
+            let should_stop = matches!(result.control, HookResultControl::Block { .. });
+            outcomes.push(HookResponse {
+                hook_name: hook.name.clone(),
+                result,
+            });
+            if should_stop {
                 break;
             }
         }
@@ -272,70 +322,40 @@ fn command_hook(config: CommandHookConfig, event_key: HookEventKey, index: usize
         return None;
     }
 
-    let matcher = match CompiledMatcher::compile(&config.matcher) {
-        Ok(matcher) => matcher,
-        Err(error) => {
-            let name = config
-                .name
-                .unwrap_or_else(|| format!("{}-{}", event_key.as_str(), index + 1));
-            return Some(Hook {
-                name,
-                func: Arc::new(move |_| {
-                    let message = error.clone();
-                    Box::pin(async move {
-                        HookResult::FailedContinue(
-                            io::Error::new(ErrorKind::InvalidInput, message).into(),
-                        )
-                    })
-                }),
-            });
-        }
+    let once_key = format!("{}-{}", event_key.as_str(), index + 1);
+    let name = config.name.unwrap_or_else(|| once_key.clone());
+    let timeout = config.timeout.map(Duration::from_secs);
+    let (matcher, config_error) = match CompiledMatcher::compile(&config.matcher) {
+        Ok(matcher) => (matcher, None),
+        Err(error) => (
+            CompiledMatcher {
+                tool_name: None,
+                tool_name_regex: None,
+                prompt_regex: None,
+            },
+            Some(error),
+        ),
     };
 
-    let hook_name = config
-        .name
-        .unwrap_or_else(|| format!("{}-{}", event_key.as_str(), index + 1));
-    let command = Arc::new(config.command);
-    let timeout_ms = config.timeout_ms;
-    let run_async = config.run_async;
-    let abort_on_error = config.abort_on_error;
-    let supports_block_decision = event_key.supports_block_decision();
-
     Some(Hook {
-        name: hook_name,
-        func: Arc::new(move |payload: &HookPayload| {
-            let command = Arc::clone(&command);
-            let matcher = matcher.clone();
-            Box::pin(async move {
-                if !matcher.matches(&payload.hook_event) {
-                    return HookResult::Success;
-                }
-
-                execute_command_hook(
-                    payload,
-                    command.as_ref(),
-                    timeout_ms,
-                    run_async,
-                    abort_on_error,
-                    supports_block_decision,
-                )
-                .await
-            })
-        }),
+        name,
+        once_key,
+        command: Arc::new(config.command),
+        timeout,
+        matcher,
+        once: config.once,
+        config_error,
     })
 }
 
 async fn execute_command_hook(
     payload: &HookPayload,
-    argv: &[String],
-    timeout_ms: Option<u64>,
-    run_async: bool,
-    abort_on_error: bool,
-    supports_block_decision: bool,
+    hook: &Hook,
+    event_key: HookEventKey,
 ) -> HookResult {
-    let mut command = match command_from_argv(argv) {
+    let mut command = match command_from_argv(hook.command.as_ref()) {
         Some(command) => command,
-        None => return HookResult::Success,
+        None => return HookResult::success(),
     };
 
     command
@@ -347,56 +367,73 @@ async fn execute_command_hook(
 
     let mut child = match command.spawn() {
         Ok(child) => child,
-        Err(error) => return hook_error(error, abort_on_error),
+        Err(error) => return result_with_error(error),
     };
 
     let payload_json = match serde_json::to_string(payload) {
         Ok(payload_json) => payload_json,
-        Err(error) => return hook_error(io::Error::other(error), abort_on_error),
+        Err(error) => return result_with_error(io::Error::other(error)),
     };
 
-    if let Some(mut stdin) = child.stdin.take()
-        && let Err(error) = stdin.write_all(payload_json.as_bytes()).await
-    {
-        return hook_error(error, abort_on_error);
+    if let Some(mut stdin) = child.stdin.take() {
+        if let Err(error) = stdin.write_all(payload_json.as_bytes()).await
+            && error.kind() != ErrorKind::BrokenPipe
+        {
+            return result_with_error(error);
+        }
     }
 
-    if run_async {
-        tokio::spawn(async move {
-            let _ = child.wait().await;
-        });
-        return HookResult::Success;
-    }
-
-    let output = match wait_for_output(child, timeout_ms).await {
+    let output = match wait_for_output(child, hook.timeout).await {
         Ok(output) => output,
-        Err(error) => return hook_error(error, abort_on_error),
+        Err(error) => return result_with_error(error),
     };
 
-    if supports_block_decision && let Some((decision, reason)) = parse_decision(&output.stdout) {
-        return match decision {
-            ParsedDecision::Approve => HookResult::Success,
-            ParsedDecision::Block => HookResult::FailedAbort(
-                io::Error::new(
-                    ErrorKind::PermissionDenied,
-                    reason.unwrap_or_else(|| "hook blocked operation".to_string()),
-                )
-                .into(),
-            ),
-            ParsedDecision::Ask => HookResult::FailedAbort(
-                io::Error::new(
-                    ErrorKind::PermissionDenied,
-                    reason
-                        .unwrap_or_else(|| "hook requested an explicit user approval".to_string()),
-                )
-                .into(),
-            ),
+    result_from_output(event_key, &output)
+}
+
+async fn wait_for_output(
+    child: tokio::process::Child,
+    timeout: Option<Duration>,
+) -> io::Result<Output> {
+    match timeout {
+        Some(duration) => tokio::time::timeout(duration, child.wait_with_output())
+            .await
+            .map_err(|_| io::Error::new(ErrorKind::TimedOut, "hook command timed out"))?,
+        None => child.wait_with_output().await,
+    }
+}
+
+fn result_from_output(event_key: HookEventKey, output: &Output) -> HookResult {
+    let Some(code) = output.status.code() else {
+        return HookResult {
+            error: Some("hook command terminated by signal".to_string()),
+            ..HookResult::success()
+        };
+    };
+
+    if code == 2 {
+        let message = preview_bytes(&output.stderr);
+        if event_key.supports_exit_2_block() {
+            let reason = if message.is_empty() {
+                "hook blocked operation".to_string()
+            } else {
+                message
+            };
+            let mut result = HookResult::success();
+            result.control = HookResultControl::Block { reason };
+            if matches!(event_key, HookEventKey::PermissionRequest) {
+                result.permission_decision = Some(HookPermissionDecision::Deny);
+            }
+            return result;
+        }
+
+        return HookResult {
+            error: Some(message),
+            ..HookResult::success()
         };
     }
 
-    if output.status.success() {
-        HookResult::Success
-    } else {
+    if code != 0 {
         let stderr_preview = preview_bytes(&output.stderr);
         let message = if stderr_preview.is_empty() {
             format!("hook command exited with {}", output.status)
@@ -406,30 +443,258 @@ async fn execute_command_hook(
                 output.status
             )
         };
-        hook_error(io::Error::other(message), abort_on_error)
+        return HookResult {
+            error: Some(message),
+            ..HookResult::success()
+        };
     }
+
+    let Some(stdout_json) = parse_stdout_json(&output.stdout) else {
+        return HookResult::success();
+    };
+
+    apply_stdout_json(event_key, stdout_json)
 }
 
-async fn wait_for_output(
-    child: tokio::process::Child,
-    timeout_ms: Option<u64>,
-) -> io::Result<Output> {
-    match timeout_ms {
-        Some(timeout_ms) => {
-            let duration = Duration::from_millis(timeout_ms);
-            tokio::time::timeout(duration, child.wait_with_output())
-                .await
-                .map_err(|_| io::Error::new(ErrorKind::TimedOut, "hook command timed out"))?
+fn apply_stdout_json(event_key: HookEventKey, stdout_json: Value) -> HookResult {
+    let mut result = HookResult::success();
+    let Some(obj) = stdout_json.as_object() else {
+        return result;
+    };
+
+    if let Some(system_message) = obj
+        .get("systemMessage")
+        .or_else(|| obj.get("system_message"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        result.additional_context.push(system_message.to_string());
+    }
+
+    if let Some(additional_context) = obj
+        .get("additionalContext")
+        .or_else(|| obj.get("additional_context"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        result
+            .additional_context
+            .push(additional_context.to_string());
+    }
+
+    let hook_specific = obj
+        .get("hookSpecificOutput")
+        .or_else(|| obj.get("hook_specific_output"))
+        .and_then(Value::as_object);
+
+    if let Some(hook_specific) = hook_specific {
+        if let Some(additional_context) = hook_specific
+            .get("additionalContext")
+            .or_else(|| hook_specific.get("additional_context"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+        {
+            result
+                .additional_context
+                .push(additional_context.to_string());
         }
-        None => child.wait_with_output().await,
+    }
+
+    result.updated_input = obj
+        .get("updatedInput")
+        .or_else(|| obj.get("updated_input"))
+        .cloned()
+        .or_else(|| {
+            hook_specific.and_then(|hook_specific| {
+                hook_specific
+                    .get("updatedInput")
+                    .or_else(|| hook_specific.get("updated_input"))
+                    .cloned()
+            })
+        });
+
+    apply_decisions(event_key, obj, hook_specific, &mut result);
+    result
+}
+
+fn apply_decisions(
+    event_key: HookEventKey,
+    obj: &serde_json::Map<String, Value>,
+    hook_specific: Option<&serde_json::Map<String, Value>>,
+    result: &mut HookResult,
+) {
+    if !event_key.supports_output_decisions() {
+        return;
+    }
+
+    match event_key {
+        HookEventKey::PreToolUse => apply_pre_tool_use_decisions(obj, hook_specific, result),
+        HookEventKey::PermissionRequest => {
+            apply_permission_request_decisions(obj, hook_specific, result)
+        }
+        _ => apply_block_decision(obj, result),
     }
 }
 
-fn hook_error(error: io::Error, abort_on_error: bool) -> HookResult {
-    if abort_on_error {
-        HookResult::FailedAbort(error.into())
-    } else {
-        HookResult::FailedContinue(error.into())
+fn apply_pre_tool_use_decisions(
+    obj: &serde_json::Map<String, Value>,
+    hook_specific: Option<&serde_json::Map<String, Value>>,
+    result: &mut HookResult,
+) {
+    if let Some(permission_decision) = extract_permission_decision(obj, hook_specific) {
+        result.permission_decision = Some(permission_decision);
+        result.permission_decision_reason = extract_permission_decision_reason(obj, hook_specific);
+    }
+
+    let parsed_decision = obj
+        .get("decision")
+        .and_then(Value::as_str)
+        .and_then(parse_decision);
+    if matches!(
+        parsed_decision,
+        Some(ParsedDecision::Deny) | Some(ParsedDecision::Ask)
+    ) {
+        let reason = decision_reason(obj, hook_specific)
+            .unwrap_or_else(|| "hook blocked tool invocation".to_string());
+        result.control = HookResultControl::Block { reason };
+        return;
+    }
+
+    if matches!(
+        result.permission_decision,
+        Some(HookPermissionDecision::Deny) | Some(HookPermissionDecision::Ask)
+    ) {
+        let reason = result
+            .permission_decision_reason
+            .clone()
+            .or_else(|| decision_reason(obj, hook_specific))
+            .unwrap_or_else(|| "hook blocked tool invocation".to_string());
+        result.control = HookResultControl::Block { reason };
+    }
+}
+
+fn apply_permission_request_decisions(
+    obj: &serde_json::Map<String, Value>,
+    hook_specific: Option<&serde_json::Map<String, Value>>,
+    result: &mut HookResult,
+) {
+    let permission_decision = extract_permission_decision(obj, hook_specific)
+        .or_else(|| extract_permission_behavior(hook_specific))
+        .or_else(|| {
+            obj.get("decision")
+                .and_then(Value::as_str)
+                .and_then(parse_permission_decision)
+        });
+    if let Some(permission_decision) = permission_decision {
+        result.permission_decision = Some(permission_decision);
+        result.permission_decision_reason = extract_permission_decision_reason(obj, hook_specific);
+    }
+}
+
+fn apply_block_decision(obj: &serde_json::Map<String, Value>, result: &mut HookResult) {
+    let Some(decision) = obj
+        .get("decision")
+        .and_then(Value::as_str)
+        .and_then(parse_decision)
+    else {
+        return;
+    };
+    if decision != ParsedDecision::Deny {
+        return;
+    }
+    let reason = obj
+        .get("reason")
+        .or_else(|| obj.get("stopReason"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| "hook blocked operation".to_string());
+    result.control = HookResultControl::Block { reason };
+}
+
+fn extract_permission_decision(
+    obj: &serde_json::Map<String, Value>,
+    hook_specific: Option<&serde_json::Map<String, Value>>,
+) -> Option<HookPermissionDecision> {
+    let decision = hook_specific
+        .and_then(|obj| permission_decision_str(obj))
+        .or_else(|| permission_decision_str(obj))?;
+    parse_permission_decision(decision)
+}
+
+fn permission_decision_str(obj: &serde_json::Map<String, Value>) -> Option<&str> {
+    obj.get("permissionDecision")
+        .or_else(|| obj.get("permission_decision"))
+        .and_then(Value::as_str)
+}
+
+fn extract_permission_behavior(
+    hook_specific: Option<&serde_json::Map<String, Value>>,
+) -> Option<HookPermissionDecision> {
+    let behavior = hook_specific?
+        .get("decision")
+        .and_then(Value::as_object)?
+        .get("behavior")
+        .and_then(Value::as_str)?;
+    parse_permission_decision(behavior)
+}
+
+fn extract_permission_decision_reason(
+    obj: &serde_json::Map<String, Value>,
+    hook_specific: Option<&serde_json::Map<String, Value>>,
+) -> Option<String> {
+    hook_specific
+        .and_then(permission_decision_reason_str)
+        .or_else(|| permission_decision_reason_str(obj))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn permission_decision_reason_str(obj: &serde_json::Map<String, Value>) -> Option<&str> {
+    obj.get("permissionDecisionReason")
+        .or_else(|| obj.get("permission_decision_reason"))
+        .and_then(Value::as_str)
+}
+
+fn decision_reason(
+    obj: &serde_json::Map<String, Value>,
+    hook_specific: Option<&serde_json::Map<String, Value>>,
+) -> Option<String> {
+    obj.get("reason")
+        .or_else(|| obj.get("stopReason"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .or_else(|| {
+            hook_specific
+                .and_then(permission_decision_reason_str)
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string)
+        })
+}
+
+fn parse_permission_decision(decision: &str) -> Option<HookPermissionDecision> {
+    match decision.trim().to_lowercase().as_str() {
+        "allow" | "approve" | "continue" => Some(HookPermissionDecision::Allow),
+        "deny" | "block" | "abort" => Some(HookPermissionDecision::Deny),
+        "ask" => Some(HookPermissionDecision::Ask),
+        _ => None,
+    }
+}
+
+fn parse_decision(decision: &str) -> Option<ParsedDecision> {
+    match decision.trim().to_lowercase().as_str() {
+        "allow" | "approve" | "continue" => Some(ParsedDecision::Allow),
+        "block" | "deny" | "abort" => Some(ParsedDecision::Deny),
+        "ask" => Some(ParsedDecision::Ask),
+        _ => None,
     }
 }
 
@@ -443,29 +708,38 @@ fn preview_bytes(bytes: &[u8]) -> String {
     preview
 }
 
-fn parse_decision(stdout: &[u8]) -> Option<(ParsedDecision, Option<String>)> {
+fn parse_stdout_json(stdout: &[u8]) -> Option<Value> {
     let text = String::from_utf8_lossy(stdout);
-    for line in text.lines() {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(value) = serde_json::from_str::<Value>(trimmed) {
+        return Some(value);
+    }
+
+    for line in trimmed.lines() {
         let line = line.trim();
         if line.is_empty() {
             continue;
         }
-        let Ok(payload) = serde_json::from_str::<HookDecisionPayload>(line) else {
-            continue;
-        };
-        let decision = payload.decision?.to_lowercase();
-        let parsed_decision = match decision.as_str() {
-            "allow" | "approve" | "continue" => ParsedDecision::Approve,
-            "block" | "deny" | "abort" => ParsedDecision::Block,
-            "ask" => ParsedDecision::Ask,
-            _ => continue,
-        };
-        return Some((parsed_decision, payload.reason));
+        if let Ok(value) = serde_json::from_str::<Value>(line) {
+            return Some(value);
+        }
     }
+
     None
 }
 
-pub fn command_from_argv(argv: &[String]) -> Option<Command> {
+fn result_with_error(error: io::Error) -> HookResult {
+    HookResult {
+        error: Some(error.to_string()),
+        ..HookResult::success()
+    }
+}
+
+fn command_from_argv(argv: &[String]) -> Option<Command> {
     let (program, args) = argv.split_first()?;
     if program.is_empty() {
         return None;
@@ -477,830 +751,774 @@ pub fn command_from_argv(argv: &[String]) -> Option<Command> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::path::PathBuf;
-    use std::sync::Arc;
-    use std::sync::atomic::AtomicUsize;
-    use std::sync::atomic::Ordering;
 
-    use anyhow::Result;
-    use chrono::TimeZone;
-    use chrono::Utc;
     use codex_protocol::ThreadId;
     use pretty_assertions::assert_eq;
+    use serde_json::json;
 
     use super::*;
-    use crate::types::HookEventAfterAgent;
-    use crate::types::HookEventAfterToolUse;
-    use crate::types::HookEventPostToolUse;
-    use crate::types::HookEventPreCompact;
-    use crate::types::HookEventPreToolUse;
-    use crate::types::HookEventSessionEnd;
-    use crate::types::HookEventSessionStart;
-    use crate::types::HookEventUserPromptSubmit;
-    use crate::types::HookToolInput;
-    use crate::types::HookToolKind;
-
-    const CWD: &str = "/tmp";
-    const INPUT_MESSAGE: &str = "hello";
 
     #[cfg(windows)]
-    fn echo_command_argv() -> Vec<String> {
+    fn exit_command(code: i32) -> Vec<String> {
         vec![
             "cmd".to_string(),
             "/C".to_string(),
-            "echo hello world".to_string(),
+            format!("exit /B {code}"),
         ]
     }
 
     #[cfg(not(windows))]
-    fn echo_command_argv() -> Vec<String> {
-        vec!["echo".to_string(), "hello".to_string(), "world".to_string()]
+    fn exit_command(code: i32) -> Vec<String> {
+        vec!["sh".to_string(), "-c".to_string(), format!("exit {code}")]
+    }
+
+    #[cfg(windows)]
+    fn echo_command() -> Vec<String> {
+        vec!["cmd".to_string(), "/C".to_string(), "echo hi".to_string()]
     }
 
     #[cfg(not(windows))]
-    fn shell_argv(script: &str) -> Vec<String> {
-        vec!["/bin/sh".to_string(), "-c".to_string(), script.to_string()]
+    fn echo_command() -> Vec<String> {
+        vec!["sh".to_string(), "-c".to_string(), "echo hi".to_string()]
     }
 
-    fn payload_with_event(hook_event: HookEvent) -> HookPayload {
+    #[cfg(windows)]
+    fn exit_with_stderr_command(code: i32, stderr: &str) -> Vec<String> {
+        vec![
+            "cmd".to_string(),
+            "/C".to_string(),
+            format!("echo {stderr} 1>&2 & exit /B {code}"),
+        ]
+    }
+
+    #[cfg(not(windows))]
+    fn exit_with_stderr_command(code: i32, stderr: &str) -> Vec<String> {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("echo {stderr} 1>&2; exit {code}"),
+        ]
+    }
+
+    fn payload(cwd: &PathBuf, hook_event: HookEvent) -> HookPayload {
         HookPayload {
             session_id: ThreadId::new(),
-            cwd: PathBuf::from(CWD),
-            triggered_at: Utc
-                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
-                .single()
-                .expect("valid timestamp"),
+            transcript_path: None,
+            cwd: cwd.clone(),
+            permission_mode: "never".to_string(),
             hook_event,
         }
     }
 
-    fn hook_payload(label: &str) -> HookPayload {
-        payload_with_event(HookEvent::AfterAgent {
-            event: HookEventAfterAgent {
-                thread_id: ThreadId::new(),
-                turn_id: format!("turn-{label}"),
-                input_messages: vec![INPUT_MESSAGE.to_string()],
-                last_assistant_message: Some("hi".to_string()),
-            },
-        })
-    }
-
-    fn stop_payload(label: &str) -> HookPayload {
-        payload_with_event(HookEvent::Stop {
-            event: HookEventAfterAgent {
-                thread_id: ThreadId::new(),
-                turn_id: format!("turn-{label}"),
-                input_messages: vec![INPUT_MESSAGE.to_string()],
-                last_assistant_message: Some("hi".to_string()),
-            },
-        })
-    }
-
-    fn subagent_stop_payload(label: &str) -> HookPayload {
-        payload_with_event(HookEvent::SubagentStop {
-            event: HookEventAfterAgent {
-                thread_id: ThreadId::new(),
-                turn_id: format!("turn-{label}"),
-                input_messages: vec![INPUT_MESSAGE.to_string()],
-                last_assistant_message: Some("hi".to_string()),
-            },
-        })
-    }
-
-    fn session_start_payload(source: &str) -> HookPayload {
-        payload_with_event(HookEvent::SessionStart {
-            event: HookEventSessionStart {
-                source: source.to_string(),
-            },
-        })
-    }
-
-    fn session_end_payload(source: &str) -> HookPayload {
-        payload_with_event(HookEvent::SessionEnd {
-            event: HookEventSessionEnd {
-                source: source.to_string(),
-            },
-        })
-    }
-
-    fn pre_compact_payload(model: &str) -> HookPayload {
-        payload_with_event(HookEvent::PreCompact {
-            event: HookEventPreCompact {
-                turn_id: "turn-compact".to_string(),
-                model: model.to_string(),
-            },
-        })
-    }
-
-    fn post_tool_use_payload(label: &str) -> HookPayload {
-        payload_with_event(HookEvent::PostToolUse {
-            event: HookEventPostToolUse {
-                turn_id: format!("turn-{label}"),
-                call_id: format!("call-{label}"),
-                tool_name: "apply_patch".to_string(),
-                tool_kind: HookToolKind::Custom,
-                tool_input: HookToolInput::Custom {
-                    input: "*** Begin Patch".to_string(),
-                },
-                executed: true,
-                success: true,
-                duration_ms: 1,
-                mutating: true,
-                sandbox: "none".to_string(),
-                sandbox_policy: "danger-full-access".to_string(),
-                output_preview: "ok".to_string(),
-            },
-        })
-    }
-
-    fn pre_tool_use_payload(tool_name: &str) -> HookPayload {
-        payload_with_event(HookEvent::PreToolUse {
-            event: HookEventPreToolUse {
-                turn_id: "turn-1".to_string(),
-                call_id: "call-1".to_string(),
-                tool_name: tool_name.to_string(),
-                tool_kind: HookToolKind::Function,
-                tool_input: HookToolInput::Function {
-                    arguments: "{}".to_string(),
-                },
-                mutating: false,
-                sandbox: "none".to_string(),
-                sandbox_policy: "danger-full-access".to_string(),
-            },
-        })
-    }
-
-    fn after_tool_use_payload(label: &str) -> HookPayload {
-        payload_with_event(HookEvent::AfterToolUse {
-            event: HookEventAfterToolUse {
-                turn_id: format!("turn-{label}"),
-                call_id: format!("call-{label}"),
-                tool_name: "apply_patch".to_string(),
-                tool_kind: HookToolKind::Custom,
-                tool_input: HookToolInput::Custom {
-                    input: "*** Begin Patch".to_string(),
-                },
-                executed: true,
-                success: true,
-                duration_ms: 1,
-                mutating: true,
-                sandbox: "none".to_string(),
-                sandbox_policy: "danger-full-access".to_string(),
-                output_preview: "ok".to_string(),
-            },
-        })
-    }
-
-    fn user_prompt_payload(prompt: &str) -> HookPayload {
-        payload_with_event(HookEvent::UserPromptSubmit {
-            event: HookEventUserPromptSubmit {
-                turn_id: "turn-user".to_string(),
-                prompt: prompt.to_string(),
-            },
-        })
-    }
-
-    fn counting_success_hook(calls: &Arc<AtomicUsize>, name: &str) -> Hook {
-        let hook_name = name.to_string();
-        let calls = Arc::clone(calls);
-        Hook {
-            name: hook_name,
-            func: Arc::new(move |_| {
-                let calls = Arc::clone(&calls);
-                Box::pin(async move {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    HookResult::Success
-                })
-            }),
-        }
-    }
-
-    fn failing_abort_hook(calls: &Arc<AtomicUsize>, name: &str, message: &str) -> Hook {
-        let hook_name = name.to_string();
-        let message = message.to_string();
-        let calls = Arc::clone(calls);
-        Hook {
-            name: hook_name,
-            func: Arc::new(move |_| {
-                let calls = Arc::clone(&calls);
-                let message = message.clone();
-                Box::pin(async move {
-                    calls.fetch_add(1, Ordering::SeqCst);
-                    HookResult::FailedAbort(io::Error::other(message).into())
-                })
-            }),
-        }
-    }
-
-    #[test]
-    fn command_from_argv_returns_none_for_empty_args() {
-        assert!(command_from_argv(&[]).is_none());
-        assert!(command_from_argv(&["".to_string()]).is_none());
-    }
-
     #[tokio::test]
-    async fn command_from_argv_builds_command() -> Result<()> {
-        let argv = echo_command_argv();
-        let mut command = command_from_argv(&argv).ok_or_else(|| anyhow::anyhow!("command"))?;
-        let output = command.output().await?;
-
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let trimmed = stdout.trim_end_matches(['\r', '\n']);
-        assert_eq!(trimmed, "hello world");
-        Ok(())
-    }
-
-    #[test]
-    fn hooks_new_requires_program_name() {
-        assert!(Hooks::new(HooksConfig::default()).after_agent.is_empty());
-        assert!(
-            Hooks::new(HooksConfig {
-                legacy_notify_argv: Some(vec![]),
-                ..HooksConfig::default()
-            })
-            .after_agent
-            .is_empty()
-        );
-        assert!(
-            Hooks::new(HooksConfig {
-                legacy_notify_argv: Some(vec!["".to_string()]),
-                ..HooksConfig::default()
-            })
-            .after_agent
-            .is_empty()
-        );
-        assert_eq!(
-            Hooks::new(HooksConfig {
-                legacy_notify_argv: Some(vec!["notify-send".to_string()]),
-                ..HooksConfig::default()
-            })
-            .after_agent
-            .len(),
-            1
-        );
-    }
-
-    #[tokio::test]
-    async fn dispatch_executes_hook() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let hooks = Hooks {
-            after_agent: vec![counting_success_hook(&calls, "counting")],
-            ..Hooks::default()
-        };
-
-        let outcomes = hooks.dispatch(hook_payload("1")).await;
-        assert_eq!(outcomes.len(), 1);
-        assert_eq!(outcomes[0].hook_name, "counting");
-        assert!(matches!(outcomes[0].result, HookResult::Success));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn dispatch_stops_when_hook_requests_abort() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let hooks = Hooks {
-            after_agent: vec![
-                failing_abort_hook(&calls, "abort", "hook failed"),
-                counting_success_hook(&calls, "counting"),
-            ],
-            ..Hooks::default()
-        };
-
-        let outcomes = hooks.dispatch(hook_payload("3")).await;
-        assert_eq!(outcomes.len(), 1);
-        assert_eq!(outcomes[0].hook_name, "abort");
-        assert!(matches!(outcomes[0].result, HookResult::FailedAbort(_)));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[tokio::test]
-    async fn dispatch_executes_after_tool_use_hooks() {
-        let calls = Arc::new(AtomicUsize::new(0));
-        let hooks = Hooks {
-            after_tool_use: vec![counting_success_hook(&calls, "counting")],
-            ..Hooks::default()
-        };
-
-        let outcomes = hooks.dispatch(after_tool_use_payload("p")).await;
-        assert_eq!(outcomes.len(), 1);
-        assert_eq!(outcomes[0].hook_name, "counting");
-        assert!(matches!(outcomes[0].result, HookResult::Success));
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn parse_decision_supports_block_and_ask() {
-        let block = parse_decision(br#"{"decision":"block","reason":"stop"}"#);
-        assert_eq!(
-            block,
-            Some((ParsedDecision::Block, Some("stop".to_string())))
-        );
-
-        let ask = parse_decision(br#"{"decision":"ask"}"#);
-        assert_eq!(ask, Some((ParsedDecision::Ask, None)));
-    }
-
-    #[tokio::test]
-    async fn matcher_filters_out_non_matching_tool_names() {
+    async fn exit_2_blocks_for_blockable_event() {
+        let dir = tempfile::tempdir().expect("tempdir");
         let hooks = Hooks::new(HooksConfig {
             command_hooks: CommandHooksConfig {
                 pre_tool_use: vec![CommandHookConfig {
-                    name: Some("tool-filter".to_string()),
-                    command: vec!["definitely-not-a-command".to_string()],
-                    matcher: HookMatcherConfig {
-                        tool_name: Some("different_tool".to_string()),
-                        ..HookMatcherConfig::default()
-                    },
-                    ..CommandHookConfig::default()
+                    command: exit_command(2),
+                    ..Default::default()
                 }],
-                ..CommandHooksConfig::default()
+                ..Default::default()
             },
-            ..HooksConfig::default()
         });
 
-        let outcomes = hooks.dispatch(pre_tool_use_payload("apply_patch")).await;
+        let outcomes = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::PreToolUse {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({"command":["echo","hi"]}),
+                    tool_use_id: "call-1".to_string(),
+                },
+            ))
+            .await;
+
         assert_eq!(outcomes.len(), 1);
-        assert!(matches!(outcomes[0].result, HookResult::Success));
-    }
-
-    #[test]
-    fn hook_event_key_names_and_decision_support_are_stable() {
-        let cases = [
-            (HookEventKey::SessionStart, "session_start", false),
-            (HookEventKey::SessionEnd, "session_end", false),
-            (HookEventKey::UserPromptSubmit, "user_prompt_submit", true),
-            (HookEventKey::PreToolUse, "pre_tool_use", true),
-            (HookEventKey::PostToolUse, "post_tool_use", false),
-            (HookEventKey::Stop, "stop", true),
-            (HookEventKey::SubagentStop, "subagent_stop", true),
-            (HookEventKey::PreCompact, "pre_compact", true),
-        ];
-
-        for (key, expected_name, expected_block_support) in cases {
-            assert_eq!(key.as_str(), expected_name);
-            assert_eq!(key.supports_block_decision(), expected_block_support);
-        }
-    }
-
-    #[test]
-    fn compiled_matcher_handles_tool_and_prompt_regex_branches() {
-        let tool_name_matcher = CompiledMatcher::compile(&HookMatcherConfig {
-            tool_name_regex: Some("^apply_.*$".to_string()),
-            ..HookMatcherConfig::default()
-        })
-        .expect("compile tool matcher");
-        let matching_event = pre_tool_use_payload("apply_patch");
-        let non_matching_event = pre_tool_use_payload("view_logs");
-        let no_tool_event = hook_payload("no-tool");
-
-        assert!(tool_name_matcher.matches(&matching_event.hook_event));
-        assert!(!tool_name_matcher.matches(&non_matching_event.hook_event));
-        assert!(!tool_name_matcher.matches(&no_tool_event.hook_event));
-
-        let prompt_matcher = CompiledMatcher::compile(&HookMatcherConfig {
-            prompt_regex: Some("run tests$".to_string()),
-            ..HookMatcherConfig::default()
-        })
-        .expect("compile prompt matcher");
-        let matching_prompt_event = user_prompt_payload("please run tests");
-        let non_matching_prompt_event = user_prompt_payload("please run lint");
-        let no_prompt_event = pre_tool_use_payload("apply_patch");
-
-        assert!(prompt_matcher.matches(&matching_prompt_event.hook_event));
-        assert!(!prompt_matcher.matches(&non_matching_prompt_event.hook_event));
-        assert!(!prompt_matcher.matches(&no_prompt_event.hook_event));
+        assert!(matches!(
+            outcomes[0].result.control,
+            HookResultControl::Block { .. }
+        ));
     }
 
     #[tokio::test]
-    async fn dispatch_routes_each_event_variant_to_expected_bucket() {
-        let counters = HashMap::from([
-            ("session_start", Arc::new(AtomicUsize::new(0))),
-            ("session_end", Arc::new(AtomicUsize::new(0))),
-            ("user_prompt_submit", Arc::new(AtomicUsize::new(0))),
-            ("pre_tool_use", Arc::new(AtomicUsize::new(0))),
-            ("after_tool_use", Arc::new(AtomicUsize::new(0))),
-            ("after_agent", Arc::new(AtomicUsize::new(0))),
-            ("subagent_stop", Arc::new(AtomicUsize::new(0))),
-            ("pre_compact", Arc::new(AtomicUsize::new(0))),
-        ]);
-        let hooks = Hooks {
-            session_start: vec![counting_success_hook(
-                &counters["session_start"],
-                "session_start",
-            )],
-            session_end: vec![counting_success_hook(
-                &counters["session_end"],
-                "session_end",
-            )],
-            user_prompt_submit: vec![counting_success_hook(
-                &counters["user_prompt_submit"],
-                "user_prompt_submit",
-            )],
-            pre_tool_use: vec![counting_success_hook(
-                &counters["pre_tool_use"],
-                "pre_tool_use",
-            )],
-            after_tool_use: vec![counting_success_hook(
-                &counters["after_tool_use"],
-                "after_tool_use",
-            )],
-            after_agent: vec![counting_success_hook(
-                &counters["after_agent"],
-                "after_agent",
-            )],
-            subagent_stop: vec![counting_success_hook(
-                &counters["subagent_stop"],
-                "subagent_stop",
-            )],
-            pre_compact: vec![counting_success_hook(
-                &counters["pre_compact"],
-                "pre_compact",
-            )],
-        };
-
-        let cases = vec![
-            (session_start_payload("cli"), "session_start"),
-            (session_end_payload("cli"), "session_end"),
-            (user_prompt_payload("run tests"), "user_prompt_submit"),
-            (pre_tool_use_payload("apply_patch"), "pre_tool_use"),
-            (post_tool_use_payload("post"), "after_tool_use"),
-            (after_tool_use_payload("after"), "after_tool_use"),
-            (stop_payload("stop"), "after_agent"),
-            (hook_payload("after-agent"), "after_agent"),
-            (subagent_stop_payload("subagent"), "subagent_stop"),
-            (pre_compact_payload("gpt-5"), "pre_compact"),
-        ];
-
-        for (payload, expected_hook_name) in cases {
-            let outcomes = hooks.dispatch(payload).await;
-            assert_eq!(outcomes.len(), 1);
-            assert_eq!(outcomes[0].hook_name, expected_hook_name);
-        }
-
-        assert_eq!(counters["session_start"].load(Ordering::SeqCst), 1);
-        assert_eq!(counters["session_end"].load(Ordering::SeqCst), 1);
-        assert_eq!(counters["user_prompt_submit"].load(Ordering::SeqCst), 1);
-        assert_eq!(counters["pre_tool_use"].load(Ordering::SeqCst), 1);
-        assert_eq!(counters["after_tool_use"].load(Ordering::SeqCst), 2);
-        assert_eq!(counters["after_agent"].load(Ordering::SeqCst), 2);
-        assert_eq!(counters["subagent_stop"].load(Ordering::SeqCst), 1);
-        assert_eq!(counters["pre_compact"].load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn command_hook_requires_non_empty_program() {
-        assert!(
-            command_hook(
-                CommandHookConfig {
-                    command: Vec::new(),
-                    ..CommandHookConfig::default()
-                },
-                HookEventKey::Stop,
-                0,
-            )
-            .is_none()
-        );
-        assert!(
-            command_hook(
-                CommandHookConfig {
-                    command: vec![" ".to_string()],
-                    ..CommandHookConfig::default()
-                },
-                HookEventKey::Stop,
-                0,
-            )
-            .is_none()
-        );
-    }
-
-    #[tokio::test]
-    async fn command_hook_with_invalid_regex_returns_failed_continue() {
-        let hook = command_hook(
-            CommandHookConfig {
-                command: vec!["echo".to_string()],
-                matcher: HookMatcherConfig {
-                    tool_name_regex: Some("[".to_string()),
-                    ..HookMatcherConfig::default()
-                },
-                ..CommandHookConfig::default()
+    async fn blocking_hook_stops_subsequent_hooks_for_event() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                pre_tool_use: vec![
+                    CommandHookConfig {
+                        command: exit_command(2),
+                        ..Default::default()
+                    },
+                    CommandHookConfig {
+                        command: echo_command(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
             },
-            HookEventKey::PreToolUse,
-            0,
-        )
-        .expect("invalid matcher should still produce a hook");
-        let outcome = hook.execute(&pre_tool_use_payload("apply_patch")).await;
+        });
 
-        assert_eq!(outcome.hook_name, "pre_tool_use-1");
-        match outcome.result {
-            HookResult::FailedContinue(error) => {
-                let io_error = error.downcast::<io::Error>().expect("io::Error");
-                assert_eq!(io_error.kind(), ErrorKind::InvalidInput);
-                assert!(io_error.to_string().contains("invalid tool_name_regex"));
-            }
-            HookResult::Success => panic!("expected failed continue"),
-            HookResult::FailedAbort(_) => panic!("expected failed continue"),
-        }
-    }
-
-    #[cfg(not(windows))]
-    #[tokio::test]
-    async fn command_hook_executes_when_matcher_matches() {
-        let hook = command_hook(
-            CommandHookConfig {
-                command: shell_argv("cat >/dev/null; exit 0"),
-                matcher: HookMatcherConfig {
-                    tool_name_regex: Some("^apply_patch$".to_string()),
-                    ..HookMatcherConfig::default()
+        let outcomes = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::PreToolUse {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({"command":["echo","hi"]}),
+                    tool_use_id: "call-1".to_string(),
                 },
-                ..CommandHookConfig::default()
+            ))
+            .await;
+
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(
+            outcomes[0].result.control,
+            HookResultControl::Block { .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn exit_2_does_not_block_for_post_tool_use() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                post_tool_use: vec![CommandHookConfig {
+                    command: exit_command(2),
+                    ..Default::default()
+                }],
+                ..Default::default()
             },
-            HookEventKey::PreToolUse,
-            0,
-        )
-        .expect("valid command hook");
-        let outcome = hook.execute(&pre_tool_use_payload("apply_patch")).await;
+        });
 
-        assert!(matches!(outcome.result, HookResult::Success));
-    }
-
-    fn failure_kind_and_message(
-        result: HookResult,
-        should_abort: bool,
-    ) -> (std::io::ErrorKind, String) {
-        let error = match result {
-            HookResult::FailedAbort(error) if should_abort => error,
-            HookResult::FailedContinue(error) if !should_abort => error,
-            HookResult::FailedAbort(_) => panic!("expected failed continue"),
-            HookResult::FailedContinue(_) => panic!("expected failed abort"),
-            HookResult::Success => panic!("expected failed hook result"),
-        };
-        let io_error = error.downcast::<io::Error>().expect("io::Error");
-        (io_error.kind(), io_error.to_string())
-    }
-
-    #[cfg(not(windows))]
-    #[tokio::test]
-    async fn execute_command_hook_covers_spawn_timeout_and_exit_paths() {
-        let payload = hook_payload("execute");
-
-        assert!(matches!(
-            execute_command_hook(&payload, &[], None, false, false, false).await,
-            HookResult::Success
-        ));
-
-        let missing_program = vec!["definitely-not-a-real-program".to_string()];
-        let (kind, _) = failure_kind_and_message(
-            execute_command_hook(&payload, &missing_program, None, false, false, false).await,
-            false,
-        );
-        assert_eq!(kind, ErrorKind::NotFound);
-        let (kind, _) = failure_kind_and_message(
-            execute_command_hook(&payload, &missing_program, None, false, true, false).await,
-            true,
-        );
-        assert_eq!(kind, ErrorKind::NotFound);
-
-        assert!(matches!(
-            execute_command_hook(
-                &payload,
-                &shell_argv("cat >/dev/null; sleep 0.05"),
-                None,
-                true,
-                false,
-                false
-            )
-            .await,
-            HookResult::Success
-        ));
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-
-        let (kind, message) = failure_kind_and_message(
-            execute_command_hook(
-                &payload,
-                &shell_argv("sleep 1"),
-                Some(1),
-                false,
-                false,
-                false,
-            )
-            .await,
-            false,
-        );
-        assert_eq!(kind, ErrorKind::TimedOut);
-        assert!(message.contains("hook command timed out"));
-
-        let (kind, message) = failure_kind_and_message(
-            execute_command_hook(
-                &payload,
-                &shell_argv("cat >/dev/null; exit 7"),
-                None,
-                false,
-                false,
-                false,
-            )
-            .await,
-            false,
-        );
-        assert_eq!(kind, ErrorKind::Other);
-        assert!(message.contains("hook command exited with"));
-
-        let stderr = "x".repeat(320);
-        let script = format!("cat >/dev/null; echo {stderr} 1>&2; exit 9");
-        let (kind, message) = failure_kind_and_message(
-            execute_command_hook(&payload, &shell_argv(&script), None, false, false, false).await,
-            false,
-        );
-        assert_eq!(kind, ErrorKind::Other);
-        assert!(message.contains("hook command exited with"));
-        assert!(message.ends_with('…'));
-    }
-
-    #[cfg(not(windows))]
-    #[tokio::test]
-    async fn execute_command_hook_reports_write_errors() {
-        let payload = user_prompt_payload(&"x".repeat(1_000_000));
-        let (kind, _) = failure_kind_and_message(
-            execute_command_hook(
-                &payload,
-                &shell_argv("exec 0<&-; sleep 0.2"),
-                None,
-                false,
-                false,
-                false,
-            )
-            .await,
-            false,
-        );
-
-        assert_eq!(kind, ErrorKind::BrokenPipe);
-    }
-
-    #[cfg(all(unix, not(target_os = "macos")))]
-    #[tokio::test]
-    async fn execute_command_hook_reports_payload_serialization_errors() {
-        use std::ffi::OsString;
-        use std::os::unix::ffi::OsStringExt;
-
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let invalid_name = OsString::from_vec(vec![0x66, 0x6f, 0x80]);
-        let invalid_dir = tmp.path().join(PathBuf::from(invalid_name));
-        std::fs::create_dir(&invalid_dir).expect("create invalid utf8 dir");
-        let payload = HookPayload {
-            session_id: ThreadId::new(),
-            cwd: invalid_dir,
-            triggered_at: Utc
-                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
-                .single()
-                .expect("valid timestamp"),
-            hook_event: HookEvent::AfterAgent {
-                event: HookEventAfterAgent {
-                    thread_id: ThreadId::new(),
-                    turn_id: "turn-invalid-cwd".to_string(),
-                    input_messages: vec![INPUT_MESSAGE.to_string()],
-                    last_assistant_message: Some("hi".to_string()),
+        let outcomes = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::PostToolUse {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({"command":["echo","hi"]}),
+                    tool_response: json!({"ok": true}),
+                    tool_use_id: "call-1".to_string(),
                 },
-            },
-        };
-        let (kind, message) = failure_kind_and_message(
-            execute_command_hook(
-                &payload,
-                &shell_argv("cat >/dev/null; sleep 0.05"),
-                None,
-                false,
-                false,
-                false,
-            )
-            .await,
-            false,
-        );
+            ))
+            .await;
 
-        assert_eq!(kind, ErrorKind::Other);
-        assert!(message.contains("path contains invalid UTF-8"));
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(
+            outcomes[0].result.control,
+            HookResultControl::Continue
+        ));
+        assert!(outcomes[0].result.error.is_some());
     }
 
-    #[cfg(not(windows))]
     #[tokio::test]
-    async fn execute_command_hook_honors_decisions_and_fallbacks() {
-        let payload = user_prompt_payload("ship it");
+    async fn exit_2_denies_permission_request() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                permission_request: vec![CommandHookConfig {
+                    command: exit_command(2),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
 
+        let outcomes = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::PermissionRequest {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({"command":["echo","hi"]}),
+                    tool_use_id: "call-1".to_string(),
+                    permission_suggestions: None,
+                },
+            ))
+            .await;
+
+        assert_eq!(outcomes.len(), 1);
         assert!(matches!(
-            execute_command_hook(
-                &payload,
-                &shell_argv(r#"cat >/dev/null; echo '{"decision":"approve"}'; exit 5"#),
-                None,
-                false,
-                false,
-                true
-            )
-            .await,
-            HookResult::Success
+            outcomes[0].result.control,
+            HookResultControl::Block { .. }
         ));
-
-        let (kind, message) = failure_kind_and_message(
-            execute_command_hook(
-                &payload,
-                &shell_argv(r#"cat >/dev/null; echo '{"decision":"block","reason":"no"}'"#),
-                None,
-                false,
-                false,
-                true,
-            )
-            .await,
-            true,
-        );
-        assert_eq!(kind, ErrorKind::PermissionDenied);
-        assert_eq!(message, "no");
-
-        let (kind, message) = failure_kind_and_message(
-            execute_command_hook(
-                &payload,
-                &shell_argv(r#"cat >/dev/null; echo '{"decision":"ask"}'"#),
-                None,
-                false,
-                false,
-                true,
-            )
-            .await,
-            true,
-        );
-        assert_eq!(kind, ErrorKind::PermissionDenied);
-        assert_eq!(message, "hook requested an explicit user approval");
-
-        assert!(matches!(
-            execute_command_hook(
-                &payload,
-                &shell_argv(r#"cat >/dev/null; echo 'not json'; echo '{"decision":"unknown"}'"#),
-                None,
-                false,
-                false,
-                true
-            )
-            .await,
-            HookResult::Success
-        ));
-    }
-
-    #[test]
-    fn parse_decision_supports_aliases_and_skips_invalid_lines() {
-        let approve = parse_decision(b"\nnot-json\n{\"decision\":\"continue\"}\n");
-        assert_eq!(approve, Some((ParsedDecision::Approve, None)));
-
-        let deny = parse_decision(br#"{"decision":"deny","reason":"blocked"}"#);
         assert_eq!(
-            deny,
-            Some((ParsedDecision::Block, Some("blocked".to_string())))
+            outcomes[0].result.permission_decision,
+            Some(HookPermissionDecision::Deny)
+        );
+    }
+
+    #[tokio::test]
+    async fn once_hooks_run_only_once_per_session() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                session_start: vec![CommandHookConfig {
+                    command: echo_command(),
+                    once: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+
+        let hook_event = HookEvent::SessionStart {
+            source: "cli".to_string(),
+            model: "gpt-5".to_string(),
+            agent_type: None,
+        };
+
+        let first = hooks
+            .dispatch(payload(&dir.path().to_path_buf(), hook_event.clone()))
+            .await;
+        let second = hooks
+            .dispatch(payload(&dir.path().to_path_buf(), hook_event))
+            .await;
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn once_hooks_do_not_collide_across_events_with_same_name() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                session_start: vec![CommandHookConfig {
+                    name: Some("shared".to_string()),
+                    command: echo_command(),
+                    once: true,
+                    ..Default::default()
+                }],
+                user_prompt_submit: vec![CommandHookConfig {
+                    name: Some("shared".to_string()),
+                    command: echo_command(),
+                    once: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+
+        let first = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::SessionStart {
+                    source: "cli".to_string(),
+                    model: "gpt-5".to_string(),
+                    agent_type: None,
+                },
+            ))
+            .await;
+        let second = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::UserPromptSubmit {
+                    prompt: "hi".to_string(),
+                },
+            ))
+            .await;
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn once_hooks_do_not_consume_when_matcher_does_not_match() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                pre_tool_use: vec![CommandHookConfig {
+                    command: echo_command(),
+                    once: true,
+                    matcher: HookMatcherConfig {
+                        tool_name: Some("exec".to_string()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+
+        let does_not_match = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::PreToolUse {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({"command":["echo","hi"]}),
+                    tool_use_id: "call-1".to_string(),
+                },
+            ))
+            .await;
+        let matches = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::PreToolUse {
+                    tool_name: "exec".to_string(),
+                    tool_input: json!({"command":["echo","hi"]}),
+                    tool_use_id: "call-2".to_string(),
+                },
+            ))
+            .await;
+
+        assert_eq!(does_not_match.len(), 0);
+        assert_eq!(matches.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn invalid_tool_name_regex_surfaces_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                pre_tool_use: vec![CommandHookConfig {
+                    command: echo_command(),
+                    matcher: HookMatcherConfig {
+                        tool_name_regex: Some("[".to_string()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+
+        let outcomes = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::PreToolUse {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({"command":["echo","hi"]}),
+                    tool_use_id: "call-1".to_string(),
+                },
+            ))
+            .await;
+
+        assert_eq!(outcomes.len(), 1);
+        assert!(
+            outcomes[0]
+                .result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("invalid tool_name_regex"),
+            "expected invalid regex error, got: {:?}",
+            outcomes[0].result.error
+        );
+    }
+
+    #[tokio::test]
+    async fn matcher_tool_name_filters_hooks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                pre_tool_use: vec![
+                    CommandHookConfig {
+                        command: echo_command(),
+                        matcher: HookMatcherConfig {
+                            tool_name: Some("shell".to_string()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                    CommandHookConfig {
+                        command: echo_command(),
+                        matcher: HookMatcherConfig {
+                            tool_name: Some("exec".to_string()),
+                            ..Default::default()
+                        },
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        });
+
+        let outcomes = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::PreToolUse {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({"command":["echo","hi"]}),
+                    tool_use_id: "call-1".to_string(),
+                },
+            ))
+            .await;
+
+        assert_eq!(outcomes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn matcher_prompt_regex_filters_hooks() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                user_prompt_submit: vec![CommandHookConfig {
+                    command: echo_command(),
+                    matcher: HookMatcherConfig {
+                        prompt_regex: Some("hello".to_string()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+
+        let matches = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::UserPromptSubmit {
+                    prompt: "hello world".to_string(),
+                },
+            ))
+            .await;
+        let does_not_match = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::UserPromptSubmit {
+                    prompt: "goodbye".to_string(),
+                },
+            ))
+            .await;
+
+        assert_eq!(matches.len(), 1);
+        assert_eq!(does_not_match.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn empty_commands_are_ignored() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                pre_tool_use: vec![
+                    CommandHookConfig {
+                        command: Vec::new(),
+                        ..Default::default()
+                    },
+                    CommandHookConfig {
+                        command: vec!["   ".to_string()],
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        });
+
+        let outcomes = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::PreToolUse {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({"command":["echo","hi"]}),
+                    tool_use_id: "call-1".to_string(),
+                },
+            ))
+            .await;
+
+        assert_eq!(outcomes.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn matcher_tool_name_regex_does_not_match_non_tool_events() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                session_start: vec![CommandHookConfig {
+                    command: echo_command(),
+                    matcher: HookMatcherConfig {
+                        tool_name_regex: Some(".*".to_string()),
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+
+        let outcomes = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::SessionStart {
+                    source: "cli".to_string(),
+                    model: "gpt-5".to_string(),
+                    agent_type: None,
+                },
+            ))
+            .await;
+
+        assert_eq!(outcomes.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn non_zero_exit_without_stderr_returns_status_error() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                pre_tool_use: vec![CommandHookConfig {
+                    command: exit_command(1),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+
+        let outcomes = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::PreToolUse {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({"command":["echo","hi"]}),
+                    tool_use_id: "call-1".to_string(),
+                },
+            ))
+            .await;
+
+        assert_eq!(outcomes.len(), 1);
+        assert!(
+            outcomes[0]
+                .result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("hook command exited with")
+        );
+    }
+
+    #[tokio::test]
+    async fn non_zero_exit_with_stderr_includes_stderr_preview() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                pre_tool_use: vec![CommandHookConfig {
+                    command: exit_with_stderr_command(1, "blocked by policy"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+
+        let outcomes = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::PreToolUse {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({"command":["echo","hi"]}),
+                    tool_use_id: "call-1".to_string(),
+                },
+            ))
+            .await;
+
+        assert_eq!(outcomes.len(), 1);
+        assert!(
+            outcomes[0]
+                .result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("blocked by policy")
+        );
+    }
+
+    #[test]
+    fn parse_stdout_json_returns_none_for_empty_output() {
+        assert_eq!(parse_stdout_json(b""), None);
+        assert_eq!(parse_stdout_json(b"\n \t\n"), None);
+    }
+
+    #[test]
+    fn parse_stdout_json_skips_blank_lines_before_json() {
+        let value = parse_stdout_json(b"\n\n   \n{\"a\":2}\n").expect("json");
+        assert_eq!(value, json!({"a": 2}));
+    }
+
+    #[test]
+    fn parse_stdout_json_accepts_full_json_output() {
+        let value = parse_stdout_json(br#"{"a":1}"#).expect("json");
+        assert_eq!(value, json!({"a": 1}));
+    }
+
+    #[test]
+    fn parse_stdout_json_accepts_first_parseable_json_line() {
+        let value = parse_stdout_json(b"not json\n{\"a\":1}\n{\"b\":2}\n").expect("json");
+        assert_eq!(value, json!({"a": 1}));
+    }
+
+    #[test]
+    fn apply_stdout_json_collects_context_and_updated_input() {
+        let result = apply_stdout_json(
+            HookEventKey::PreToolUse,
+            json!({
+                "systemMessage": " sys ",
+                "additionalContext": " ctx ",
+                "hookSpecificOutput": {
+                    "additionalContext": " hook ",
+                    "updatedInput": {"x": 1},
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": " nope ",
+                },
+            }),
         );
 
-        let unknown = parse_decision(br#"{"decision":"unknown"}"#);
-        assert_eq!(unknown, None);
-
-        let missing_decision = parse_decision(br#"{"reason":"missing"}"#);
-        assert_eq!(missing_decision, None);
-    }
-
-    #[test]
-    fn preview_bytes_trims_and_truncates() {
-        assert_eq!(preview_bytes(b"  hi there \n"), "hi there");
-
-        let preview = preview_bytes("x".repeat(320).as_bytes());
-        assert_eq!(preview.chars().count(), 301);
-        assert!(preview.ends_with('…'));
-    }
-
-    #[test]
-    fn hook_error_uses_abort_flag() {
+        assert_eq!(
+            result.additional_context,
+            vec!["sys".to_string(), "ctx".to_string(), "hook".to_string()]
+        );
+        assert_eq!(result.updated_input, Some(json!({"x": 1})));
+        assert_eq!(
+            result.permission_decision,
+            Some(HookPermissionDecision::Deny)
+        );
         assert!(matches!(
-            hook_error(io::Error::other("continue"), false),
-            HookResult::FailedContinue(_)
+            result.control,
+            HookResultControl::Block { reason } if reason == "nope"
         ));
+    }
+
+    #[test]
+    fn apply_stdout_json_parses_permission_request_behavior() {
+        let result = apply_stdout_json(
+            HookEventKey::PermissionRequest,
+            json!({
+                "hookSpecificOutput": {
+                    "decision": {"behavior": "allow"},
+                    "permissionDecisionReason": " ok ",
+                },
+            }),
+        );
+
+        assert_eq!(
+            result.permission_decision,
+            Some(HookPermissionDecision::Allow)
+        );
+        assert_eq!(result.permission_decision_reason, Some("ok".to_string()));
+        assert!(matches!(result.control, HookResultControl::Continue));
+    }
+
+    #[test]
+    fn apply_stdout_json_blocks_on_decision_with_reason() {
+        let result = apply_stdout_json(
+            HookEventKey::UserPromptSubmit,
+            json!({
+                "decision": "block",
+                "reason": "no",
+            }),
+        );
+
         assert!(matches!(
-            hook_error(io::Error::other("abort"), true),
-            HookResult::FailedAbort(_)
+            result.control,
+            HookResultControl::Block { reason } if reason == "no"
         ));
     }
 
     #[test]
-    #[should_panic(expected = "expected failed continue")]
-    fn failure_kind_and_message_panics_for_abort_when_continue_expected() {
-        let _ = failure_kind_and_message(
-            HookResult::FailedAbort(io::Error::other("abort").into()),
-            false,
+    fn apply_stdout_json_ignores_decisions_for_post_tool_use() {
+        let result = apply_stdout_json(
+            HookEventKey::PostToolUse,
+            json!({
+                "decision": "block",
+                "reason": "no",
+            }),
         );
+
+        assert!(matches!(result.control, HookResultControl::Continue));
     }
 
     #[test]
-    #[should_panic(expected = "expected failed abort")]
-    fn failure_kind_and_message_panics_for_continue_when_abort_expected() {
-        let _ = failure_kind_and_message(
-            HookResult::FailedContinue(io::Error::other("continue").into()),
-            true,
-        );
+    fn apply_stdout_json_non_object_is_ignored() {
+        let result = apply_stdout_json(HookEventKey::PreToolUse, json!(["not", "an", "object"]));
+        assert_eq!(result, HookResult::success());
     }
 
     #[test]
-    #[should_panic(expected = "expected failed hook result")]
-    fn failure_kind_and_message_panics_for_success_result() {
-        let _ = failure_kind_and_message(HookResult::Success, false);
+    fn apply_stdout_json_pre_tool_use_ask_blocks_with_reason() {
+        let result = apply_stdout_json(
+            HookEventKey::PreToolUse,
+            json!({
+                "decision": "ask",
+                "stopReason": "need approval",
+            }),
+        );
+
+        assert!(matches!(
+            result.control,
+            HookResultControl::Block { reason } if reason == "need approval"
+        ));
+    }
+
+    #[test]
+    fn apply_stdout_json_permission_request_accepts_top_level_decision() {
+        let result = apply_stdout_json(
+            HookEventKey::PermissionRequest,
+            json!({
+                "decision": "ask",
+                "permissionDecisionReason": "check with user",
+            }),
+        );
+
+        assert_eq!(
+            result.permission_decision,
+            Some(HookPermissionDecision::Ask)
+        );
+        assert_eq!(
+            result.permission_decision_reason,
+            Some("check with user".to_string())
+        );
+        assert!(matches!(result.control, HookResultControl::Continue));
+    }
+
+    #[test]
+    fn apply_stdout_json_user_prompt_submit_does_not_block_on_ask() {
+        let result = apply_stdout_json(
+            HookEventKey::UserPromptSubmit,
+            json!({
+                "decision": "ask",
+                "reason": "not used",
+            }),
+        );
+
+        assert!(matches!(result.control, HookResultControl::Continue));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn permission_decision_deny_blocks_pre_tool_use_on_exit_0_stdout_json() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let cmd = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf '{\"hookSpecificOutput\":{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"no\"}}'"
+                .to_string(),
+        ];
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                pre_tool_use: vec![CommandHookConfig {
+                    command: cmd,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+
+        let outcomes = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::PreToolUse {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({"command":["echo","hi"]}),
+                    tool_use_id: "call-1".to_string(),
+                },
+            ))
+            .await;
+
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            outcomes[0].result.permission_decision,
+            Some(HookPermissionDecision::Deny)
+        );
+        assert!(matches!(
+            outcomes[0].result.control,
+            HookResultControl::Block { .. }
+        ));
     }
 }
