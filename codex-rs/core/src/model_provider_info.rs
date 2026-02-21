@@ -38,6 +38,8 @@ pub enum WireApi {
     /// The Responses API exposed by OpenAI at `/v1/responses`.
     #[default]
     Responses,
+    /// The Messages API exposed by Anthropic at `/v1/messages`.
+    Anthropic,
 }
 
 impl<'de> Deserialize<'de> for WireApi {
@@ -48,8 +50,12 @@ impl<'de> Deserialize<'de> for WireApi {
         let value = String::deserialize(deserializer)?;
         match value.as_str() {
             "responses" => Ok(Self::Responses),
+            "anthropic" => Ok(Self::Anthropic),
             "chat" => Err(serde::de::Error::custom(CHAT_WIRE_API_REMOVED_ERROR)),
-            _ => Err(serde::de::Error::unknown_variant(&value, &["responses"])),
+            _ => Err(serde::de::Error::unknown_variant(
+                &value,
+                &["responses", "anthropic"],
+            )),
         }
     }
 }
@@ -437,5 +443,18 @@ wire_api = "chat"
 
         let err = toml::from_str::<ModelProviderInfo>(provider_toml).unwrap_err();
         assert!(err.to_string().contains(CHAT_WIRE_API_REMOVED_ERROR));
+    }
+
+    #[test]
+    fn test_deserialize_anthropic_wire_api() {
+        let provider_toml = r#"
+name = "Anthropic"
+base_url = "https://api.anthropic.com"
+env_key = "ANTHROPIC_API_KEY"
+wire_api = "anthropic"
+        "#;
+
+        let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+        assert_eq!(provider.wire_api, WireApi::Anthropic);
     }
 }

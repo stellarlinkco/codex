@@ -11,6 +11,7 @@ mod apply_patch;
 mod apps;
 pub mod auth;
 mod client;
+mod client_anthropic;
 mod client_common;
 pub mod codex;
 pub use codex::SteerInputError;

@@ -87,6 +87,7 @@ use tracing::warn;
 use crate::AuthManager;
 use crate::auth::CodexAuth;
 use crate::auth::RefreshTokenError;
+use crate::client_anthropic::stream_anthropic;
 use crate::client_common::Prompt;
 use crate::client_common::ResponseEvent;
 use crate::client_common::ResponseStream;
@@ -927,6 +928,10 @@ impl ModelClientSession {
                     turn_metadata_header,
                 )
                 .await
+            }
+            WireApi::Anthropic => {
+                let _ = (effort, summary, turn_metadata_header);
+                stream_anthropic(&self.client.state.provider, prompt, model_info).await
             }
         }
     }

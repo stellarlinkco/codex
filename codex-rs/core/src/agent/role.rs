@@ -268,6 +268,7 @@ mod tests {
     use super::*;
     use crate::config::ConfigBuilder;
     use crate::config_loader::ConfigLayerStackOrdering;
+    use crate::model_provider_info::WireApi;
     use codex_protocol::openai_models::ReasoningEffort;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
@@ -510,6 +511,38 @@ writable_roots = ["./sandbox-root"]
 
         assert_eq!(config.model.as_deref(), Some("role-model"));
         assert_eq!(session_flags_layer_count(&config), before_layers + 1);
+    }
+
+    #[tokio::test]
+    async fn apply_role_can_define_custom_anthropic_provider() {
+        let (home, mut config) = test_config_with_cli_overrides(Vec::new()).await;
+        let role_path = write_role_config(
+            &home,
+            "anthropic-role.toml",
+            r#"model_provider = "anthropic"
+[model_providers.anthropic]
+name = "Anthropic"
+base_url = "https://api.anthropic.com"
+env_key = "ANTHROPIC_API_KEY"
+wire_api = "anthropic"
+"#,
+        )
+        .await;
+        config.agent_roles.insert(
+            "custom".to_string(),
+            AgentRoleConfig {
+                description: None,
+                config_file: Some(role_path),
+            },
+        );
+
+        apply_role_to_config(&mut config, Some("custom"))
+            .await
+            .expect("custom role should apply");
+
+        assert_eq!(config.model_provider_id, "anthropic");
+        assert_eq!(config.model_provider.wire_api, WireApi::Anthropic);
+        assert!(config.model_providers.contains_key("anthropic"));
     }
 
     #[test]

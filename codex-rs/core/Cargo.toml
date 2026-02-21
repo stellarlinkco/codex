@@ -19,6 +19,7 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+anthropic-sdk-rs = { workspace = true }
 arc-swap = "1.8.2"
 async-channel = { workspace = true }
 async-trait = { workspace = true }
@@ -61,6 +62,7 @@ http = { workspace = true }
 include_dir = { workspace = true }
 indexmap = { workspace = true }
 indoc = { workspace = true }
+jsonschema = { workspace = true }
 keyring = { workspace = true, features = ["crypto-rust"] }
 libc = { workspace = true }
 notify = { workspace = true }
