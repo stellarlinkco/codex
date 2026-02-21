@@ -808,6 +808,7 @@ mod tests {
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "Hi there".into(),
+                phase: None,
             }),
             EventMsg::AgentReasoning(AgentReasoningEvent {
                 text: "thinking".into(),
@@ -823,6 +824,7 @@ mod tests {
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "Reply two".into(),
+                phase: None,
             }),
         ];
 
@@ -910,6 +912,7 @@ mod tests {
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "interlude".into(),
+                phase: None,
             }),
             EventMsg::AgentReasoning(AgentReasoningEvent {
                 text: "second summary".into(),
@@ -954,6 +957,7 @@ mod tests {
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "Working...".into(),
+                phase: None,
             }),
             EventMsg::TurnAborted(TurnAbortedEvent {
                 turn_id: Some("turn-1".into()),
@@ -967,6 +971,7 @@ mod tests {
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "Second attempt complete.".into(),
+                phase: None,
             }),
         ];
 
@@ -1033,6 +1038,7 @@ mod tests {
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "A1".into(),
+                phase: None,
             }),
             EventMsg::UserMessage(UserMessageEvent {
                 message: "Second".into(),
@@ -1042,6 +1048,7 @@ mod tests {
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "A2".into(),
+                phase: None,
             }),
             EventMsg::ThreadRolledBack(ThreadRolledBackEvent { num_turns: 1 }),
             EventMsg::UserMessage(UserMessageEvent {
@@ -1052,6 +1059,7 @@ mod tests {
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "A3".into(),
+                phase: None,
             }),
         ];
 
@@ -1113,6 +1121,7 @@ mod tests {
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "A1".into(),
+                phase: None,
             }),
             EventMsg::UserMessage(UserMessageEvent {
                 message: "Two".into(),
@@ -1122,6 +1131,7 @@ mod tests {
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "A2".into(),
+                phase: None,
             }),
             EventMsg::ThreadRolledBack(ThreadRolledBackEvent { num_turns: 99 }),
         ];
@@ -1485,6 +1495,7 @@ mod tests {
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "still in b".into(),
+                phase: None,
             }),
             EventMsg::TurnComplete(TurnCompleteEvent {
                 turn_id: "turn-b".into(),
@@ -1538,6 +1549,7 @@ mod tests {
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "still in b".into(),
+                phase: None,
             }),
         ];
 
@@ -1598,6 +1610,8 @@ mod tests {
                     .expect("valid sender thread id"),
                 receiver_thread_id: ThreadId::try_from("00000000-0000-0000-0000-000000000002")
                     .expect("valid receiver thread id"),
+                receiver_agent_nickname: None,
+                receiver_agent_role: None,
                 status: AgentStatus::Completed(None),
             }),
         ];
@@ -1646,6 +1660,7 @@ mod tests {
                 sender_thread_id: ThreadId::try_from("00000000-0000-0000-0000-000000000001")
                     .expect("valid sender thread id"),
                 call_id: format!("{TEAM_WAIT_CALL_PREFIX}wait-1"),
+                agent_statuses: Vec::new(),
                 statuses: HashMap::from([(receiver, AgentStatus::Completed(None))]),
                 receiver_names: HashMap::new(),
             }),
@@ -1691,6 +1706,7 @@ mod tests {
             }),
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "done".into(),
+                phase: None,
             }),
             EventMsg::Error(ErrorEvent {
                 message: "rollback failed".into(),

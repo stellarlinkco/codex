@@ -25,7 +25,7 @@ pub struct LandlockCommand {
     pub sandbox_policy_cwd: PathBuf,
 
     #[arg(long = "sandbox-policy")]
-    pub sandbox_policy: codex_core::protocol::SandboxPolicy,
+    pub sandbox_policy: codex_protocol::protocol::SandboxPolicy,
 
     /// Opt-in: use the bubblewrap-based Linux sandbox pipeline.
     ///
@@ -142,7 +142,7 @@ pub fn run_main() -> ! {
 
 fn run_bwrap_with_proc_fallback(
     sandbox_policy_cwd: &Path,
-    sandbox_policy: &codex_core::protocol::SandboxPolicy,
+    sandbox_policy: &codex_protocol::protocol::SandboxPolicy,
     inner: Vec<String>,
     mount_proc: bool,
     allow_network_for_proxy: bool,
@@ -164,7 +164,7 @@ fn run_bwrap_with_proc_fallback(
 }
 
 fn bwrap_network_mode(
-    sandbox_policy: &codex_core::protocol::SandboxPolicy,
+    sandbox_policy: &codex_protocol::protocol::SandboxPolicy,
     allow_network_for_proxy: bool,
 ) -> BwrapNetworkMode {
     if allow_network_for_proxy {
@@ -178,7 +178,7 @@ fn bwrap_network_mode(
 
 fn build_bwrap_argv(
     inner: Vec<String>,
-    sandbox_policy: &codex_core::protocol::SandboxPolicy,
+    sandbox_policy: &codex_protocol::protocol::SandboxPolicy,
     sandbox_policy_cwd: &Path,
     options: BwrapOptions,
 ) -> Vec<String> {
@@ -201,7 +201,7 @@ fn build_bwrap_argv(
 
 fn preflight_proc_mount_support(
     sandbox_policy_cwd: &Path,
-    sandbox_policy: &codex_core::protocol::SandboxPolicy,
+    sandbox_policy: &codex_protocol::protocol::SandboxPolicy,
 ) -> bool {
     let preflight_command = vec![resolve_true_command()];
     let preflight_argv = build_bwrap_argv(
@@ -307,13 +307,15 @@ fn close_fd_or_panic(fd: libc::c_int, context: &str) {
 fn is_proc_mount_failure(stderr: &str) -> bool {
     stderr.contains("Can't mount proc")
         && stderr.contains("/newroot/proc")
-        && stderr.contains("Invalid argument")
+        && (stderr.contains("Invalid argument")
+            || stderr.contains("Operation not permitted")
+            || stderr.contains("Permission denied"))
 }
 
 /// Build the inner command that applies seccomp after bubblewrap.
 fn build_inner_seccomp_command(
     sandbox_policy_cwd: &Path,
-    sandbox_policy: &codex_core::protocol::SandboxPolicy,
+    sandbox_policy: &codex_protocol::protocol::SandboxPolicy,
     use_bwrap_sandbox: bool,
     allow_network_for_proxy: bool,
     command: Vec<String>,
@@ -372,12 +374,24 @@ fn exec_or_panic(command: Vec<String>) -> ! {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use codex_core::protocol::SandboxPolicy;
+    use codex_protocol::protocol::SandboxPolicy;
     use pretty_assertions::assert_eq;
 
     #[test]
     fn detects_proc_mount_invalid_argument_failure() {
         let stderr = "bwrap: Can't mount proc on /newroot/proc: Invalid argument";
+        assert_eq!(is_proc_mount_failure(stderr), true);
+    }
+
+    #[test]
+    fn detects_proc_mount_operation_not_permitted_failure() {
+        let stderr = "bwrap: Can't mount proc on /newroot/proc: Operation not permitted";
+        assert_eq!(is_proc_mount_failure(stderr), true);
+    }
+
+    #[test]
+    fn detects_proc_mount_permission_denied_failure() {
+        let stderr = "bwrap: Can't mount proc on /newroot/proc: Permission denied";
         assert_eq!(is_proc_mount_failure(stderr), true);
     }
 
@@ -407,9 +421,8 @@ mod tests {
                 "--ro-bind".to_string(),
                 "/".to_string(),
                 "/".to_string(),
-                "--dev-bind".to_string(),
-                "/dev/null".to_string(),
-                "/dev/null".to_string(),
+                "--dev".to_string(),
+                "/dev".to_string(),
                 "--unshare-pid".to_string(),
                 "--proc".to_string(),
                 "/proc".to_string(),

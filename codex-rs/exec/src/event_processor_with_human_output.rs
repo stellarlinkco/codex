@@ -1,39 +1,39 @@
 use codex_core::config::Config;
-use codex_core::protocol::AgentMessageEvent;
-use codex_core::protocol::AgentReasoningRawContentEvent;
-use codex_core::protocol::AgentStatus;
-use codex_core::protocol::BackgroundEventEvent;
-use codex_core::protocol::CollabAgentInteractionBeginEvent;
-use codex_core::protocol::CollabAgentInteractionEndEvent;
-use codex_core::protocol::CollabAgentSpawnBeginEvent;
-use codex_core::protocol::CollabAgentSpawnEndEvent;
-use codex_core::protocol::CollabCloseBeginEvent;
-use codex_core::protocol::CollabCloseEndEvent;
-use codex_core::protocol::CollabWaitingBeginEvent;
-use codex_core::protocol::CollabWaitingEndEvent;
-use codex_core::protocol::DeprecationNoticeEvent;
-use codex_core::protocol::ErrorEvent;
-use codex_core::protocol::Event;
-use codex_core::protocol::EventMsg;
-use codex_core::protocol::ExecCommandBeginEvent;
-use codex_core::protocol::ExecCommandEndEvent;
-use codex_core::protocol::FileChange;
-use codex_core::protocol::ItemCompletedEvent;
-use codex_core::protocol::McpInvocation;
-use codex_core::protocol::McpToolCallBeginEvent;
-use codex_core::protocol::McpToolCallEndEvent;
-use codex_core::protocol::PatchApplyBeginEvent;
-use codex_core::protocol::PatchApplyEndEvent;
-use codex_core::protocol::SessionConfiguredEvent;
-use codex_core::protocol::StreamErrorEvent;
-use codex_core::protocol::TurnAbortReason;
-use codex_core::protocol::TurnCompleteEvent;
-use codex_core::protocol::TurnDiffEvent;
-use codex_core::protocol::WarningEvent;
-use codex_core::protocol::WebSearchEndEvent;
 use codex_core::web_search::web_search_detail;
 use codex_protocol::items::TurnItem;
 use codex_protocol::num_format::format_with_separators;
+use codex_protocol::protocol::AgentMessageEvent;
+use codex_protocol::protocol::AgentReasoningRawContentEvent;
+use codex_protocol::protocol::AgentStatus;
+use codex_protocol::protocol::BackgroundEventEvent;
+use codex_protocol::protocol::CollabAgentInteractionBeginEvent;
+use codex_protocol::protocol::CollabAgentInteractionEndEvent;
+use codex_protocol::protocol::CollabAgentSpawnBeginEvent;
+use codex_protocol::protocol::CollabAgentSpawnEndEvent;
+use codex_protocol::protocol::CollabCloseBeginEvent;
+use codex_protocol::protocol::CollabCloseEndEvent;
+use codex_protocol::protocol::CollabWaitingBeginEvent;
+use codex_protocol::protocol::CollabWaitingEndEvent;
+use codex_protocol::protocol::DeprecationNoticeEvent;
+use codex_protocol::protocol::ErrorEvent;
+use codex_protocol::protocol::Event;
+use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::ExecCommandBeginEvent;
+use codex_protocol::protocol::ExecCommandEndEvent;
+use codex_protocol::protocol::FileChange;
+use codex_protocol::protocol::ItemCompletedEvent;
+use codex_protocol::protocol::McpInvocation;
+use codex_protocol::protocol::McpToolCallBeginEvent;
+use codex_protocol::protocol::McpToolCallEndEvent;
+use codex_protocol::protocol::PatchApplyBeginEvent;
+use codex_protocol::protocol::PatchApplyEndEvent;
+use codex_protocol::protocol::SessionConfiguredEvent;
+use codex_protocol::protocol::StreamErrorEvent;
+use codex_protocol::protocol::TurnAbortReason;
+use codex_protocol::protocol::TurnCompleteEvent;
+use codex_protocol::protocol::TurnDiffEvent;
+use codex_protocol::protocol::WarningEvent;
+use codex_protocol::protocol::WebSearchEndEvent;
 use codex_utils_elapsed::format_duration;
 use codex_utils_elapsed::format_elapsed;
 use owo_colors::OwoColorize;
@@ -73,7 +73,7 @@ pub(crate) struct EventProcessorWithHumanOutput {
     show_agent_reasoning: bool,
     show_raw_agent_reasoning: bool,
     last_message_path: Option<PathBuf>,
-    last_total_token_usage: Option<codex_core::protocol::TokenUsageInfo>,
+    last_total_token_usage: Option<codex_protocol::protocol::TokenUsageInfo>,
     final_message: Option<String>,
     last_proposed_plan: Option<String>,
 }
@@ -201,10 +201,12 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             }
             EventMsg::McpStartupUpdate(update) => {
                 let status_text = match update.status {
-                    codex_core::protocol::McpStartupStatus::Starting => "starting".to_string(),
-                    codex_core::protocol::McpStartupStatus::Ready => "ready".to_string(),
-                    codex_core::protocol::McpStartupStatus::Cancelled => "cancelled".to_string(),
-                    codex_core::protocol::McpStartupStatus::Failed { ref error } => {
+                    codex_protocol::protocol::McpStartupStatus::Starting => "starting".to_string(),
+                    codex_protocol::protocol::McpStartupStatus::Ready => "ready".to_string(),
+                    codex_protocol::protocol::McpStartupStatus::Cancelled => {
+                        "cancelled".to_string()
+                    }
+                    codex_protocol::protocol::McpStartupStatus::Failed { ref error } => {
                         format!("failed: {error}")
                     }
                 };
@@ -299,7 +301,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     );
                 }
             }
-            EventMsg::AgentMessage(AgentMessageEvent { message }) => {
+            EventMsg::AgentMessage(AgentMessageEvent { message, .. }) => {
                 ts_msg!(
                     self,
                     "{}\n{}",
@@ -632,6 +634,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 new_thread_id,
                 prompt,
                 status,
+                ..
             }) => {
                 let success = new_thread_id.is_some() && !is_collab_status_failure(&status);
                 let title_style = if success { self.green } else { self.red };
@@ -669,6 +672,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 receiver_thread_id,
                 prompt,
                 status,
+                ..
             }) => {
                 let success = !is_collab_status_failure(&status);
                 let title_style = if success { self.green } else { self.red };
@@ -686,8 +690,8 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             EventMsg::CollabWaitingBegin(CollabWaitingBeginEvent {
                 sender_thread_id: _,
                 receiver_thread_ids,
-                receiver_names,
                 call_id,
+                ..
             }) => {
                 ts_msg!(
                     self,
@@ -697,14 +701,14 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 );
                 eprintln!(
                     "  receivers: {}",
-                    format_receiver_list(&receiver_thread_ids, &receiver_names).style(self.dimmed)
+                    format_receiver_list(&receiver_thread_ids).style(self.dimmed)
                 );
             }
             EventMsg::CollabWaitingEnd(CollabWaitingEndEvent {
                 sender_thread_id: _,
                 call_id,
                 statuses,
-                receiver_names,
+                ..
             }) => {
                 if statuses.is_empty() {
                     ts_msg!(
@@ -725,23 +729,13 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 ts_msg!(self, "{}", title.style(title_style));
                 let mut sorted = statuses
                     .into_iter()
-                    .map(|(thread_id, status)| {
-                        (
-                            format_receiver(&thread_id, &receiver_names),
-                            thread_id.to_string(),
-                            status,
-                        )
-                    })
+                    .map(|(thread_id, status)| (thread_id.to_string(), status))
                     .collect::<Vec<_>>();
-                sorted.sort_by(|(left_name, left_id, _), (right_name, right_id, _)| {
-                    left_name
-                        .cmp(right_name)
-                        .then_with(|| left_id.cmp(right_id))
-                });
-                for (receiver, _, status) in sorted {
+                sorted.sort_by(|(left, _), (right, _)| left.cmp(right));
+                for (thread_id, status) in sorted {
                     eprintln!(
                         "  {} {}",
-                        receiver.style(self.dimmed),
+                        thread_id.style(self.dimmed),
                         format_collab_status(&status).style(style_for_agent_status(&status, self))
                     );
                 }
@@ -767,6 +761,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 sender_thread_id: _,
                 receiver_thread_id,
                 status,
+                ..
             }) => {
                 let success = !is_collab_status_failure(&status);
                 let title_style = if success { self.green } else { self.red };
@@ -813,6 +808,9 @@ impl EventProcessor for EventProcessorWithHumanOutput {
             | EventMsg::RequestUserInput(_)
             | EventMsg::CollabResumeBegin(_)
             | EventMsg::CollabResumeEnd(_)
+            | EventMsg::RealtimeConversationStarted(_)
+            | EventMsg::RealtimeConversationRealtime(_)
+            | EventMsg::RealtimeConversationClosed(_)
             | EventMsg::DynamicToolCallRequest(_) => {}
         }
         CodexStatus::Running
@@ -912,25 +910,12 @@ fn is_collab_status_failure(status: &AgentStatus) -> bool {
     matches!(status, AgentStatus::Errored(_) | AgentStatus::NotFound)
 }
 
-fn format_receiver(
-    id: &codex_protocol::ThreadId,
-    receiver_names: &HashMap<codex_protocol::ThreadId, String>,
-) -> String {
-    match receiver_names.get(id) {
-        Some(name) if !name.trim().is_empty() => format!("{name} ({id})"),
-        _ => id.to_string(),
-    }
-}
-
-fn format_receiver_list(
-    ids: &[codex_protocol::ThreadId],
-    receiver_names: &HashMap<codex_protocol::ThreadId, String>,
-) -> String {
+fn format_receiver_list(ids: &[codex_protocol::ThreadId]) -> String {
     if ids.is_empty() {
         return "none".to_string();
     }
     ids.iter()
-        .map(|id| format_receiver(id, receiver_names))
+        .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ")
 }

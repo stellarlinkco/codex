@@ -6,48 +6,14 @@ use codex_protocol::openai_models::ModelInfo;
 use std::path::Path;
 use tokio::fs;
 
-const CONSOLIDATION_PROMPT_TEMPLATE: &str =
-    include_str!("../../templates/memories/consolidation.md");
-const STAGE_ONE_INPUT_MESSAGE_TEMPLATE: &str =
-    include_str!("../../templates/memories/stage_one_input.md");
-const MEMORY_TOOL_DEVELOPER_INSTRUCTIONS_TEMPLATE: &str =
-    include_str!("../../templates/memories/read_path.md");
-
-fn render_template<'a>(template: &str, mut lookup: impl FnMut(&str) -> Option<&'a str>) -> String {
-    let mut out = String::with_capacity(template.len());
-    let mut rest = template;
-    while let Some(start) = rest.find("{{") {
-        let (before, after_start) = rest.split_at(start);
-        out.push_str(before);
-
-        let Some(end) = after_start.find("}}") else {
-            out.push_str(after_start);
-            return out;
-        };
-
-        let (placeholder, after_end) = after_start.split_at(end + 2);
-        let key = placeholder
-            .trim_start_matches("{{")
-            .trim_end_matches("}}")
-            .trim();
-        if let Some(value) = lookup(key) {
-            out.push_str(value);
-        } else {
-            out.push_str(placeholder);
-        }
-        rest = after_end;
-    }
-    out.push_str(rest);
-    out
-}
+const CONSOLIDATION_TEMPLATE: &str = include_str!("../../templates/memories/consolidation.md");
+const STAGE_ONE_INPUT_TEMPLATE: &str = include_str!("../../templates/memories/stage_one_input.md");
+const READ_PATH_TEMPLATE: &str = include_str!("../../templates/memories/read_path.md");
 
 /// Builds the consolidation subagent prompt for a specific memory root.
 pub(super) fn build_consolidation_prompt(memory_root: &Path) -> String {
     let memory_root = memory_root.display().to_string();
-    render_template(CONSOLIDATION_PROMPT_TEMPLATE, |key| match key {
-        "memory_root" => Some(memory_root.as_str()),
-        _ => None,
-    })
+    CONSOLIDATION_TEMPLATE.replace("{{ memory_root }}", &memory_root)
 }
 
 /// Builds the stage-1 user message containing rollout metadata and content.
@@ -74,15 +40,10 @@ pub(super) fn build_stage_one_input_message(
 
     let rollout_path = rollout_path.display().to_string();
     let rollout_cwd = rollout_cwd.display().to_string();
-    Ok(render_template(
-        STAGE_ONE_INPUT_MESSAGE_TEMPLATE,
-        |key| match key {
-            "rollout_path" => Some(rollout_path.as_str()),
-            "rollout_cwd" => Some(rollout_cwd.as_str()),
-            "rollout_contents" => Some(truncated_rollout_contents.as_str()),
-            _ => None,
-        },
-    ))
+    Ok(STAGE_ONE_INPUT_TEMPLATE
+        .replace("{{ rollout_path }}", &rollout_path)
+        .replace("{{ rollout_cwd }}", &rollout_cwd)
+        .replace("{{ rollout_contents }}", &truncated_rollout_contents))
 }
 
 /// Build prompt used for read path. This prompt must be added to the developer instructions. In
@@ -104,14 +65,11 @@ pub(crate) async fn build_memory_tool_developer_instructions(codex_home: &Path) 
         return None;
     }
     let base_path = base_path.display().to_string();
-    Some(render_template(
-        MEMORY_TOOL_DEVELOPER_INSTRUCTIONS_TEMPLATE,
-        |key| match key {
-            "base_path" => Some(base_path.as_str()),
-            "memory_summary" => Some(memory_summary.as_str()),
-            _ => None,
-        },
-    ))
+    Some(
+        READ_PATH_TEMPLATE
+            .replace("{{ base_path }}", &base_path)
+            .replace("{{ memory_summary }}", &memory_summary),
+    )
 }
 
 #[cfg(test)]
