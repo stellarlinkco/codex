@@ -91,6 +91,7 @@ pub(crate) fn waiting_begin(ev: CollabWaitingBeginEvent) -> PlainHistoryCell {
         sender_thread_id: _,
         receiver_thread_ids,
         receiver_agents,
+        receiver_names: _,
         call_id: _,
     } = ev;
     let receiver_agents = merge_wait_receivers(&receiver_thread_ids, receiver_agents);
@@ -118,6 +119,7 @@ pub(crate) fn waiting_end(ev: CollabWaitingEndEvent) -> PlainHistoryCell {
         call_id: _,
         sender_thread_id: _,
         agent_statuses,
+        receiver_names: _,
         statuses,
     } = ev;
     let details = wait_complete_lines(&statuses, &agent_statuses);
@@ -443,6 +445,7 @@ mod tests {
                 agent_nickname: Some("Robie".to_string()),
                 agent_role: Some("explorer".to_string()),
             }],
+            receiver_names: HashMap::new(),
             call_id: "call-wait".to_string(),
         });
 
@@ -469,6 +472,7 @@ mod tests {
                     status: AgentStatus::Errored("tool timeout".to_string()),
                 },
             ],
+            receiver_names: HashMap::new(),
             statuses,
         });
 

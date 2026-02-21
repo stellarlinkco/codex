@@ -72,14 +72,20 @@ pub fn build_turns_from_rollout_items(items: &[RolloutItem]) -> Vec<Turn> {
     builder.finish()
 }
 
-struct ThreadHistoryBuilder {
+pub struct ThreadHistoryBuilder {
     turns: Vec<Turn>,
     current_turn: Option<PendingTurn>,
     next_item_index: i64,
 }
 
+impl Default for ThreadHistoryBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl ThreadHistoryBuilder {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             turns: Vec::new(),
             current_turn: None,
@@ -87,14 +93,30 @@ impl ThreadHistoryBuilder {
         }
     }
 
-    fn finish(mut self) -> Vec<Turn> {
+    pub fn reset(&mut self) {
+        *self = Self::new();
+    }
+
+    pub fn finish(mut self) -> Vec<Turn> {
         self.finish_current_turn();
         self.turns
     }
 
+    pub fn active_turn_snapshot(&self) -> Option<Turn> {
+        self.current_turn
+            .as_ref()
+            .cloned()
+            .map(Turn::from)
+            .or_else(|| self.turns.last().cloned())
+    }
+
+    pub fn has_active_turn(&self) -> bool {
+        self.current_turn.is_some()
+    }
+
     /// This function should handle all EventMsg variants that can be persisted in a rollout file.
     /// See `should_persist_event_msg` in `codex-rs/core/rollout/policy.rs`.
-    fn handle_event(&mut self, event: &EventMsg) {
+    pub fn handle_event(&mut self, event: &EventMsg) {
         match event {
             EventMsg::UserMessage(payload) => self.handle_user_message(payload),
             EventMsg::AgentMessage(payload) => self.handle_agent_message(payload.message.clone()),
@@ -129,7 +151,7 @@ impl ThreadHistoryBuilder {
         }
     }
 
-    fn handle_rollout_item(&mut self, item: &RolloutItem) {
+    pub fn handle_rollout_item(&mut self, item: &RolloutItem) {
         match item {
             RolloutItem::EventMsg(event) => self.handle_event(event),
             RolloutItem::Compacted(payload) => self.handle_compacted(payload),
@@ -697,7 +719,7 @@ fn render_review_output_text(output: &ReviewOutputEvent) -> String {
     }
 }
 
-fn convert_patch_changes(
+pub fn convert_patch_changes(
     changes: &HashMap<std::path::PathBuf, codex_protocol::protocol::FileChange>,
 ) -> Vec<FileUpdateChange> {
     let mut converted: Vec<FileUpdateChange> = changes
@@ -739,6 +761,7 @@ fn format_file_change_diff(change: &codex_protocol::protocol::FileChange) -> Str
     }
 }
 
+#[derive(Clone)]
 struct PendingTurn {
     id: String,
     items: Vec<ThreadItem>,
