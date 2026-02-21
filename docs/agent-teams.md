@@ -24,6 +24,8 @@ This note summarizes the current in-process Agent Teams workflow implemented by 
 
 Call: `spawn_team`
 
+There is no fixed default team size. Set `members` according to task complexity and independent workstreams.
+
 2. Wait for members:
 
 - Call `wait_team` with `mode: "all"` or `mode: "any"`.

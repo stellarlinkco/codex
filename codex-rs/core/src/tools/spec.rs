@@ -882,7 +882,7 @@ fn create_spawn_team_tool(config: &ToolsConfig) -> ToolSpec {
     ToolSpec::Function(ResponsesApiTool {
         name: "spawn_team".to_string(),
         description:
-            "Spawn a group of sub-agents for parallel task execution and register them under a team id."
+            "Spawn a group of sub-agents for parallel task execution and register them under a team id. Choose member count based on task complexity; there is no fixed default team size."
                 .to_string(),
         strict: false,
         parameters: JsonSchema::Object {
