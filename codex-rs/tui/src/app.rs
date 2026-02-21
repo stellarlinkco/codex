@@ -79,10 +79,12 @@ use ratatui::style::Stylize;
 use ratatui::text::Line;
 use ratatui::widgets::Paragraph;
 use ratatui::widgets::Wrap;
+use serde_json::Value as JsonValue;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::collections::VecDeque;
+use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -896,6 +898,188 @@ impl App {
         self.drain_active_thread_events(tui).await?;
 
         Ok(())
+    }
+
+    pub(crate) async fn cycle_agent_thread(
+        &mut self,
+        tui: &mut tui::Tui,
+        forward: bool,
+    ) -> Result<()> {
+        if self.thread_event_channels.is_empty() {
+            self.chat_widget
+                .add_info_message("No agents available yet.".to_string(), None);
+            return Ok(());
+        }
+
+        let mut thread_ids: Vec<ThreadId> = self.thread_event_channels.keys().cloned().collect();
+        thread_ids.sort_by_key(ToString::to_string);
+        if thread_ids.len() == 1 {
+            return Ok(());
+        }
+
+        let current_idx = self
+            .active_thread_id
+            .and_then(|active_id| {
+                thread_ids
+                    .iter()
+                    .position(|thread_id| *thread_id == active_id)
+            })
+            .unwrap_or(0);
+        let next_idx = if forward {
+            (current_idx + 1) % thread_ids.len()
+        } else {
+            (current_idx + thread_ids.len() - 1) % thread_ids.len()
+        };
+        let next_thread_id = thread_ids[next_idx];
+        self.select_agent_thread(tui, next_thread_id).await
+    }
+
+    async fn find_latest_team_id_for_active_thread(&self) -> Result<Option<String>> {
+        let Some(active_thread_id) = self.active_thread_id.or(self.chat_widget.thread_id()) else {
+            return Ok(None);
+        };
+
+        let teams_dir = self.config.codex_home.join("teams");
+        let mut teams = match tokio::fs::read_dir(&teams_dir).await {
+            Ok(teams) => teams,
+            Err(err) if err.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(err) => {
+                return Err(color_eyre::eyre::eyre!(
+                    "failed to read teams directory: {err}"
+                ));
+            }
+        };
+
+        let active_thread = active_thread_id.to_string();
+        let mut latest: Option<(String, i64)> = None;
+        while let Some(entry) = teams
+            .next_entry()
+            .await
+            .wrap_err("failed to iterate teams directory")?
+        {
+            let metadata = entry
+                .metadata()
+                .await
+                .wrap_err("failed to read team directory metadata")?;
+            if !metadata.is_dir() {
+                continue;
+            }
+
+            let team_id = entry.file_name().to_string_lossy().to_string();
+            let config_path = entry.path().join("config.json");
+            let raw = match tokio::fs::read_to_string(&config_path).await {
+                Ok(raw) => raw,
+                Err(_) => continue,
+            };
+            let config: JsonValue = match serde_json::from_str(&raw) {
+                Ok(config) => config,
+                Err(_) => continue,
+            };
+
+            let lead_thread_id = config.get("leadThreadId").and_then(JsonValue::as_str);
+            if lead_thread_id != Some(active_thread.as_str()) {
+                continue;
+            }
+
+            let created_at = config
+                .get("createdAt")
+                .and_then(JsonValue::as_i64)
+                .unwrap_or_default();
+            if let Some((_, latest_created_at)) = &latest
+                && created_at <= *latest_created_at
+            {
+                continue;
+            }
+            latest = Some((team_id, created_at));
+        }
+
+        Ok(latest.map(|(team_id, _)| team_id))
+    }
+
+    async fn open_team_tasks_overlay(&mut self, tui: &mut tui::Tui) {
+        let team_id = match self.find_latest_team_id_for_active_thread().await {
+            Ok(Some(team_id)) => team_id,
+            Ok(None) => {
+                self.chat_widget.add_info_message(
+                    "No team tasks found for the active thread.".to_string(),
+                    None,
+                );
+                return;
+            }
+            Err(err) => {
+                self.chat_widget
+                    .add_error_message(format!("Failed to locate team tasks: {err}"));
+                return;
+            }
+        };
+
+        let tasks_dir = self.config.codex_home.join("tasks").join(&team_id);
+        let mut tasks = match tokio::fs::read_dir(&tasks_dir).await {
+            Ok(tasks) => tasks,
+            Err(err) if err.kind() == ErrorKind::NotFound => {
+                self.chat_widget
+                    .add_info_message(format!("Team `{team_id}` has no tasks yet."), None);
+                return;
+            }
+            Err(err) => {
+                self.chat_widget
+                    .add_error_message(format!("Failed to read tasks for team `{team_id}`: {err}"));
+                return;
+            }
+        };
+
+        let mut rows = Vec::new();
+        while let Ok(Some(entry)) = tasks.next_entry().await {
+            let path = entry.path();
+            match entry.metadata().await {
+                Ok(metadata) if metadata.is_file() => {}
+                Ok(_) => continue,
+                Err(_) => continue,
+            }
+            let raw = match tokio::fs::read_to_string(&path).await {
+                Ok(raw) => raw,
+                Err(_) => continue,
+            };
+            let task: JsonValue = match serde_json::from_str(&raw) {
+                Ok(task) => task,
+                Err(_) => continue,
+            };
+
+            let state = task
+                .get("state")
+                .and_then(JsonValue::as_str)
+                .unwrap_or("unknown");
+            let title = task.get("title").and_then(JsonValue::as_str).unwrap_or("");
+            let task_id = task.get("id").and_then(JsonValue::as_str).unwrap_or("");
+            let assignee_name = task
+                .get("assignee")
+                .and_then(|assignee| assignee.get("name"))
+                .and_then(JsonValue::as_str)
+                .unwrap_or("unassigned");
+            let updated_at = task
+                .get("updatedAt")
+                .and_then(JsonValue::as_i64)
+                .unwrap_or_default();
+            rows.push((
+                updated_at,
+                format!("[{state}] {title} — {assignee_name} ({task_id})"),
+            ));
+        }
+
+        rows.sort_by(|left, right| right.0.cmp(&left.0));
+        let mut lines = vec![format!("Team: {team_id}").into(), "".into()];
+        if rows.is_empty() {
+            lines.push("No tasks found.".into());
+        } else {
+            lines.extend(rows.into_iter().map(|(_, line)| line.into()));
+        }
+
+        let _ = tui.enter_alt_screen();
+        self.overlay = Some(Overlay::new_static_with_lines(
+            lines,
+            "T E A M   T A S K S".to_string(),
+        ));
+        tui.frame_requester().schedule_frame();
     }
 
     fn reset_for_thread_switch(&mut self, tui: &mut tui::Tui) -> Result<()> {
@@ -2465,6 +2649,9 @@ impl App {
             AppEvent::OpenAgentPicker => {
                 self.open_agent_picker().await;
             }
+            AppEvent::OpenTeamTasksOverlay => {
+                self.open_team_tasks_overlay(tui).await;
+            }
             AppEvent::SelectAgentThread(thread_id) => {
                 self.select_agent_thread(tui, thread_id).await?;
             }
@@ -2895,6 +3082,14 @@ impl App {
                 let _ = tui.enter_alt_screen();
                 self.overlay = Some(Overlay::new_transcript(self.transcript_cells.clone()));
                 tui.frame_requester().schedule_frame();
+            }
+            KeyEvent {
+                code: KeyCode::Char('y'),
+                modifiers: crossterm::event::KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                ..
+            } => {
+                self.open_team_tasks_overlay(tui).await;
             }
             KeyEvent {
                 code: KeyCode::Char('g'),

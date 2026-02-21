@@ -1208,6 +1208,10 @@ pub struct HooksToml {
     pub subagent_stop: Vec<HookCommandToml>,
     #[serde(default)]
     pub pre_compact: Vec<HookCommandToml>,
+    #[serde(default)]
+    pub worktree_create: Vec<HookCommandToml>,
+    #[serde(default)]
+    pub worktree_remove: Vec<HookCommandToml>,
 }
 
 impl From<HookMatcherToml> for codex_hooks::HookMatcherConfig {
@@ -1267,6 +1271,8 @@ impl From<HooksToml> for codex_hooks::CommandHooksConfig {
             stop: value.stop.into_iter().map(Into::into).collect(),
             subagent_stop: value.subagent_stop.into_iter().map(Into::into).collect(),
             pre_compact: value.pre_compact.into_iter().map(Into::into).collect(),
+            worktree_create: value.worktree_create.into_iter().map(Into::into).collect(),
+            worktree_remove: value.worktree_remove.into_iter().map(Into::into).collect(),
         }
     }
 }
@@ -2794,6 +2800,26 @@ trust_level = "trusted"
                         prompt_regex: None,
                     }),
                 }],
+                worktree_create: vec![HookCommandToml {
+                    name: Some("worktree-created".to_string()),
+                    command: HookCommandSpecToml::Argv(vec![
+                        "echo".to_string(),
+                        "worktree-created".to_string(),
+                    ]),
+                    timeout: Some(3),
+                    once: false,
+                    matcher: None,
+                }],
+                worktree_remove: vec![HookCommandToml {
+                    name: Some("worktree-removed".to_string()),
+                    command: HookCommandSpecToml::Argv(vec![
+                        "echo".to_string(),
+                        "worktree-removed".to_string(),
+                    ]),
+                    timeout: Some(3),
+                    once: true,
+                    matcher: None,
+                }],
                 ..HooksToml::default()
             }),
             ..Default::default()
@@ -2819,6 +2845,16 @@ trust_level = "trusted"
                     prompt_regex: None,
                 }),
             }
+        );
+        assert_eq!(hooks.worktree_create.len(), 1);
+        assert_eq!(hooks.worktree_remove.len(), 1);
+        assert_eq!(
+            hooks.worktree_create[0].name.as_deref(),
+            Some("worktree-created")
+        );
+        assert_eq!(
+            hooks.worktree_remove[0].name.as_deref(),
+            Some("worktree-removed")
         );
 
         Ok(())

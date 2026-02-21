@@ -3304,7 +3304,7 @@ impl ChatWidget {
                 }
                 self.open_collaboration_modes_popup();
             }
-            SlashCommand::Agent => {
+            SlashCommand::Agents => {
                 self.app_event_tx.send(AppEvent::OpenAgentPicker);
             }
             SlashCommand::Approvals => {
@@ -3584,6 +3584,22 @@ impl ChatWidget {
                         path: prepared_args,
                     });
                 self.bottom_pane.drain_pending_submission_state();
+            }
+            SlashCommand::Agents if !trimmed.is_empty() => {
+                let normalized = trimmed.to_ascii_lowercase();
+                match normalized.as_str() {
+                    "switch" => {
+                        self.app_event_tx.send(AppEvent::OpenAgentPicker);
+                    }
+                    "tasks" => {
+                        self.app_event_tx.send(AppEvent::OpenTeamTasksOverlay);
+                    }
+                    _ => {
+                        self.add_error_message("Usage: /agents [switch|tasks]".to_string());
+                    }
+                }
+                self.bottom_pane.drain_pending_submission_state();
+                self.request_redraw();
             }
             _ => self.dispatch_command(cmd),
         }

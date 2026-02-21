@@ -145,6 +145,8 @@ pub enum Feature {
     ResponsesWebsocketsV2,
 }
 
+const CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS_ENV: &str = "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS";
+
 impl Feature {
     pub fn key(self) -> &'static str {
         self.info().key
@@ -335,6 +337,13 @@ impl Features {
         if features.enabled(Feature::JsReplToolsOnly) && !features.enabled(Feature::JsRepl) {
             tracing::warn!("js_repl_tools_only requires js_repl; disabling js_repl_tools_only");
             features.disable(Feature::JsReplToolsOnly);
+        }
+
+        if std::env::var_os(CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS_ENV)
+            .and_then(|value| value.into_string().ok())
+            .is_some_and(|value| value == "1")
+        {
+            features.enable(Feature::Collab);
         }
 
         features

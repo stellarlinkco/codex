@@ -31,7 +31,7 @@ pub(crate) fn spawn_end(ev: CollabAgentSpawnEndEvent) -> PlainHistoryCell {
         status,
     } = ev;
     let new_agent = new_thread_id
-        .map(|id| Span::from(id.to_string()))
+        .map(|id| Span::from(short_thread_id(&id)))
         .unwrap_or_else(|| Span::from("not created").dim());
     let mut details = vec![
         detail_line("call", call_id),
@@ -54,7 +54,7 @@ pub(crate) fn interaction_end(ev: CollabAgentInteractionEndEvent) -> PlainHistor
     } = ev;
     let mut details = vec![
         detail_line("call", call_id),
-        detail_line("receiver", receiver_thread_id.to_string()),
+        detail_line("receiver", short_thread_id(&receiver_thread_id)),
         status_line(&status),
     ];
     if let Some(line) = prompt_line(&prompt) {
@@ -119,7 +119,7 @@ pub(crate) fn close_end(ev: CollabCloseEndEvent) -> PlainHistoryCell {
     } = ev;
     let details = vec![
         detail_line("call", call_id),
-        detail_line("receiver", receiver_thread_id.to_string()),
+        detail_line("receiver", short_thread_id(&receiver_thread_id)),
         status_line(&status),
     ];
     collab_event("Agent closed", details)
@@ -133,7 +133,7 @@ pub(crate) fn resume_begin(ev: CollabResumeBeginEvent) -> PlainHistoryCell {
     } = ev;
     let details = vec![
         detail_line("call", call_id),
-        detail_line("receiver", receiver_thread_id.to_string()),
+        detail_line("receiver", short_thread_id(&receiver_thread_id)),
     ];
     collab_event("Resuming agent", details)
 }
@@ -147,7 +147,7 @@ pub(crate) fn resume_end(ev: CollabResumeEndEvent) -> PlainHistoryCell {
     } = ev;
     let details = vec![
         detail_line("call", call_id),
-        detail_line("receiver", receiver_thread_id.to_string()),
+        detail_line("receiver", short_thread_id(&receiver_thread_id)),
         status_line(&status),
     ];
     collab_event("Agent resumed", details)
@@ -174,12 +174,16 @@ fn status_line(status: &AgentStatus) -> Line<'static> {
 fn status_span(status: &AgentStatus) -> Span<'static> {
     match status {
         AgentStatus::PendingInit => Span::from("pending init").dim(),
-        AgentStatus::Running => Span::from("running").cyan().bold(),
+        AgentStatus::Running => Span::from("▶ running").cyan().bold(),
         AgentStatus::Completed(_) => Span::from("completed").green(),
         AgentStatus::Errored(_) => Span::from("errored").red(),
         AgentStatus::Shutdown => Span::from("shutdown").dim(),
         AgentStatus::NotFound => Span::from("not found").red(),
     }
+}
+
+fn short_thread_id(id: &ThreadId) -> String {
+    id.to_string().chars().take(8).collect()
 }
 
 fn prompt_line(prompt: &str) -> Option<Line<'static>> {
@@ -195,9 +199,10 @@ fn prompt_line(prompt: &str) -> Option<Line<'static>> {
 }
 
 fn receiver_label(id: &ThreadId, receiver_names: &HashMap<ThreadId, String>) -> String {
+    let short_id = short_thread_id(id);
     match receiver_names.get(id) {
-        Some(name) if !name.trim().is_empty() => format!("{name} ({id})"),
-        _ => id.to_string(),
+        Some(name) if !name.trim().is_empty() => format!("{name} ({short_id})"),
+        _ => short_id,
     }
 }
 
@@ -381,7 +386,7 @@ mod tests {
             @r"
         • Closing team
           └ call: team/close:call-1
-            receivers: explorer_agent (00000000-0000-0000-0000-000000000002)
+            receivers: explorer_agent (00000000)
         "
         );
     }
@@ -406,7 +411,33 @@ mod tests {
         • Team close complete
           └ call: team/close:call-2
             agents: 1 total · 1 shutdown
-            explorer_agent (00000000-0000-0000-0000-000000000002) shutdown
+            explorer_agent (00000000) shutdown
+        "
+        );
+    }
+
+    #[test]
+    fn waiting_end_team_wait_renders_running_status_with_typed_receiver_name() {
+        let sender_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000001").expect("valid id");
+        let receiver_thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000002").expect("valid id");
+        let statuses = HashMap::from([(receiver_thread_id, AgentStatus::Running)]);
+        let receiver_names =
+            HashMap::from([(receiver_thread_id, "reviewer [code-review]".to_string())]);
+        let rendered = render_cell(waiting_end(CollabWaitingEndEvent {
+            sender_thread_id,
+            call_id: format!("{TEAM_WAIT_CALL_PREFIX}call-3"),
+            statuses,
+            receiver_names,
+        }));
+        assert_snapshot!(
+            rendered,
+            @r"
+        • Team wait complete
+          └ call: team/wait:call-3
+            agents: 1 total · 1 running
+            reviewer [code-review] (00000000) ▶ running
         "
         );
     }

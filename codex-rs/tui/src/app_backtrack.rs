@@ -44,6 +44,7 @@ use color_eyre::eyre::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::KeyModifiers;
 
 /// Aggregates all backtrack-related state used by the App.
 #[derive(Default)]
@@ -110,6 +111,29 @@ impl App {
         tui: &mut tui::Tui,
         event: TuiEvent,
     ) -> Result<bool> {
+        if matches!(self.overlay, Some(Overlay::Static(_))) {
+            self.overlay_forward_event(tui, event)?;
+            return Ok(true);
+        }
+
+        if let TuiEvent::Key(key_event) = &event
+            && matches!(self.overlay, Some(Overlay::Transcript(_)))
+            && matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            && key_event.modifiers == KeyModifiers::SHIFT
+        {
+            match key_event.code {
+                KeyCode::Down => {
+                    self.cycle_agent_thread(tui, true).await?;
+                    return Ok(true);
+                }
+                KeyCode::Up => {
+                    self.cycle_agent_thread(tui, false).await?;
+                    return Ok(true);
+                }
+                _ => {}
+            }
+        }
+
         if self.backtrack.overlay_preview_active {
             match event {
                 TuiEvent::Key(KeyEvent {

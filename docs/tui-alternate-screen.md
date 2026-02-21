@@ -114,6 +114,13 @@ We use `auto` detection instead of always disabling in Zellij because:
 
 Codex's transcript pager (opened with Ctrl+T) provides an alternative way to review conversation history, even in fullscreen mode. However, this is not as seamless as natural scrollback.
 
+Current overlay shortcuts:
+
+- `Ctrl+T`: open/close transcript pager
+- `Shift+Up` / `Shift+Down` (inside transcript pager): cycle focused agent thread
+- `Ctrl+Y`: open Team Tasks overlay for the active thread (if persisted team tasks exist)
+- `/agents tasks`: open Team Tasks overlay from the command palette
+
 ## For Developers
 
 When modifying TUI code, remember:

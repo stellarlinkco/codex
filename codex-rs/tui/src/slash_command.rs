@@ -30,7 +30,8 @@ pub enum SlashCommand {
     Compact,
     Plan,
     Collab,
-    Agent,
+    #[strum(serialize = "agents", serialize = "agent")]
+    Agents,
     // Undo,
     Diff,
     Mention,
@@ -83,7 +84,7 @@ impl SlashCommand {
             SlashCommand::Personality => "choose a communication style for Codex",
             SlashCommand::Plan => "switch to Plan mode",
             SlashCommand::Collab => "change collaboration mode (experimental)",
-            SlashCommand::Agent => "switch the active agent thread",
+            SlashCommand::Agents => "manage agent threads (/agents switch|tasks)",
             SlashCommand::Approvals => "choose what Codex is allowed to do",
             SlashCommand::Permissions => "choose what Codex is allowed to do",
             SlashCommand::ElevateSandbox => "set up elevated agent sandbox",
@@ -113,6 +114,7 @@ impl SlashCommand {
                 | SlashCommand::Rename
                 | SlashCommand::Plan
                 | SlashCommand::SandboxReadRoot
+                | SlashCommand::Agents
         )
     }
 
@@ -153,7 +155,7 @@ impl SlashCommand {
             SlashCommand::Rollout => true,
             SlashCommand::TestApproval => true,
             SlashCommand::Collab => true,
-            SlashCommand::Agent => true,
+            SlashCommand::Agents => true,
             SlashCommand::Statusline => false,
         }
     }
@@ -173,4 +175,39 @@ pub fn built_in_slash_commands() -> Vec<(&'static str, SlashCommand)> {
         .filter(|command| command.is_visible())
         .map(|c| (c.command(), c))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::str::FromStr;
+
+    use super::*;
+
+    #[test]
+    fn agents_aliases_parse_to_same_command() {
+        assert_eq!(
+            SlashCommand::from_str("agents").expect("agents should parse"),
+            SlashCommand::Agents
+        );
+        assert_eq!(
+            SlashCommand::from_str("agent").expect("agent should parse as alias"),
+            SlashCommand::Agents
+        );
+    }
+
+    #[test]
+    fn agents_entry_exposed_in_built_in_commands() {
+        let commands = built_in_slash_commands();
+        assert!(
+            commands
+                .iter()
+                .any(|(name, command)| *name == "agents" && *command == SlashCommand::Agents)
+        );
+    }
+
+    #[test]
+    fn agents_command_supports_inline_args_and_task_time_usage() {
+        assert_eq!(SlashCommand::Agents.supports_inline_args(), true);
+        assert_eq!(SlashCommand::Agents.available_during_task(), true);
+    }
 }

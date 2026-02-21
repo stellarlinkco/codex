@@ -70,6 +70,7 @@ Supported hook event keys:
 - `post_tool_use`, `post_tool_use_failure`
 - `stop`, `subagent_stop`
 - `pre_compact`
+- `worktree_create`, `worktree_remove`
 
 ## Execution model
 
@@ -128,6 +129,8 @@ Event payload fields:
 - `Stop`: `stop_hook_active`, `last_assistant_message`
 - `SubagentStop`: `stop_hook_active`, `agent_id`, `agent_type`, `agent_transcript_path`, `last_assistant_message`
 - `PreCompact`: `trigger`, `custom_instructions`
+- `WorktreeCreate`: `repo_path`, `worktree_path`
+- `WorktreeRemove`: `repo_path`, `worktree_path`
 
 ## Hook output (stdout JSON)
 
@@ -175,6 +178,8 @@ If multiple keys are present:
 | `stop` | yes | no | no | yes |
 | `subagent_stop` | yes | no | no | yes |
 | `pre_compact` | yes | no | no | yes |
+| `worktree_create` | no | no | no | yes |
+| `worktree_remove` | no | no | no | yes |
 
 ## Minimal examples
 

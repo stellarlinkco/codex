@@ -4108,6 +4108,48 @@ async fn slash_fork_requests_current_fork() {
 }
 
 #[tokio::test]
+async fn slash_agents_opens_agent_picker() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command(SlashCommand::Agents);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenAgentPicker));
+}
+
+#[tokio::test]
+async fn slash_agents_tasks_opens_team_tasks_overlay() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Agents, "tasks".to_string(), Vec::new());
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenTeamTasksOverlay));
+}
+
+#[tokio::test]
+async fn slash_agents_switch_opens_agent_picker() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Agents, "switch".to_string(), Vec::new());
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::OpenAgentPicker));
+}
+
+#[tokio::test]
+async fn slash_agents_invalid_arg_shows_usage() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command_with_args(SlashCommand::Agents, "invalid".to_string(), Vec::new());
+
+    let cells = drain_insert_history(&mut rx);
+    assert_eq!(cells.len(), 1, "expected usage error");
+    let rendered = lines_to_single_string(&cells[0]);
+    assert!(
+        rendered.contains("Usage: /agents [switch|tasks]"),
+        "expected /agents usage guidance, got {rendered:?}"
+    );
+}
+
+#[tokio::test]
 async fn slash_rollout_displays_current_path() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
     let rollout_path = PathBuf::from("/tmp/codex-test-rollout.jsonl");

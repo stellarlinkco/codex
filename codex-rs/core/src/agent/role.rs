@@ -196,6 +196,66 @@ Rules:
 - Always tell workers they are **not alone in the codebase**, and they should ignore edits made by others without touching them."#.to_string()),
                         config_file: None,
                     }
+                ),
+                (
+                    "architect".to_string(),
+                    AgentRoleConfig {
+                        description: Some(
+                            "Design minimal, low-risk architecture decisions for cross-module or high-impact changes."
+                                .to_string(),
+                        ),
+                        config_file: None,
+                    }
+                ),
+                (
+                    "code-review".to_string(),
+                    AgentRoleConfig {
+                        description: Some(
+                            "Review implementation quality, risks, and merge readiness; request or apply focused fixes."
+                                .to_string(),
+                        ),
+                        config_file: None,
+                    }
+                ),
+                (
+                    "develop".to_string(),
+                    AgentRoleConfig {
+                        description: Some(
+                            "Implement code and tests in-repo with minimal diffs, then run verification."
+                                .to_string(),
+                        ),
+                        config_file: None,
+                    }
+                ),
+                (
+                    "product".to_string(),
+                    AgentRoleConfig {
+                        description: Some(
+                            "Converge ambiguous requirements into an actionable PRD with clear acceptance criteria and risks."
+                                .to_string(),
+                        ),
+                        config_file: None,
+                    }
+                ),
+                (
+                    "scrum".to_string(),
+                    AgentRoleConfig {
+                        description: Some(
+                            "Decompose PRD into executable issues and dependency-aware execution groups."
+                                .to_string(),
+                        ),
+                        config_file: None,
+                    }
+                ),
+                (
+                    "web-test".to_string(),
+                    AgentRoleConfig {
+                        description: Some(
+                            "Run end-to-end web tests and produce a test report after all PRs are merged."
+                                .to_string(),
+                        ),
+                        config_file: None,
+                    }
                 )
             ])
         });

@@ -48,6 +48,8 @@ pub(crate) enum AppEvent {
     CodexEvent(Event),
     /// Open the agent picker for switching active threads.
     OpenAgentPicker,
+    /// Open the Team Tasks overlay for the active thread.
+    OpenTeamTasksOverlay,
     /// Switch the active thread to the selected agent.
     SelectAgentThread(ThreadId),
 

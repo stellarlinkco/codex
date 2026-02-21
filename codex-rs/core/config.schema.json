@@ -625,6 +625,20 @@
             "$ref": "#/definitions/HookCommandToml"
           },
           "type": "array"
+        },
+        "worktree_create": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/HookCommandToml"
+          },
+          "type": "array"
+        },
+        "worktree_remove": {
+          "default": [],
+          "items": {
+            "$ref": "#/definitions/HookCommandToml"
+          },
+          "type": "array"
         }
       },
       "type": "object"

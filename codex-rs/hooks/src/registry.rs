@@ -48,6 +48,8 @@ pub struct CommandHooksConfig {
     pub stop: Vec<CommandHookConfig>,
     pub subagent_stop: Vec<CommandHookConfig>,
     pub pre_compact: Vec<CommandHookConfig>,
+    pub worktree_create: Vec<CommandHookConfig>,
+    pub worktree_remove: Vec<CommandHookConfig>,
 }
 
 #[derive(Default, Clone)]
@@ -78,6 +80,8 @@ pub struct Hooks {
     stop: Vec<Hook>,
     subagent_stop: Vec<Hook>,
     pre_compact: Vec<Hook>,
+    worktree_create: Vec<Hook>,
+    worktree_remove: Vec<Hook>,
     ran_once: Arc<Mutex<HashSet<String>>>,
 }
 
@@ -161,6 +165,8 @@ enum HookEventKey {
     Stop,
     SubagentStop,
     PreCompact,
+    WorktreeCreate,
+    WorktreeRemove,
 }
 
 impl HookEventKey {
@@ -176,6 +182,8 @@ impl HookEventKey {
             HookEventKey::Stop => "stop",
             HookEventKey::SubagentStop => "subagent_stop",
             HookEventKey::PreCompact => "pre_compact",
+            HookEventKey::WorktreeCreate => "worktree_create",
+            HookEventKey::WorktreeRemove => "worktree_remove",
         }
     }
 
@@ -242,6 +250,14 @@ impl Hooks {
             stop: build_hooks(command_hooks.stop, HookEventKey::Stop),
             subagent_stop: build_hooks(command_hooks.subagent_stop, HookEventKey::SubagentStop),
             pre_compact: build_hooks(command_hooks.pre_compact, HookEventKey::PreCompact),
+            worktree_create: build_hooks(
+                command_hooks.worktree_create,
+                HookEventKey::WorktreeCreate,
+            ),
+            worktree_remove: build_hooks(
+                command_hooks.worktree_remove,
+                HookEventKey::WorktreeRemove,
+            ),
             ran_once: Arc::new(Mutex::new(HashSet::new())),
         }
     }
@@ -265,6 +281,12 @@ impl Hooks {
             HookEvent::Stop { .. } => (HookEventKey::Stop, &self.stop),
             HookEvent::SubagentStop { .. } => (HookEventKey::SubagentStop, &self.subagent_stop),
             HookEvent::PreCompact { .. } => (HookEventKey::PreCompact, &self.pre_compact),
+            HookEvent::WorktreeCreate { .. } => {
+                (HookEventKey::WorktreeCreate, &self.worktree_create)
+            }
+            HookEvent::WorktreeRemove { .. } => {
+                (HookEventKey::WorktreeRemove, &self.worktree_remove)
+            }
         }
     }
 
@@ -900,6 +922,68 @@ mod tests {
                     tool_input: json!({"command":["echo","hi"]}),
                     tool_response: json!({"ok": true}),
                     tool_use_id: "call-1".to_string(),
+                },
+            ))
+            .await;
+
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(
+            outcomes[0].result.control,
+            HookResultControl::Continue
+        ));
+        assert!(outcomes[0].result.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn exit_2_does_not_block_for_worktree_create() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                worktree_create: vec![CommandHookConfig {
+                    command: exit_command(2),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+
+        let outcomes = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::WorktreeCreate {
+                    repo_path: PathBuf::from("/repo"),
+                    worktree_path: PathBuf::from("/repo/wt"),
+                },
+            ))
+            .await;
+
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(
+            outcomes[0].result.control,
+            HookResultControl::Continue
+        ));
+        assert!(outcomes[0].result.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn exit_2_does_not_block_for_worktree_remove() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                worktree_remove: vec![CommandHookConfig {
+                    command: exit_command(2),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+
+        let outcomes = hooks
+            .dispatch(payload(
+                &dir.path().to_path_buf(),
+                HookEvent::WorktreeRemove {
+                    repo_path: PathBuf::from("/repo"),
+                    worktree_path: PathBuf::from("/repo/wt"),
                 },
             ))
             .await;

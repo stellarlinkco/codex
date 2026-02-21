@@ -1249,6 +1249,52 @@ pub async fn mount_sse_sequence(server: &MockServer, bodies: Vec<String>) -> Res
     response_mock
 }
 
+/// Like [`mount_sse_sequence`], but only serves responses to requests matching `matcher`.
+pub async fn mount_sse_sequence_match<M>(
+    server: &MockServer,
+    matcher: M,
+    bodies: Vec<String>,
+) -> ResponseMock
+where
+    M: wiremock::Match + Send + Sync + 'static,
+{
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
+
+    struct SeqResponder {
+        num_calls: AtomicUsize,
+        responses: Vec<String>,
+    }
+
+    impl Respond for SeqResponder {
+        fn respond(&self, _: &wiremock::Request) -> ResponseTemplate {
+            let call_num = self.num_calls.fetch_add(1, Ordering::SeqCst);
+            match self.responses.get(call_num) {
+                Some(body) => ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(body.clone()),
+                None => panic!("no response for {call_num}"),
+            }
+        }
+    }
+
+    let num_calls = bodies.len();
+    let responder = SeqResponder {
+        num_calls: AtomicUsize::new(0),
+        responses: bodies,
+    };
+
+    let (mock, response_mock) = base_mock();
+    mock.and(matcher)
+        .respond_with(responder)
+        .up_to_n_times(num_calls as u64)
+        .expect(num_calls as u64)
+        .mount(server)
+        .await;
+
+    response_mock
+}
+
 /// Mounts a sequence of responses for each POST to `/v1/responses`.
 /// Panics if more requests are received than responses provided.
 pub async fn mount_response_sequence(

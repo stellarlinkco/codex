@@ -68,6 +68,14 @@ pub enum HookEvent {
         trigger: String,
         custom_instructions: Option<String>,
     },
+    WorktreeCreate {
+        repo_path: PathBuf,
+        worktree_path: PathBuf,
+    },
+    WorktreeRemove {
+        repo_path: PathBuf,
+        worktree_path: PathBuf,
+    },
 }
 
 impl HookEvent {
@@ -233,6 +241,22 @@ mod tests {
         assert_eq!(
             HookEvent::SessionEnd {
                 reason: "done".to_string()
+            }
+            .user_prompt_for_matcher(),
+            None
+        );
+        assert_eq!(
+            HookEvent::WorktreeCreate {
+                repo_path: PathBuf::from("/repo"),
+                worktree_path: PathBuf::from("/repo-wt"),
+            }
+            .tool_name_for_matcher(),
+            None
+        );
+        assert_eq!(
+            HookEvent::WorktreeRemove {
+                repo_path: PathBuf::from("/repo"),
+                worktree_path: PathBuf::from("/repo-wt"),
             }
             .user_prompt_for_matcher(),
             None

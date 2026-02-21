@@ -97,6 +97,8 @@ const KEY_CTRL_F: KeyBinding = key_hint::ctrl(KeyCode::Char('f'));
 const KEY_CTRL_D: KeyBinding = key_hint::ctrl(KeyCode::Char('d'));
 const KEY_CTRL_B: KeyBinding = key_hint::ctrl(KeyCode::Char('b'));
 const KEY_CTRL_U: KeyBinding = key_hint::ctrl(KeyCode::Char('u'));
+const KEY_SHIFT_UP: KeyBinding = key_hint::shift(KeyCode::Up);
+const KEY_SHIFT_DOWN: KeyBinding = key_hint::shift(KeyCode::Down);
 const KEY_Q: KeyBinding = key_hint::plain(KeyCode::Char('q'));
 const KEY_ESC: KeyBinding = key_hint::plain(KeyCode::Esc);
 const KEY_ENTER: KeyBinding = key_hint::plain(KeyCode::Enter);
@@ -666,6 +668,7 @@ impl TranscriptOverlay {
         } else {
             pairs.push((&[KEY_ESC], "to edit prev"));
         }
+        pairs.push((&[KEY_SHIFT_UP, KEY_SHIFT_DOWN], "to switch agent"));
         render_key_hints(line2, buf, &pairs);
     }
 
@@ -729,7 +732,7 @@ impl StaticOverlay {
         let line1 = Rect::new(area.x, area.y, area.width, 1);
         let line2 = Rect::new(area.x, area.y.saturating_add(1), area.width, 1);
         render_key_hints(line1, buf, PAGER_KEY_HINTS);
-        let pairs: Vec<(&[KeyBinding], &str)> = vec![(&[KEY_Q], "to quit")];
+        let pairs: Vec<(&[KeyBinding], &str)> = vec![(&[KEY_Q, KEY_ESC], "to quit")];
         render_key_hints(line2, buf, &pairs);
     }
 
@@ -746,7 +749,7 @@ impl StaticOverlay {
     pub(crate) fn handle_event(&mut self, tui: &mut tui::Tui, event: TuiEvent) -> Result<()> {
         match event {
             TuiEvent::Key(key_event) => match key_event {
-                e if KEY_Q.is_press(e) || KEY_CTRL_C.is_press(e) => {
+                e if KEY_Q.is_press(e) || KEY_CTRL_C.is_press(e) || KEY_ESC.is_press(e) => {
                     self.is_done = true;
                     Ok(())
                 }
@@ -873,6 +876,38 @@ mod tests {
         assert!(
             s.contains("edit next"),
             "expected 'edit next' hint in overlay footer, got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn switch_agent_hint_is_visible() {
+        let mut overlay = TranscriptOverlay::new(vec![Arc::new(TestCell {
+            lines: vec![Line::from("hello")],
+        })]);
+
+        let area = Rect::new(0, 0, 120, 10);
+        let mut buf = Buffer::empty(area);
+        overlay.render(area, &mut buf);
+
+        let s = buffer_to_text(&buf, area);
+        assert!(
+            s.contains("switch agent"),
+            "expected 'switch agent' hint in overlay footer, got: {s:?}"
+        );
+    }
+
+    #[test]
+    fn static_overlay_quit_hint_mentions_esc() {
+        let mut overlay = StaticOverlay::with_title(vec!["line".into()], "S T A T I C".to_string());
+
+        let area = Rect::new(0, 0, 120, 10);
+        let mut buf = Buffer::empty(area);
+        overlay.render(area, &mut buf);
+
+        let s = buffer_to_text(&buf, area);
+        assert!(
+            s.contains("q/esc"),
+            "expected static overlay footer to include q/esc, got: {s:?}"
         );
     }
 
