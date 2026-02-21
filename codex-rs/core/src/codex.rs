@@ -1800,6 +1800,17 @@ impl Session {
             return;
         }
 
+        let same_cwd = match (
+            crate::path_utils::normalize_for_path_comparison(previous_cwd),
+            crate::path_utils::normalize_for_path_comparison(next_cwd),
+        ) {
+            (Ok(previous), Ok(next)) => previous == next,
+            _ => false,
+        };
+        if same_cwd {
+            return;
+        }
+
         if !self.features.enabled(Feature::ShellSnapshot) {
             return;
         }

@@ -44,6 +44,7 @@ const SNAPSHOT_MARKER_VAR: &str = "CODEX_SNAPSHOT_POLICY_MARKER";
 const SNAPSHOT_MARKER_VALUE: &str = "from_snapshot";
 const POLICY_SUCCESS_OUTPUT: &str = "policy-after-snapshot";
 const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
+const SNAPSHOT_DELETE_TIMEOUT: Duration = Duration::from_secs(5);
 const POLICY_ASSERT_TIMEOUT: Duration = Duration::from_secs(5);
 const POLICY_ASSERT_RETRY_DELAY: Duration = Duration::from_millis(100);
 
@@ -100,6 +101,19 @@ async fn wait_for_file_contents(path: &Path) -> Result<String> {
             anyhow::bail!("timed out waiting for file {}", path.display());
         }
 
+        sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn wait_for_path_removed(path: &Path) -> Result<()> {
+    let deadline = Instant::now() + SNAPSHOT_DELETE_TIMEOUT;
+    loop {
+        if !path.exists() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for path removal {}", path.display());
+        }
         sleep(Duration::from_millis(25)).await;
     }
 }
@@ -163,7 +177,7 @@ async fn run_snapshot_command_with_options(
     let codex = test.codex.clone();
     let codex_home = test.home.path().to_path_buf();
     let session_model = test.session_configured.model.clone();
-    let cwd = test.cwd_path().to_path_buf();
+    let cwd = canonical_turn_cwd(test.cwd_path());
 
     codex
         .submit(Op::UserTurn {
@@ -249,7 +263,7 @@ async fn run_shell_command_snapshot_with_options(
     let codex = test.codex.clone();
     let codex_home = test.home.path().to_path_buf();
     let session_model = test.session_configured.model.clone();
-    let cwd = test.cwd_path().to_path_buf();
+    let cwd = canonical_turn_cwd(test.cwd_path());
 
     codex
         .submit(Op::UserTurn {
@@ -319,7 +333,7 @@ async fn run_tool_turn_on_harness(
     let test = harness.test();
     let codex = test.codex.clone();
     let session_model = test.session_configured.model.clone();
-    let cwd = test.cwd_path().to_path_buf();
+    let cwd = canonical_turn_cwd(test.cwd_path());
     codex
         .submit(Op::UserTurn {
             items: vec![UserInput::Text {
@@ -383,6 +397,10 @@ async fn run_policy_assert_turn(
 
 fn normalize_newlines(text: &str) -> String {
     text.replace("\r\n", "\n")
+}
+
+fn canonical_turn_cwd(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn assert_posix_snapshot_sections(snapshot: &str) {
@@ -542,7 +560,7 @@ async fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
 
     let test = harness.test();
     let codex = test.codex.clone();
-    let cwd = test.cwd_path().to_path_buf();
+    let cwd = canonical_turn_cwd(test.cwd_path());
     let codex_home = test.home.path().to_path_buf();
     let target = cwd.join("snapshot-apply.txt");
 
@@ -618,13 +636,7 @@ async fn shell_snapshot_deleted_after_shutdown_with_skills() -> Result<()> {
 
     drop(codex);
     drop(harness);
-    sleep(Duration::from_millis(150)).await;
-
-    assert_eq!(
-        snapshot_path.exists(),
-        false,
-        "snapshot should be removed after shutdown"
-    );
+    wait_for_path_removed(&snapshot_path).await?;
 
     Ok(())
 }
