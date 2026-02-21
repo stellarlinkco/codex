@@ -59,6 +59,10 @@ jobs:
         working-directory: codex-rs
     steps:
       - uses: actions/checkout@v6
+      - name: Verify release build entrypoints
+        working-directory: .
+        shell: bash
+        run: bash .github/scripts/check-release-build-config.sh
       - uses: dtolnay/rust-toolchain@1.93.0
         with:
           components: rustfmt

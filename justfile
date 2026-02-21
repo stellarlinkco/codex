@@ -68,6 +68,16 @@ bazel-remote-test:
 build-for-release:
     bazel build //codex-rs/cli:release_binaries --config=remote
 
+[no-cd]
+release-codex out="/Users/chenwenjie/bin/codex":
+    env -u CARGO_PROFILE_RELEASE_LTO \
+        -u CARGO_PROFILE_RELEASE_CODEGEN_UNITS \
+        -u CARGO_PROFILE_RELEASE_DEBUG \
+        -u CARGO_PROFILE_RELEASE_STRIP \
+        sh -c 'cd codex-rs && cargo build -p codex-cli --bin codex --release'
+    mkdir -p "$(dirname "{{out}}")"
+    install -m 755 codex-rs/target/release/codex "{{out}}"
+
 # Run the MCP server
 mcp-server-run *args:
     cargo run -p codex-mcp-server -- "$@"
