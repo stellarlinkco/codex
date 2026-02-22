@@ -17,6 +17,7 @@ concurrency:
 
 jobs:
   tag-check:
+    if: ${{ github.repository == 'openai/codex' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
