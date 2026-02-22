@@ -4,7 +4,7 @@ on:
   workflow_call:
     inputs:
       release-version:
-        description: Version to publish (x.y.z or x.y.z-alpha.N). Defaults to GITHUB_REF_NAME when it starts with rust-v.
+        description: Version to publish (x.y.z or x.y.z-alpha.N). Defaults to GITHUB_REF_NAME when it starts with v or rust-v.
         required: false
         type: string
       release-tag:
@@ -40,17 +40,26 @@ jobs:
           if [[ -z "$version" ]]; then
             if [[ -n "$release_tag" && "$release_tag" =~ ^rust-v.+ ]]; then
               version="${release_tag#rust-v}"
+            elif [[ -n "$release_tag" && "$release_tag" =~ ^v.+ ]]; then
+              version="${release_tag#v}"
             elif [[ "${GITHUB_REF_NAME:-}" =~ ^rust-v.+ ]]; then
               version="${GITHUB_REF_NAME#rust-v}"
               release_tag="${GITHUB_REF_NAME}"
+            elif [[ "${GITHUB_REF_NAME:-}" =~ ^v.+ ]]; then
+              version="${GITHUB_REF_NAME#v}"
+              release_tag="${GITHUB_REF_NAME}"
             else
-              echo "release-version is required when GITHUB_REF_NAME is not a rust-v tag."
+              echo "release-version is required when GITHUB_REF_NAME is not a v or rust-v tag."
               exit 1
             fi
           fi
 
           if [[ -z "$release_tag" ]]; then
-            release_tag="rust-v${version}"
+            if [[ "${GITHUB_REF_NAME:-}" =~ ^(rust-)?v.+ ]]; then
+              release_tag="${GITHUB_REF_NAME}"
+            else
+              release_tag="rust-v${version}"
+            fi
           fi
 
           npm_tag=""
