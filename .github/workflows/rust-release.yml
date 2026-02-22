@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   tag-check:
-    if: ${{ github.repository == 'openai/codex' }}
+    if: ${{ github.repository == 'stellarlinkco/codex' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
