@@ -289,7 +289,7 @@ fn merge_wait_receivers(
             .agent_nickname
             .as_deref()
             .map(str::trim)
-            .is_none_or(|nickname| nickname.is_empty())
+            .is_none_or(str::is_empty)
             && let Some(receiver_name) = receiver_names.get(&receiver.thread_id)
         {
             receiver.agent_nickname = Some(receiver_name.clone());
@@ -340,7 +340,7 @@ fn wait_complete_lines(
                 .agent_nickname
                 .as_deref()
                 .map(str::trim)
-                .is_none_or(|nickname| nickname.is_empty())
+                .is_none_or(str::is_empty)
                 && let Some(receiver_name) = receiver_names.get(&entry.thread_id)
             {
                 entry.agent_nickname = Some(receiver_name.clone());
