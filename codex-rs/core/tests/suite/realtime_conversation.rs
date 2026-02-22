@@ -120,22 +120,31 @@ async fn conversation_start_audio_text_close_round_trip() -> Result<()> {
             .as_deref()
             .expect("started session id should be present")
     );
-    let request_types = [
-        connection[1].body_json()["type"]
-            .as_str()
-            .expect("request type")
-            .to_string(),
-        connection[2].body_json()["type"]
-            .as_str()
-            .expect("request type")
-            .to_string(),
+    let request1 = connection[1].body_json();
+    let request2 = connection[2].body_json();
+    let mut request_types = [
+        request1["type"].as_str().expect("request type").to_string(),
+        request2["type"].as_str().expect("request type").to_string(),
     ];
+    request_types.sort();
     assert_eq!(
         request_types,
         [
             "conversation.item.create".to_string(),
             "response.input_audio.delta".to_string(),
         ]
+    );
+
+    let item_create = if request1["type"].as_str() == Some("conversation.item.create") {
+        request1
+    } else if request2["type"].as_str() == Some("conversation.item.create") {
+        request2
+    } else {
+        panic!("missing conversation.item.create request");
+    };
+    assert_eq!(
+        item_create["item"]["content"][0]["text"].as_str(),
+        Some("hello")
     );
 
     test.codex.submit(Op::RealtimeConversationClose).await?;
