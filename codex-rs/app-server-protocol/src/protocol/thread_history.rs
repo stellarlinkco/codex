@@ -582,10 +582,11 @@ impl ThreadHistoryBuilder {
 
     fn handle_turn_started(&mut self, payload: &TurnStartedEvent) {
         self.finish_current_turn();
-        self.current_turn = Some(
-            self.new_turn(Some(payload.turn_id.clone()))
-                .opened_explicitly(),
-        );
+        let mut turn = self
+            .new_turn(Some(payload.turn_id.clone()))
+            .opened_explicitly();
+        turn.status = TurnStatus::InProgress;
+        self.current_turn = Some(turn);
     }
 
     fn handle_turn_complete(&mut self, payload: &TurnCompleteEvent) {
@@ -1585,7 +1586,7 @@ mod tests {
         assert_eq!(turns.len(), 2);
         assert_eq!(turns[0].id, "turn-a");
         assert_eq!(turns[1].id, "turn-b");
-        assert_eq!(turns[1].status, TurnStatus::Completed);
+        assert_eq!(turns[1].status, TurnStatus::InProgress);
         assert_eq!(turns[1].items.len(), 2);
     }
 
