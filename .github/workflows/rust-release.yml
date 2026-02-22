@@ -1,6 +1,10 @@
 # Release workflow for codex-rs.
 # To release, follow a workflow like:
 # ```
+# git tag -a v0.1.0 -m "Release 0.1.0"
+# git push origin v0.1.0
+#
+# Back-compat:
 # git tag -a rust-v0.1.0 -m "Release 0.1.0"
 # git push origin rust-v0.1.0
 # ```
@@ -10,6 +14,7 @@ on:
   push:
     tags:
       - "rust-v*.*.*"
+      - "v*.*.*"
 
 concurrency:
   group: ${{ github.workflow }}
@@ -31,11 +36,12 @@ jobs:
           # 1. Must be a tag and match the regex
           [[ "${GITHUB_REF_TYPE}" == "tag" ]] \
             || { echo "❌  Not a tag push"; exit 1; }
-          [[ "${GITHUB_REF_NAME}" =~ ^rust-v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta)(\.[0-9]+)?)?$ ]] \
-            || { echo "❌  Tag '${GITHUB_REF_NAME}' doesn't match expected format"; exit 1; }
+          [[ "${GITHUB_REF_NAME}" =~ ^(rust-)?v[0-9]+\.[0-9]+\.[0-9]+(-(alpha|beta)(\.[0-9]+)?)?$ ]] \
+            || { echo "❌  Tag '${GITHUB_REF_NAME}' doesn't match expected format (vX.Y.Z or rust-vX.Y.Z)"; exit 1; }
 
           # 2. Extract versions
           tag_ver="${GITHUB_REF_NAME#rust-v}"
+          tag_ver="${tag_ver#v}"
           cargo_ver="$(grep -m1 '^version' codex-rs/Cargo.toml \
                         | sed -E 's/version *= *"([^"]+)".*/\1/')"
 
@@ -492,8 +498,10 @@ jobs:
     steps:
       - name: Checkout repository
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
-      - name: Generate release notes from tag commit message
+      - name: Generate release notes from git log
         id: release_notes
         shell: bash
         run: |
@@ -502,14 +510,35 @@ jobs:
           # On tag pushes, GITHUB_SHA may be a tag object for annotated tags;
           # peel it to the underlying commit.
           commit="$(git rev-parse "${GITHUB_SHA}^{commit}")"
+          tag="${GITHUB_REF_NAME}"
           notes_path="${RUNNER_TEMP}/release-notes.md"
 
-          # Use the commit message for the commit the tag points at (not the
-          # annotated tag message).
-          git log -1 --format=%B "${commit}" > "${notes_path}"
-          # Ensure trailing newline so GitHub's markdown renderer doesn't
-          # occasionally run the last line into subsequent content.
-          echo >> "${notes_path}"
+          match=""
+          if [[ "${tag}" == rust-v* ]]; then
+            match="rust-v[0-9]*"
+          elif [[ "${tag}" == v* ]]; then
+            match="v[0-9]*"
+          else
+            echo "❌  Unexpected tag '${tag}'"
+            exit 1
+          fi
+
+          prev_tag="$(git describe --tags --match "${match}" --abbrev=0 "${commit}^" 2>/dev/null || true)"
+
+          {
+            echo "## Changes"
+            echo
+            if [[ -n "${prev_tag}" ]]; then
+              echo "From \`${prev_tag}\` to \`${tag}\`"
+              echo
+              git log --no-merges --pretty=format:'- %s (%h)' "${prev_tag}..${commit}"
+            else
+              echo "Since initial release"
+              echo
+              git log --no-merges --pretty=format:'- %s (%h)' "${commit}"
+            fi
+            echo
+          } > "${notes_path}"
 
           echo "path=${notes_path}" >> "${GITHUB_OUTPUT}"
 
@@ -542,8 +571,9 @@ jobs:
         id: release_name
         run: |
           # Extract the version from the tag name, which is in the format
-          # "rust-v0.1.0".
+          # "v0.1.0" or "rust-v0.1.0".
           version="${GITHUB_REF_NAME#rust-v}"
+          version="${version#v}"
           echo "name=${version}" >> $GITHUB_OUTPUT
 
       - name: Determine npm publish settings
