@@ -245,19 +245,16 @@ fn build_initial_team_tasks(
     requested_members
         .iter()
         .zip(spawned_members)
-        .map(|(requested, spawned)| {
-            let id = ThreadId::new().to_string();
-            PersistedTeamTask {
-                id: id.clone(),
-                title: requested.task.trim().to_string(),
-                state: PersistedTaskState::Pending,
-                depends_on: Vec::new(),
-                assignee: PersistedTeamTaskAssignee {
-                    name: spawned.name.clone(),
-                    agent_id: spawned.agent_id.to_string(),
-                },
-                updated_at,
-            }
+        .map(|(requested, spawned)| PersistedTeamTask {
+            id: ThreadId::new().to_string(),
+            title: requested.task.trim().to_string(),
+            state: PersistedTaskState::Pending,
+            depends_on: Vec::new(),
+            assignee: PersistedTeamTaskAssignee {
+                name: spawned.name.clone(),
+                agent_id: spawned.agent_id.to_string(),
+            },
+            updated_at,
         })
         .collect()
 }
@@ -5701,8 +5698,7 @@ mod tests {
         assert_eq!(
             err,
             FunctionCallError::RespondToModel(format!(
-                "task `{}` has unresolved dependencies",
-                worker_task_id
+                "task `{worker_task_id}` has unresolved dependencies"
             ))
         );
 
@@ -5807,8 +5803,7 @@ mod tests {
         assert_eq!(
             err,
             FunctionCallError::RespondToModel(format!(
-                "task `{}` is already completed",
-                worker_task_id
+                "task `{worker_task_id}` is already completed"
             ))
         );
 

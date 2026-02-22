@@ -1154,13 +1154,12 @@ fn map_anthropic_http_error(err: HttpApiError) -> CodexErr {
         HttpApiError::BadRequest(api_error) => {
             let message = api_error
                 .message
-                .clone()
                 .unwrap_or_else(|| "bad request".to_string());
             CodexErr::InvalidRequest(message)
         }
         HttpApiError::RateLimit(api_error) => CodexErr::RetryLimit(RetryLimitReachedError {
             status: StatusCode::TOO_MANY_REQUESTS,
-            request_id: api_error.request_id.clone(),
+            request_id: api_error.request_id,
         }),
         HttpApiError::InternalServer(_) => CodexErr::InternalServerError,
         HttpApiError::Authentication(api_error) => {

@@ -468,15 +468,15 @@ async fn dispatch_pre_tool_use_hook(
 
     session.record_hook_context(turn, &additional_context).await;
 
-    if let Some(updated_input) = updated_input {
-        if let Err(error) = apply_updated_tool_input(&mut invocation.payload, updated_input) {
-            warn!(
-                call_id = %invocation.call_id,
-                tool_name = %invocation.tool_name,
-                error,
-                "pre_tool_use hook produced an invalid updatedInput; ignoring"
-            );
-        }
+    if let Some(updated_input) = updated_input
+        && let Err(error) = apply_updated_tool_input(&mut invocation.payload, updated_input)
+    {
+        warn!(
+            call_id = %invocation.call_id,
+            tool_name = %invocation.tool_name,
+            error,
+            "pre_tool_use hook produced an invalid updatedInput; ignoring"
+        );
     }
 
     if let Some((hook_name, reason)) = blocked {
