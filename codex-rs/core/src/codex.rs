@@ -130,6 +130,21 @@ fn legacy_notify_command_hooks(notify: Option<Vec<String>>) -> CommandHooksConfi
     hooks
 }
 
+fn user_input_preview_for_hooks(items: &[UserInput]) -> String {
+    items
+        .iter()
+        .map(|item| match item {
+            UserInput::Text { text, .. } => text.clone(),
+            UserInput::Image { .. } => "[image]".to_string(),
+            UserInput::LocalImage { path } => format!("[local_image:{}]", path.display()),
+            UserInput::Skill { name, path } => format!("[skill:${name}]({})", path.display()),
+            UserInput::Mention { name, path } => format!("[mention:${name}]({path})"),
+            _ => "[input]".to_string(),
+        })
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
 use crate::ModelProviderInfo;
 use crate::client::ModelClient;
 use crate::client::ModelClientSession;
@@ -2401,6 +2416,52 @@ impl Session {
             warn!("Overwriting existing pending approval for call_id: {effective_approval_id}");
         }
 
+        let hook_outcomes = self
+            .hooks()
+            .dispatch(HookPayload {
+                session_id: self.conversation_id,
+                transcript_path: self.transcript_path().await,
+                cwd: turn_context.cwd.clone(),
+                permission_mode: turn_context.approval_policy.to_string(),
+                hook_event: HookEvent::PermissionRequest {
+                    tool_name: "exec_command".to_string(),
+                    tool_input: serde_json::json!({
+                        "command": command.clone(),
+                        "cwd": cwd.clone(),
+                        "reason": reason.clone(),
+                        "network_approval_context": network_approval_context.clone(),
+                        "proposed_execpolicy_amendment": proposed_execpolicy_amendment.clone(),
+                    }),
+                    tool_use_id: effective_approval_id.clone(),
+                    permission_suggestions: None,
+                },
+            })
+            .await;
+        let mut additional_context = Vec::new();
+        for hook_outcome in hook_outcomes {
+            let hook_name = hook_outcome.hook_name;
+            let result = hook_outcome.result;
+            if let Some(error) = result.error.as_deref() {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    hook_name = %hook_name,
+                    error,
+                    "permission_request hook failed; continuing"
+                );
+            }
+            if let HookResultControl::Block { reason } = result.control {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    hook_name = %hook_name,
+                    reason,
+                    "permission_request hook returned a blocking decision; ignoring"
+                );
+            }
+            additional_context.extend(result.additional_context);
+        }
+        self.record_hook_context(turn_context, &additional_context)
+            .await;
+
         let parsed_cmd = parse_command(&command);
         let event = EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
             call_id,
@@ -3011,6 +3072,8 @@ impl Session {
         // those spans, and `record_response_item_and_emit_turn_item` would drop them.
         self.record_conversation_items(turn_context, std::slice::from_ref(&response_item))
             .await;
+        self.dispatch_user_prompt_submit_hook(turn_context, input)
+            .await;
         let turn_item = TurnItem::UserMessage(UserMessageItem::new(input));
         self.emit_turn_item_started(turn_context, &turn_item).await;
         self.emit_turn_item_completed(turn_context, turn_item).await;
@@ -3246,6 +3309,97 @@ impl Session {
             return;
         }
         self.record_conversation_items(turn_context, &items).await;
+    }
+
+    pub(crate) async fn dispatch_user_prompt_submit_hook(
+        &self,
+        turn_context: &TurnContext,
+        items: &[UserInput],
+    ) {
+        let hook_outcomes = self
+            .hooks()
+            .dispatch(HookPayload {
+                session_id: self.conversation_id,
+                transcript_path: self.transcript_path().await,
+                cwd: turn_context.cwd.clone(),
+                permission_mode: turn_context.approval_policy.to_string(),
+                hook_event: HookEvent::UserPromptSubmit {
+                    prompt: user_input_preview_for_hooks(items),
+                },
+            })
+            .await;
+
+        let mut additional_context = Vec::new();
+        for hook_outcome in hook_outcomes {
+            let hook_name = hook_outcome.hook_name;
+            let result = hook_outcome.result;
+            if let Some(error) = result.error.as_deref() {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    hook_name = %hook_name,
+                    error,
+                    "user_prompt_submit hook failed; continuing"
+                );
+            }
+            if let HookResultControl::Block { reason } = result.control {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    hook_name = %hook_name,
+                    reason,
+                    "user_prompt_submit hook returned a blocking decision; ignoring"
+                );
+            }
+            additional_context.extend(result.additional_context);
+        }
+
+        self.record_hook_context(turn_context, &additional_context)
+            .await;
+    }
+
+    pub(crate) async fn dispatch_pre_compact_hook(
+        &self,
+        turn_context: &TurnContext,
+        trigger: &str,
+    ) {
+        let hook_outcomes = self
+            .hooks()
+            .dispatch(HookPayload {
+                session_id: self.conversation_id,
+                transcript_path: self.transcript_path().await,
+                cwd: turn_context.cwd.clone(),
+                permission_mode: turn_context.approval_policy.to_string(),
+                hook_event: HookEvent::PreCompact {
+                    trigger: trigger.to_string(),
+                    custom_instructions: turn_context.compact_prompt.clone(),
+                },
+            })
+            .await;
+
+        let mut additional_context = Vec::new();
+        for hook_outcome in hook_outcomes {
+            let hook_name = hook_outcome.hook_name;
+            let result = hook_outcome.result;
+            if let Some(error) = result.error.as_deref() {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    hook_name = %hook_name,
+                    error,
+                    "pre_compact hook failed; continuing"
+                );
+            }
+            if let HookResultControl::Block { reason } = result.control {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    hook_name = %hook_name,
+                    reason,
+                    "pre_compact hook returned a blocking decision; ignoring"
+                );
+            }
+            additional_context.extend(result.additional_context);
+        }
+
+        self.record_hook_context(turn_context, &additional_context)
+            .await;
     }
 
     pub(crate) fn user_shell(&self) -> Arc<shell::Shell> {
@@ -4040,6 +4194,8 @@ mod handlers {
 
     pub async fn compact(sess: &Arc<Session>, sub_id: String) {
         let turn_context = sess.new_default_turn_with_sub_id(sub_id).await;
+        sess.dispatch_pre_compact_hook(turn_context.as_ref(), "manual_compact")
+            .await;
 
         sess.spawn_task(
             Arc::clone(&turn_context),
@@ -4766,6 +4922,7 @@ pub(crate) async fn run_turn(
                         &sess,
                         &turn_context,
                         InitialContextInjection::BeforeLastUserMessage,
+                        "post_sampling_token_limit",
                     )
                     .await
                     .is_err()
@@ -4895,7 +5052,13 @@ async fn run_pre_sampling_compact(
         .unwrap_or(i64::MAX);
     // Compact if the total usage tokens are greater than the auto compact limit
     if total_usage_tokens >= auto_compact_limit {
-        run_auto_compact(sess, turn_context, InitialContextInjection::DoNotInject).await?;
+        run_auto_compact(
+            sess,
+            turn_context,
+            InitialContextInjection::DoNotInject,
+            "pre_sampling_token_limit",
+        )
+        .await?;
     }
     Ok(())
 }
@@ -4938,6 +5101,7 @@ async fn maybe_run_previous_model_inline_compact(
             sess,
             &previous_model_turn_context,
             InitialContextInjection::DoNotInject,
+            "model_switch",
         )
         .await?;
         return Ok(true);
@@ -4949,7 +5113,11 @@ async fn run_auto_compact(
     sess: &Arc<Session>,
     turn_context: &Arc<TurnContext>,
     initial_context_injection: InitialContextInjection,
+    trigger: &str,
 ) -> CodexResult<()> {
+    sess.dispatch_pre_compact_hook(turn_context.as_ref(), trigger)
+        .await;
+
     if should_use_remote_compact_task(&turn_context.provider) {
         run_inline_remote_auto_compact_task(
             Arc::clone(sess),
@@ -8080,6 +8248,176 @@ mod tests {
         });
 
         (session, turn_context, rx_event)
+    }
+
+    fn set_command_hooks_for_session(
+        session: &mut Arc<Session>,
+        command_hooks: CommandHooksConfig,
+    ) {
+        let hooks = Hooks::new(HooksConfig { command_hooks });
+        Arc::get_mut(session)
+            .expect("session should be uniquely owned")
+            .services
+            .hooks = hooks;
+    }
+
+    #[cfg(windows)]
+    fn append_marker_command(path: &Path, marker: &str) -> Vec<String> {
+        vec![
+            "cmd".to_string(),
+            "/C".to_string(),
+            format!("echo {marker}>>\"{}\"", path.display()),
+        ]
+    }
+
+    #[cfg(not(windows))]
+    fn append_marker_command(path: &Path, marker: &str) -> Vec<String> {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("echo {marker} >> \"{}\"", path.display()),
+        ]
+    }
+
+    #[tokio::test]
+    async fn user_input_or_turn_dispatches_user_prompt_submit_hook() {
+        let (mut sess, _tc, _rx) = make_session_and_context_with_rx().await;
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let marker_path = temp_dir.path().join("user_prompt_submit.log");
+        set_command_hooks_for_session(
+            &mut sess,
+            CommandHooksConfig {
+                user_prompt_submit: vec![CommandHookConfig {
+                    command: append_marker_command(&marker_path, "user_prompt_submit"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+
+        handlers::user_input_or_turn(
+            &sess,
+            "hook-user-input".to_string(),
+            Op::UserInput {
+                items: vec![UserInput::Text {
+                    text: "hello hooks".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                final_output_json_schema: None,
+            },
+        )
+        .await;
+
+        let deadline = StdDuration::from_secs(2);
+        let start = std::time::Instant::now();
+        let marker = loop {
+            if let Ok(marker) = std::fs::read_to_string(&marker_path) {
+                break marker;
+            }
+            if start.elapsed() >= deadline {
+                panic!("timeout waiting for user_prompt_submit hook marker");
+            }
+            sleep(StdDuration::from_millis(10)).await;
+        };
+
+        sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+        assert!(marker.contains("user_prompt_submit"));
+    }
+
+    #[tokio::test]
+    async fn request_command_approval_dispatches_permission_request_hook() {
+        let (mut sess, tc, rx) = make_session_and_context_with_rx().await;
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let marker_path = temp_dir.path().join("permission_request.log");
+        set_command_hooks_for_session(
+            &mut sess,
+            CommandHooksConfig {
+                permission_request: vec![CommandHookConfig {
+                    command: append_marker_command(&marker_path, "permission_request"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+
+        sess.spawn_task(
+            Arc::clone(&tc),
+            vec![UserInput::Text {
+                text: "keep turn active".to_string(),
+                text_elements: Vec::new(),
+            }],
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: false,
+            },
+        )
+        .await;
+
+        let sess_for_request = Arc::clone(&sess);
+        let tc_for_request = Arc::clone(&tc);
+        let approval_task = tokio::spawn(async move {
+            sess_for_request
+                .request_command_approval(
+                    tc_for_request.as_ref(),
+                    "call-1".to_string(),
+                    None,
+                    vec!["echo".to_string(), "hello".to_string()],
+                    tc_for_request.cwd.clone(),
+                    Some("test permission hook".to_string()),
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        let deadline = StdDuration::from_secs(2);
+        let start = std::time::Instant::now();
+        let approval_event = loop {
+            let remaining = deadline.saturating_sub(start.elapsed());
+            let evt = tokio::time::timeout(remaining, rx.recv())
+                .await
+                .expect("timeout waiting for event")
+                .expect("event");
+            if let EventMsg::ExecApprovalRequest(event) = evt.msg {
+                break event;
+            }
+        };
+        let approval_key = approval_event
+            .approval_id
+            .clone()
+            .unwrap_or_else(|| approval_event.call_id.clone());
+        sess.notify_approval(&approval_key, ReviewDecision::Approved)
+            .await;
+
+        let decision = approval_task.await.expect("approval task should join");
+        assert_eq!(decision, ReviewDecision::Approved);
+
+        sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+        let marker = std::fs::read_to_string(&marker_path).expect("read hook marker");
+        assert!(marker.contains("permission_request"));
+    }
+
+    #[tokio::test]
+    async fn compact_handler_dispatches_pre_compact_hook() {
+        let (mut sess, _tc, _rx) = make_session_and_context_with_rx().await;
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let marker_path = temp_dir.path().join("pre_compact.log");
+        set_command_hooks_for_session(
+            &mut sess,
+            CommandHooksConfig {
+                pre_compact: vec![CommandHookConfig {
+                    command: append_marker_command(&marker_path, "pre_compact"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+
+        handlers::compact(&sess, "hook-compact".to_string()).await;
+
+        sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+        let marker = std::fs::read_to_string(&marker_path).expect("read hook marker");
+        assert!(marker.contains("pre_compact"));
     }
 
     #[tokio::test]
