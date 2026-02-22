@@ -17,7 +17,7 @@ concurrency:
 
 jobs:
   tag-check:
-    if: ${{ github.repository == 'stellarlinkco/codex' }}
+    if: ${{ github.repository == 'openai/codex' || github.repository == 'stellarlinkco/codex' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -48,8 +48,9 @@ jobs:
 
   build:
     needs: tag-check
+    if: ${{ github.repository == 'openai/codex' }}
     name: Build - ${{ matrix.runner }} - ${{ matrix.target }}
-    runs-on: ${{ matrix.runs_on || matrix.runner }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
       contents: read
@@ -215,14 +216,14 @@ jobs:
           path: codex-rs/target/**/cargo-timings/cargo-timing.html
           if-no-files-found: warn
 
-      - if: ${{ contains(matrix.target, 'linux') }}
+      - if: ${{ github.repository == 'openai/codex' && contains(matrix.target, 'linux') }}
         name: Cosign Linux artifacts
         uses: ./.github/actions/linux-code-sign
         with:
           target: ${{ matrix.target }}
           artifacts-dir: ${{ github.workspace }}/codex-rs/target/${{ matrix.target }}/release
 
-      - if: ${{ runner.os == 'macOS' }}
+      - if: ${{ github.repository == 'openai/codex' && runner.os == 'macOS' }}
         name: MacOS code signing (binaries)
         uses: ./.github/actions/macos-code-sign
         with:
@@ -281,7 +282,7 @@ jobs:
             exit 1
           fi
 
-      - if: ${{ runner.os == 'macOS' }}
+      - if: ${{ github.repository == 'openai/codex' && runner.os == 'macOS' }}
         name: MacOS code signing (dmg)
         uses: ./.github/actions/macos-code-sign
         with:
@@ -356,7 +357,77 @@ jobs:
           path: |
             codex-rs/dist/${{ matrix.target }}/*
 
+  build-stellar:
+    if: ${{ github.repository == 'stellarlinkco/codex' }}
+    needs: tag-check
+    name: Build - ubuntu-24.04 - x86_64-unknown-linux-gnu
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_PROFILE_RELEASE_LTO: ${{ contains(github.ref_name, '-alpha') && 'thin' || 'fat' }}
+      TARGET: x86_64-unknown-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux bwrap build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          targets: ${{ env.TARGET }}
+
+      - name: Cargo build
+        shell: bash
+        run: |
+          cargo build --target "${TARGET}" --release --timings --bin codex --bin codex-responses-api-proxy
+
+      - name: Upload Cargo timings
+        uses: actions/upload-artifact@v6
+        with:
+          name: cargo-timings-rust-release-${{ env.TARGET }}
+          path: codex-rs/target/**/cargo-timings/cargo-timing.html
+          if-no-files-found: warn
+
+      - name: Stage artifacts
+        shell: bash
+        run: |
+          dest="dist/${TARGET}"
+          mkdir -p "$dest"
+          cp "target/${TARGET}/release/codex" "$dest/codex-${TARGET}"
+          cp "target/${TARGET}/release/codex-responses-api-proxy" "$dest/codex-responses-api-proxy-${TARGET}"
+
+      - name: Compress artifacts
+        shell: bash
+        run: |
+          dest="dist/${TARGET}"
+          for f in "$dest"/*; do
+            base="$(basename "$f")"
+            if [[ "$base" == *.tar.gz || "$base" == *.zip || "$base" == *.dmg || "$base" == *.sigstore ]]; then
+              continue
+            fi
+            tar -C "$dest" -czf "$dest/${base}.tar.gz" "$base"
+            zstd -T0 -19 --rm "$dest/$base"
+          done
+
+      - uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.TARGET }}
+          path: |
+            codex-rs/dist/${{ env.TARGET }}/*
+
   build-windows:
+    if: ${{ github.repository == 'openai/codex' }}
     needs: tag-check
     uses: ./.github/workflows/rust-release-windows.yml
     with:
@@ -364,6 +435,7 @@ jobs:
     secrets: inherit
 
   shell-tool-mcp:
+    if: ${{ github.repository == 'openai/codex' }}
     name: shell-tool-mcp
     needs: tag-check
     uses: ./.github/workflows/shell-tool-mcp.yml
@@ -373,8 +445,10 @@ jobs:
     secrets: inherit
 
   release:
+    if: ${{ always() && (needs.build.result == 'success' || needs.build.result == 'skipped') && (needs.build-stellar.result == 'success' || needs.build-stellar.result == 'skipped') && (needs.build-windows.result == 'success' || needs.build-windows.result == 'skipped') && (needs.shell-tool-mcp.result == 'success' || needs.shell-tool-mcp.result == 'skipped') && (needs.build.result == 'success' || needs.build-stellar.result == 'success') }}
     needs:
       - build
+      - build-stellar
       - build-windows
       - shell-tool-mcp
     name: release
@@ -451,6 +525,12 @@ jobs:
           VERSION: ${{ steps.release_name.outputs.name }}
         run: |
           set -euo pipefail
+          if [[ "${GITHUB_REPOSITORY}" != "openai/codex" ]]; then
+            echo "should_publish=false" >> "$GITHUB_OUTPUT"
+            echo "npm_tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           version="${VERSION}"
 
           if [[ "${version}" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
@@ -465,21 +545,26 @@ jobs:
           fi
 
       - name: Setup pnpm
+        if: ${{ github.repository == 'openai/codex' }}
         uses: pnpm/action-setup@v4
         with:
           run_install: false
 
       - name: Setup Node.js for npm packaging
+        if: ${{ github.repository == 'openai/codex' }}
         uses: actions/setup-node@v6
         with:
           node-version: 22
 
       - name: Install dependencies
+        if: ${{ github.repository == 'openai/codex' }}
         run: pnpm install --frozen-lockfile
 
       # stage_npm_packages.py requires DotSlash when staging releases.
       - uses: facebook/install-dotslash@v2
+        if: ${{ github.repository == 'openai/codex' }}
       - name: Stage npm packages
+        if: ${{ github.repository == 'openai/codex' }}
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -501,6 +586,7 @@ jobs:
           prerelease: ${{ contains(steps.release_name.outputs.name, '-') }}
 
       - uses: facebook/dotslash-publish-release@v2
+        if: ${{ github.repository == 'openai/codex' }}
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -510,7 +596,7 @@ jobs:
       - name: Trigger developers.openai.com deploy
         # Only trigger the deploy if the release is not a pre-release.
         # The deploy is used to update the developers.openai.com website with the new config schema json file.
-        if: ${{ !contains(steps.release_name.outputs.name, '-') }}
+        if: ${{ github.repository == 'openai/codex' && !contains(steps.release_name.outputs.name, '-') }}
         continue-on-error: true
         env:
           DEV_WEBSITE_VERCEL_DEPLOY_HOOK_URL: ${{ secrets.DEV_WEBSITE_VERCEL_DEPLOY_HOOK_URL }}
@@ -525,7 +611,7 @@ jobs:
   # npm docs: https://docs.npmjs.com/trusted-publishers
   publish-npm:
     # Publish to npm for stable releases and alpha pre-releases with numeric suffixes.
-    if: ${{ needs.release.outputs.should_publish_npm == 'true' }}
+    if: ${{ github.repository == 'openai/codex' && needs.release.outputs.should_publish_npm == 'true' }}
     name: publish-npm
     needs: release
     runs-on: ubuntu-latest
@@ -631,6 +717,7 @@ jobs:
           done
 
   update-branch:
+    if: ${{ github.repository == 'openai/codex' }}
     name: Update latest-alpha-cli branch
     permissions:
       contents: write

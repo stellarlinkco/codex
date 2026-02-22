@@ -166,40 +166,40 @@ If multiple keys are present:
 
 ## Event capabilities
 
-| Event | Can block | Consumes `updatedInput` | Consumes `permissionDecision` | Records `additionalContext` |
-| --- | --- | --- | --- | --- |
-| `session_start` | no | no | no | no |
-| `session_end` | no | no | no | no |
-| `user_prompt_submit` | yes | no | no | yes |
-| `pre_tool_use` | yes | yes | yes (deny/ask blocks) | yes |
-| `permission_request` | yes | no | yes | yes |
-| `post_tool_use` | no | no | no | yes |
-| `post_tool_use_failure` | no | no | no | yes |
-| `stop` | yes | no | no | yes |
-| `subagent_stop` | yes | no | no | yes |
-| `pre_compact` | yes | no | no | yes |
-| `worktree_create` | no | no | no | yes |
-| `worktree_remove` | no | no | no | yes |
+| Event                   | Can block | Consumes `updatedInput` | Consumes `permissionDecision` | Records `additionalContext` |
+| ----------------------- | --------- | ----------------------- | ----------------------------- | --------------------------- |
+| `session_start`         | no        | no                      | no                            | no                          |
+| `session_end`           | no        | no                      | no                            | no                          |
+| `user_prompt_submit`    | yes       | no                      | no                            | yes                         |
+| `pre_tool_use`          | yes       | yes                     | yes (deny/ask blocks)         | yes                         |
+| `permission_request`    | yes       | no                      | yes                           | yes                         |
+| `post_tool_use`         | no        | no                      | no                            | yes                         |
+| `post_tool_use_failure` | no        | no                      | no                            | yes                         |
+| `stop`                  | yes       | no                      | no                            | yes                         |
+| `subagent_stop`         | yes       | no                      | no                            | yes                         |
+| `pre_compact`           | yes       | no                      | no                            | yes                         |
+| `worktree_create`       | no        | no                      | no                            | yes                         |
+| `worktree_remove`       | no        | no                      | no                            | yes                         |
 
 ## Minimal examples
 
 Block a stop until the user acknowledges something:
 
 ```json
-{"decision":"block","reason":"Please confirm before stopping."}
+{ "decision": "block", "reason": "Please confirm before stopping." }
 ```
 
 Rewrite a tool input (pre-tool hook):
 
 ```json
-{"updatedInput":{"command":["echo","hello"]}}
+{ "updatedInput": { "command": ["echo", "hello"] } }
 ```
 
 ## End-to-end sanity check
 
 This is intended to run on your machine (not inside Codex's restricted test sandbox).
 
-1) Create a hook that logs every payload:
+1. Create a hook that logs every payload:
 
 ```bash
 mkdir -p ~/.codex/hooks
@@ -215,7 +215,7 @@ PY
 chmod +x ~/.codex/hooks/log_event.py
 ```
 
-2) (Optional) Create a `permission_request` decision hook (useful for `codex exec`):
+2. (Optional) Create a `permission_request` decision hook (useful for `codex exec`):
 
 ```bash
 cat > ~/.codex/hooks/permission_decide.py <<'PY'
@@ -232,7 +232,7 @@ PY
 chmod +x ~/.codex/hooks/permission_decide.py
 ```
 
-3) Wire them into `~/.codex/config.toml`:
+3. Wire them into `~/.codex/config.toml`:
 
 ```toml
 [hooks]
@@ -262,7 +262,7 @@ command = "python3 \"$HOME/.codex/hooks/log_event.py\""
 command = "python3 \"$HOME/.codex/hooks/log_event.py\""
 ```
 
-4) Trigger events and inspect the log:
+4. Trigger events and inspect the log:
 
 ```bash
 : > ~/.codex/hooks/e2e-events.jsonl

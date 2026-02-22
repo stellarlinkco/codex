@@ -83,9 +83,21 @@ Request:
 {
   "team_id": "demo-team",
   "members": [
-    { "name": "planner", "task": "Define rollout plan", "agent_type": "architect" },
-    { "name": "implementer", "task": "Implement the changes", "agent_type": "develop" },
-    { "name": "reviewer", "task": "Review risks and edge cases", "agent_type": "code-review" }
+    {
+      "name": "planner",
+      "task": "Define rollout plan",
+      "agent_type": "architect"
+    },
+    {
+      "name": "implementer",
+      "task": "Implement the changes",
+      "agent_type": "develop"
+    },
+    {
+      "name": "reviewer",
+      "task": "Review risks and edge cases",
+      "agent_type": "code-review"
+    }
   ]
 }
 ```
@@ -97,7 +109,11 @@ Example result:
   "team_id": "demo-team",
   "members": [
     { "name": "planner", "agent_id": "9a2f...e81", "status": "pending_init" },
-    { "name": "implementer", "agent_id": "cf93...b70", "status": "pending_init" },
+    {
+      "name": "implementer",
+      "agent_id": "cf93...b70",
+      "status": "pending_init"
+    },
     { "name": "reviewer", "agent_id": "4ed2...7ab", "status": "pending_init" }
   ]
 }
@@ -205,8 +221,16 @@ Example result:
 {
   "team_id": "demo-team",
   "sent": [
-    { "member_name": "planner", "agent_id": "9a2f...e81", "submission_id": "subm-2" },
-    { "member_name": "implementer", "agent_id": "cf93...b70", "submission_id": "subm-3" }
+    {
+      "member_name": "planner",
+      "agent_id": "9a2f...e81",
+      "submission_id": "subm-2"
+    },
+    {
+      "member_name": "implementer",
+      "agent_id": "cf93...b70",
+      "submission_id": "subm-3"
+    }
   ],
   "failed": []
 }
@@ -282,9 +306,27 @@ Example result:
   "removed_team_config": true,
   "removed_task_dir": true,
   "closed": [
-    { "name": "planner", "agent_id": "9a2f...e81", "ok": true, "status": "shutdown", "error": null },
-    { "name": "implementer", "agent_id": "cf93...b70", "ok": true, "status": "shutdown", "error": null },
-    { "name": "reviewer", "agent_id": "4ed2...7ab", "ok": true, "status": "shutdown", "error": null }
+    {
+      "name": "planner",
+      "agent_id": "9a2f...e81",
+      "ok": true,
+      "status": "shutdown",
+      "error": null
+    },
+    {
+      "name": "implementer",
+      "agent_id": "cf93...b70",
+      "ok": true,
+      "status": "shutdown",
+      "error": null
+    },
+    {
+      "name": "reviewer",
+      "agent_id": "4ed2...7ab",
+      "ok": true,
+      "status": "shutdown",
+      "error": null
+    }
   ]
 }
 ```
