@@ -397,12 +397,11 @@ async fn execute_command_hook(
         Err(error) => return result_with_error(io::Error::other(error)),
     };
 
-    if let Some(mut stdin) = child.stdin.take() {
-        if let Err(error) = stdin.write_all(payload_json.as_bytes()).await
-            && error.kind() != ErrorKind::BrokenPipe
-        {
-            return result_with_error(error);
-        }
+    if let Some(mut stdin) = child.stdin.take()
+        && let Err(error) = stdin.write_all(payload_json.as_bytes()).await
+        && error.kind() != ErrorKind::BrokenPipe
+    {
+        return result_with_error(error);
     }
 
     let output = match wait_for_output(child, hook.timeout).await {
@@ -511,18 +510,17 @@ fn apply_stdout_json(event_key: HookEventKey, stdout_json: Value) -> HookResult 
         .or_else(|| obj.get("hook_specific_output"))
         .and_then(Value::as_object);
 
-    if let Some(hook_specific) = hook_specific {
-        if let Some(additional_context) = hook_specific
+    if let Some(hook_specific) = hook_specific
+        && let Some(additional_context) = hook_specific
             .get("additionalContext")
             .or_else(|| hook_specific.get("additional_context"))
             .and_then(Value::as_str)
             .map(str::trim)
             .filter(|value| !value.is_empty())
-        {
-            result
-                .additional_context
-                .push(additional_context.to_string());
-        }
+    {
+        result
+            .additional_context
+            .push(additional_context.to_string());
     }
 
     result.updated_input = obj
@@ -773,6 +771,7 @@ fn command_from_argv(argv: &[String]) -> Option<Command> {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
     use std::path::PathBuf;
 
     use codex_protocol::ThreadId;
@@ -823,11 +822,11 @@ mod tests {
         ]
     }
 
-    fn payload(cwd: &PathBuf, hook_event: HookEvent) -> HookPayload {
+    fn payload(cwd: &Path, hook_event: HookEvent) -> HookPayload {
         HookPayload {
             session_id: ThreadId::new(),
             transcript_path: None,
-            cwd: cwd.clone(),
+            cwd: cwd.to_path_buf(),
             permission_mode: "never".to_string(),
             hook_event,
         }
@@ -848,7 +847,7 @@ mod tests {
 
         let outcomes = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::PreToolUse {
                     tool_name: "shell".to_string(),
                     tool_input: json!({"command":["echo","hi"]}),
@@ -885,7 +884,7 @@ mod tests {
 
         let outcomes = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::PreToolUse {
                     tool_name: "shell".to_string(),
                     tool_input: json!({"command":["echo","hi"]}),
@@ -916,7 +915,7 @@ mod tests {
 
         let outcomes = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::PostToolUse {
                     tool_name: "shell".to_string(),
                     tool_input: json!({"command":["echo","hi"]}),
@@ -949,7 +948,7 @@ mod tests {
 
         let outcomes = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::WorktreeCreate {
                     repo_path: PathBuf::from("/repo"),
                     worktree_path: PathBuf::from("/repo/wt"),
@@ -980,7 +979,7 @@ mod tests {
 
         let outcomes = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::WorktreeRemove {
                     repo_path: PathBuf::from("/repo"),
                     worktree_path: PathBuf::from("/repo/wt"),
@@ -1011,7 +1010,7 @@ mod tests {
 
         let outcomes = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::PermissionRequest {
                     tool_name: "shell".to_string(),
                     tool_input: json!({"command":["echo","hi"]}),
@@ -1053,11 +1052,9 @@ mod tests {
         };
 
         let first = hooks
-            .dispatch(payload(&dir.path().to_path_buf(), hook_event.clone()))
+            .dispatch(payload(dir.path(), hook_event.clone()))
             .await;
-        let second = hooks
-            .dispatch(payload(&dir.path().to_path_buf(), hook_event))
-            .await;
+        let second = hooks.dispatch(payload(dir.path(), hook_event)).await;
 
         assert_eq!(first.len(), 1);
         assert_eq!(second.len(), 0);
@@ -1086,7 +1083,7 @@ mod tests {
 
         let first = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::SessionStart {
                     source: "cli".to_string(),
                     model: "gpt-5".to_string(),
@@ -1096,7 +1093,7 @@ mod tests {
             .await;
         let second = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::UserPromptSubmit {
                     prompt: "hi".to_string(),
                 },
@@ -1127,7 +1124,7 @@ mod tests {
 
         let does_not_match = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::PreToolUse {
                     tool_name: "shell".to_string(),
                     tool_input: json!({"command":["echo","hi"]}),
@@ -1137,7 +1134,7 @@ mod tests {
             .await;
         let matches = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::PreToolUse {
                     tool_name: "exec".to_string(),
                     tool_input: json!({"command":["echo","hi"]}),
@@ -1169,7 +1166,7 @@ mod tests {
 
         let outcomes = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::PreToolUse {
                     tool_name: "shell".to_string(),
                     tool_input: json!({"command":["echo","hi"]}),
@@ -1220,7 +1217,7 @@ mod tests {
 
         let outcomes = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::PreToolUse {
                     tool_name: "shell".to_string(),
                     tool_input: json!({"command":["echo","hi"]}),
@@ -1251,7 +1248,7 @@ mod tests {
 
         let matches = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::UserPromptSubmit {
                     prompt: "hello world".to_string(),
                 },
@@ -1259,7 +1256,7 @@ mod tests {
             .await;
         let does_not_match = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::UserPromptSubmit {
                     prompt: "goodbye".to_string(),
                 },
@@ -1291,7 +1288,7 @@ mod tests {
 
         let outcomes = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::PreToolUse {
                     tool_name: "shell".to_string(),
                     tool_input: json!({"command":["echo","hi"]}),
@@ -1322,7 +1319,7 @@ mod tests {
 
         let outcomes = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::SessionStart {
                     source: "cli".to_string(),
                     model: "gpt-5".to_string(),
@@ -1349,7 +1346,7 @@ mod tests {
 
         let outcomes = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::PreToolUse {
                     tool_name: "shell".to_string(),
                     tool_input: json!({"command":["echo","hi"]}),
@@ -1384,7 +1381,7 @@ mod tests {
 
         let outcomes = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::PreToolUse {
                     tool_name: "shell".to_string(),
                     tool_input: json!({"command":["echo","hi"]}),
@@ -1586,7 +1583,7 @@ mod tests {
 
         let outcomes = hooks
             .dispatch(payload(
-                &dir.path().to_path_buf(),
+                dir.path(),
                 HookEvent::PreToolUse {
                     tool_name: "shell".to_string(),
                     tool_input: json!({"command":["echo","hi"]}),
