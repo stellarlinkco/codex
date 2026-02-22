@@ -326,8 +326,9 @@ jobs:
           #   codex-<target>.zst          (existing)
           #   codex-<target>.tar.gz       (new)
 
-          # 1. Produce a .tar.gz for every file in the directory *before* we
-          #    run `zstd --rm`, because that flag deletes the original files.
+          # 1. Produce a .tar.gz for every file in the directory, then produce
+          #    a matching .zst while keeping the original executable so the
+          #    release also contains unpacked binaries.
           for f in "$dest"/*; do
             base="$(basename "$f")"
             # Skip files that are already archives (shouldn't happen, but be
@@ -344,9 +345,8 @@ jobs:
             # Create per-binary tar.gz
             tar -C "$dest" -czf "$dest/${base}.tar.gz" "$base"
 
-            # Also create .zst and remove the uncompressed binaries to keep
-            # non-Windows artifact directories small.
-            zstd -T0 -19 --rm "$dest/$base"
+            # Also create .zst.
+            zstd -T0 -19 "$dest/$base"
           done
 
       - uses: actions/upload-artifact@v6
@@ -417,7 +417,7 @@ jobs:
               continue
             fi
             tar -C "$dest" -czf "$dest/${base}.tar.gz" "$base"
-            zstd -T0 -19 --rm "$dest/$base"
+            zstd -T0 -19 "$dest/$base"
           done
 
       - uses: actions/upload-artifact@v6
