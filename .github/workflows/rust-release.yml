@@ -360,8 +360,8 @@ jobs:
   build-stellar:
     if: ${{ github.repository == 'stellarlinkco/codex' }}
     needs: tag-check
-    name: Build - ubuntu-24.04 - x86_64-unknown-linux-gnu
-    runs-on: ubuntu-24.04
+    name: Build - ${{ matrix.runner }} - ${{ matrix.target }}
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     permissions:
       contents: read
@@ -371,12 +371,26 @@ jobs:
         working-directory: codex-rs
     env:
       CARGO_PROFILE_RELEASE_LTO: ${{ contains(github.ref_name, '-alpha') && 'thin' || 'fat' }}
-      TARGET: x86_64-unknown-linux-gnu
+      TARGET: ${{ matrix.target }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: windows-latest
+            target: x86_64-pc-windows-msvc
+          - runner: macos-15-xlarge
+            target: aarch64-apple-darwin
+          - runner: macos-15-xlarge
+            target: x86_64-apple-darwin
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
 
     steps:
       - uses: actions/checkout@v6
 
       - name: Install Linux bwrap build dependencies
+        if: ${{ runner.os == 'Linux' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -402,10 +416,15 @@ jobs:
       - name: Stage artifacts
         shell: bash
         run: |
+          ext=""
+          if [[ "${{ runner.os }}" == "Windows" ]]; then
+            ext=".exe"
+          fi
+
           dest="dist/${TARGET}"
           mkdir -p "$dest"
-          cp "target/${TARGET}/release/codex" "$dest/codex-${TARGET}"
-          cp "target/${TARGET}/release/codex-responses-api-proxy" "$dest/codex-responses-api-proxy-${TARGET}"
+          cp "target/${TARGET}/release/codex${ext}" "$dest/codex-${TARGET}${ext}"
+          cp "target/${TARGET}/release/codex-responses-api-proxy${ext}" "$dest/codex-responses-api-proxy-${TARGET}${ext}"
 
       - name: Compress artifacts
         shell: bash
@@ -417,7 +436,9 @@ jobs:
               continue
             fi
             tar -C "$dest" -czf "$dest/${base}.tar.gz" "$base"
-            zstd -T0 -19 "$dest/$base"
+            if command -v zstd >/dev/null 2>&1; then
+              zstd -T0 -19 "$dest/$base"
+            fi
           done
 
       - uses: actions/upload-artifact@v6
