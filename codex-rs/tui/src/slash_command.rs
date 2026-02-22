@@ -207,7 +207,7 @@ mod tests {
 
     #[test]
     fn agents_command_supports_inline_args_and_task_time_usage() {
-        assert_eq!(SlashCommand::Agents.supports_inline_args(), true);
-        assert_eq!(SlashCommand::Agents.available_during_task(), true);
+        assert!(SlashCommand::Agents.supports_inline_args());
+        assert!(SlashCommand::Agents.available_during_task());
     }
 }
