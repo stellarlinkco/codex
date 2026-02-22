@@ -112,11 +112,17 @@ use toml::Value as TomlValue;
 async fn test_config() -> Config {
     // Use base defaults to avoid depending on host state.
     let codex_home = std::env::temp_dir();
-    ConfigBuilder::default()
+    let mut cfg = ConfigBuilder::default()
         .codex_home(codex_home.clone())
         .build()
         .await
-        .expect("config")
+        .expect("config");
+
+    if cfg.model_provider.is_openai() {
+        cfg.model_provider.base_url = Some(DEFAULT_OPENAI_BASE_URL.to_string());
+    }
+
+    cfg
 }
 
 fn invalid_value(candidate: impl Into<String>, allowed: impl Into<String>) -> ConstraintError {

@@ -91,10 +91,11 @@ pub(crate) fn waiting_begin(ev: CollabWaitingBeginEvent) -> PlainHistoryCell {
         sender_thread_id: _,
         receiver_thread_ids,
         receiver_agents,
-        receiver_names: _,
+        receiver_names,
         call_id: _,
     } = ev;
-    let receiver_agents = merge_wait_receivers(&receiver_thread_ids, receiver_agents);
+    let receiver_agents =
+        merge_wait_receivers(&receiver_thread_ids, receiver_agents, &receiver_names);
 
     let title = match receiver_agents.as_slice() {
         [receiver] => title_with_agent("Waiting for", agent_label_from_ref(receiver)),
@@ -119,10 +120,10 @@ pub(crate) fn waiting_end(ev: CollabWaitingEndEvent) -> PlainHistoryCell {
         call_id: _,
         sender_thread_id: _,
         agent_statuses,
-        receiver_names: _,
+        receiver_names,
         statuses,
     } = ev;
-    let details = wait_complete_lines(&statuses, &agent_statuses);
+    let details = wait_complete_lines(&statuses, &agent_statuses, &receiver_names);
     collab_event(title_text("Finished waiting"), details)
 }
 
@@ -270,16 +271,29 @@ fn prompt_line(prompt: &str) -> Option<Line<'static>> {
 fn merge_wait_receivers(
     receiver_thread_ids: &[ThreadId],
     mut receiver_agents: Vec<CollabAgentRef>,
+    receiver_names: &HashMap<ThreadId, String>,
 ) -> Vec<CollabAgentRef> {
     if receiver_agents.is_empty() {
         return receiver_thread_ids
             .iter()
             .map(|thread_id| CollabAgentRef {
                 thread_id: *thread_id,
-                agent_nickname: None,
+                agent_nickname: receiver_names.get(thread_id).cloned(),
                 agent_role: None,
             })
             .collect();
+    }
+
+    for receiver in &mut receiver_agents {
+        if receiver
+            .agent_nickname
+            .as_deref()
+            .map(str::trim)
+            .is_none_or(|nickname| nickname.is_empty())
+            && let Some(receiver_name) = receiver_names.get(&receiver.thread_id)
+        {
+            receiver.agent_nickname = Some(receiver_name.clone());
+        }
     }
 
     let mut seen = receiver_agents
@@ -290,7 +304,7 @@ fn merge_wait_receivers(
         if seen.insert(*thread_id) {
             receiver_agents.push(CollabAgentRef {
                 thread_id: *thread_id,
-                agent_nickname: None,
+                agent_nickname: receiver_names.get(thread_id).cloned(),
                 agent_role: None,
             });
         }
@@ -301,6 +315,7 @@ fn merge_wait_receivers(
 fn wait_complete_lines(
     statuses: &HashMap<ThreadId, AgentStatus>,
     agent_statuses: &[CollabAgentStatusEntry],
+    receiver_names: &HashMap<ThreadId, String>,
 ) -> Vec<Line<'static>> {
     if statuses.is_empty() && agent_statuses.is_empty() {
         return vec![Line::from(Span::from("No agents completed yet").dim())];
@@ -311,7 +326,7 @@ fn wait_complete_lines(
             .iter()
             .map(|(thread_id, status)| CollabAgentStatusEntry {
                 thread_id: *thread_id,
-                agent_nickname: None,
+                agent_nickname: receiver_names.get(thread_id).cloned(),
                 agent_role: None,
                 status: status.clone(),
             })
@@ -320,6 +335,17 @@ fn wait_complete_lines(
         entries
     } else {
         let mut entries = agent_statuses.to_vec();
+        for entry in &mut entries {
+            if entry
+                .agent_nickname
+                .as_deref()
+                .map(str::trim)
+                .is_none_or(|nickname| nickname.is_empty())
+                && let Some(receiver_name) = receiver_names.get(&entry.thread_id)
+            {
+                entry.agent_nickname = Some(receiver_name.clone());
+            }
+        }
         let seen = entries
             .iter()
             .map(|entry| entry.thread_id)
@@ -329,7 +355,7 @@ fn wait_complete_lines(
             .filter(|(thread_id, _)| !seen.contains(thread_id))
             .map(|(thread_id, status)| CollabAgentStatusEntry {
                 thread_id: *thread_id,
-                agent_nickname: None,
+                agent_nickname: receiver_names.get(thread_id).cloned(),
                 agent_role: None,
                 status: status.clone(),
             })
@@ -516,6 +542,32 @@ mod tests {
         assert!(title.spans[2].style.add_modifier.contains(Modifier::BOLD));
         assert_eq!(title.spans[4].content.as_ref(), "[explorer]");
         assert!(title.spans[4].style.add_modifier.contains(Modifier::DIM));
+    }
+
+    #[test]
+    fn waiting_end_prefers_receiver_names_for_member_labels() {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000001")
+            .expect("valid sender thread id");
+        let planner_id = ThreadId::from_string("00000000-0000-0000-0000-000000000002")
+            .expect("valid planner thread id");
+        let planner_id_text = planner_id.to_string();
+
+        let mut statuses = HashMap::new();
+        statuses.insert(planner_id, AgentStatus::Completed(None));
+        let mut receiver_names = HashMap::new();
+        receiver_names.insert(planner_id, "planner [develop]".to_string());
+
+        let cell = waiting_end(CollabWaitingEndEvent {
+            sender_thread_id,
+            call_id: "call-wait-team".to_string(),
+            agent_statuses: Vec::new(),
+            receiver_names,
+            statuses,
+        });
+        let text = cell_to_text(&cell);
+
+        assert!(text.contains("planner [develop]: Completed"));
+        assert_eq!(text.contains(&planner_id_text), false);
     }
 
     fn cell_to_text(cell: &PlainHistoryCell) -> String {

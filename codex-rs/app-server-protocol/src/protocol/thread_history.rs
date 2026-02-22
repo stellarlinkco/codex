@@ -428,10 +428,11 @@ impl ThreadHistoryBuilder {
         &mut self,
         payload: &codex_protocol::protocol::CollabWaitingEndEvent,
     ) {
-        let status = if payload
-            .statuses
-            .values()
-            .any(|status| matches!(status, AgentStatus::Errored(_) | AgentStatus::NotFound))
+        let status = if payload.statuses.is_empty()
+            || payload
+                .statuses
+                .values()
+                .any(|status| matches!(status, AgentStatus::Errored(_) | AgentStatus::NotFound))
         {
             CollabAgentToolCallStatus::Failed
         } else {
@@ -1714,6 +1715,46 @@ mod tests {
                 )]
                 .into_iter()
                 .collect(),
+            }
+        );
+    }
+
+    #[test]
+    fn reconstructs_prefixed_team_wait_item_with_empty_statuses_as_failed() {
+        let events = vec![
+            EventMsg::UserMessage(UserMessageEvent {
+                message: "wait team".into(),
+                images: None,
+                text_elements: Vec::new(),
+                local_images: Vec::new(),
+            }),
+            EventMsg::CollabWaitingEnd(codex_protocol::protocol::CollabWaitingEndEvent {
+                sender_thread_id: ThreadId::try_from("00000000-0000-0000-0000-000000000001")
+                    .expect("valid sender thread id"),
+                call_id: format!("{TEAM_WAIT_CALL_PREFIX}wait-empty"),
+                agent_statuses: Vec::new(),
+                statuses: HashMap::new(),
+                receiver_names: HashMap::new(),
+            }),
+        ];
+
+        let items = events
+            .into_iter()
+            .map(RolloutItem::EventMsg)
+            .collect::<Vec<_>>();
+        let turns = build_turns_from_rollout_items(&items);
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].items.len(), 2);
+        assert_eq!(
+            turns[0].items[1],
+            ThreadItem::CollabAgentToolCall {
+                id: format!("{TEAM_WAIT_CALL_PREFIX}wait-empty"),
+                tool: CollabAgentTool::WaitTeam,
+                status: CollabAgentToolCallStatus::Failed,
+                sender_thread_id: "00000000-0000-0000-0000-000000000001".into(),
+                receiver_thread_ids: Vec::new(),
+                prompt: None,
+                agents_states: HashMap::new(),
             }
         );
     }

@@ -610,13 +610,14 @@ pub(crate) async fn apply_bespoke_event_handling(
         }
         EventMsg::CollabWaitingEnd(end_event) => {
             let tool = collab_tool_from_wait_call_id(&end_event.call_id);
-            let status = if end_event.statuses.values().any(|status| {
-                matches!(
-                    status,
-                    codex_protocol::protocol::AgentStatus::Errored(_)
-                        | codex_protocol::protocol::AgentStatus::NotFound
-                )
-            }) {
+            let status = if end_event.statuses.is_empty()
+                || end_event.statuses.values().any(|status| {
+                    matches!(
+                        status,
+                        codex_protocol::protocol::AgentStatus::Errored(_)
+                            | codex_protocol::protocol::AgentStatus::NotFound
+                    )
+                }) {
                 V2CollabToolCallStatus::Failed
             } else {
                 V2CollabToolCallStatus::Completed
