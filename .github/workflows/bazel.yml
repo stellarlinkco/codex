@@ -90,6 +90,17 @@ jobs:
           # Use a very short path to reduce argv/path length issues.
           "BAZEL_STARTUP_ARGS=--output_user_root=C:\" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
 
+      - name: Enable unprivileged user namespaces (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          # Required for bubblewrap to work on Linux CI runners.
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          # Ubuntu 24.04+ can additionally gate unprivileged user namespaces
+          # behind AppArmor.
+          if sudo sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
       - name: bazel test //...
         env:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
@@ -99,7 +110,7 @@ jobs:
             test
             //...
             --test_verbose_timeout_warnings
-            --build_metadata=REPO_URL=https://github.com/openai/codex.git
+            --build_metadata=REPO_URL=https://github.com/${{ github.repository }}.git
             --build_metadata=COMMIT_SHA=$(git rev-parse HEAD)
             --build_metadata=ROLE=CI
             --build_metadata=VISIBILITY=PUBLIC
