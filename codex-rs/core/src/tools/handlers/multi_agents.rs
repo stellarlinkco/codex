@@ -3316,10 +3316,7 @@ mod tests {
             .config_snapshot()
             .await;
         assert_eq!(snapshot.model, expected_model);
-        assert_eq!(
-            snapshot.reasoning_effort,
-            Some(codex_protocol::openai_models::ReasoningEffort::High)
-        );
+        assert_eq!(snapshot.reasoning_effort, None);
         assert_eq!(snapshot.approval_policy, AskForApproval::Never);
     }
 

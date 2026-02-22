@@ -2262,10 +2262,7 @@ async fn reasoning_selection_in_plan_mode_matching_plan_effort_but_different_glo
     let event = rx.try_recv().expect("expected AppEvent");
     assert_matches!(
         event,
-        AppEvent::OpenPlanReasoningScopePrompt {
-            model,
-            effort: Some(ReasoningEffortConfig::Medium)
-        } if model == "gpt-5.1-codex-max"
+        AppEvent::UpdateModel(model) if model == "gpt-5.1-codex-max"
     );
 }
 
@@ -2385,7 +2382,7 @@ async fn plan_reasoning_scope_popup_mentions_built_in_plan_default_when_no_overr
     );
 
     let popup = render_bottom_popup(&chat, 100);
-    assert!(popup.contains("built-in Plan default (medium)"));
+    assert!(popup.contains("built-in Plan default (no reasoning)"));
 }
 
 #[tokio::test]
@@ -3916,7 +3913,7 @@ async fn mode_switch_surfaces_model_change_notification_when_effective_model_cha
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        plan_messages.contains("Model changed to gpt-5.1-codex-mini medium for Plan mode."),
+        plan_messages.contains("Model changed to gpt-5.1-codex-mini default for Plan mode."),
         "expected Plan-mode model switch notice, got: {plan_messages:?}"
     );
 
@@ -3953,8 +3950,8 @@ async fn mode_switch_surfaces_reasoning_change_notification_when_model_stays_sam
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        plan_messages.contains("Model changed to gpt-5.3-codex medium for Plan mode."),
-        "expected reasoning-change notice in Plan mode, got: {plan_messages:?}"
+        plan_messages.is_empty(),
+        "expected no model-change notice in Plan mode, got: {plan_messages:?}"
     );
 }
 
@@ -4196,10 +4193,7 @@ async fn set_reasoning_effort_updates_active_collaboration_mask() {
 
     chat.set_reasoning_effort(None);
 
-    assert_eq!(
-        chat.current_reasoning_effort(),
-        Some(ReasoningEffortConfig::Medium)
-    );
+    assert_eq!(chat.current_reasoning_effort(), None);
     assert_eq!(chat.active_collaboration_mode_kind(), ModeKind::Plan);
 }
 
