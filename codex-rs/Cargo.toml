@@ -37,6 +37,7 @@ members = [
     "protocol",
     "rmcp-client",
     "responses-api-proxy",
+    "serve",
     "stdio-to-uds",
     "otel",
     "tui",
@@ -115,6 +116,7 @@ codex-secrets = { path = "secrets" }
 codex-shell-command = { path = "shell-command" }
 codex-skills = { path = "skills" }
 codex-state = { path = "state" }
+codex-serve = { path = "serve" }
 codex-stdio-to-uds = { path = "stdio-to-uds" }
 codex-tui = { path = "tui" }
 codex-utils-absolute-path = { path = "utils/absolute-path" }

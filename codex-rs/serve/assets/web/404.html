@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="en">
+    <head>
+        <meta charset="UTF-8" />
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1, minimum-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover, interactive-widget=resizes-content"
+        />
+
+        <!-- PWA Meta Tags -->
+        <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+        <meta name="theme-color" content="#1c1c1e" media="(prefers-color-scheme: dark)" />
+        <meta name="description" content="AI-powered development assistant" />
+
+        <!-- iOS PWA Meta Tags -->
+        <meta name="apple-mobile-web-app-capable" content="yes" />
+        <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+        <meta name="apple-mobile-web-app-title" content="Codex" />
+        <link rel="apple-touch-icon" href="/apple-touch-icon-180x180.png" />
+
+        <!-- Favicon -->
+        <link rel="icon" href="/favicon.ico" sizes="48x48" />
+        <link rel="icon" href="/icon.svg" sizes="any" type="image/svg+xml" />
+
+        <!-- Safari Pinned Tab -->
+        <link rel="mask-icon" href="/mask-icon.svg" color="#111827" />
+
+        <!-- Prevent flash of white background on dark mode -->
+        <style>
+            html { background: #fff }
+            @media (prefers-color-scheme: dark) {
+                html { background: #1c1c1e; color-scheme: dark }
+            }
+        </style>
+        <script>
+            (function () {
+                try {
+                    var raw = localStorage.getItem('codex-font-scale')
+                    var scale = Number(raw)
+                    if (scale === 0.8 || scale === 0.9 || scale === 1 || scale === 1.1 || scale === 1.2) {
+                        document.documentElement.style.setProperty('--app-font-scale', String(scale))
+                    }
+                } catch (error) {
+                    // Ignore storage errors.
+                }
+            })()
+        </script>
+        <script>
+            if (window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches) {
+                document.documentElement.setAttribute('data-theme', 'dark')
+            }
+        </script>
+
+        <title>Codex</title>
+      <script type="module" crossorigin src="/assets/index-DkRV2JY0.js"></script>
+      <link rel="stylesheet" crossorigin href="/assets/index-BNv9D0af.css">
+    </head>
+    <body>
+        <div id="root"></div>
+    </body>
+</html>

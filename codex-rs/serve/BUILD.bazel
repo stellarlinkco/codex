@@ -1,0 +1,14 @@
+load("//:defs.bzl", "codex_rust_crate")
+
+codex_rust_crate(
+    name = "serve",
+    crate_name = "codex_serve",
+    compile_data = glob(["assets/web/**"]),
+    # Some compile-time includes (e.g., include_dir) rely on `CARGO_MANIFEST_DIR`.
+    rustc_env = select({
+        "@platforms//os:linux": {
+            "CARGO_MANIFEST_DIR": "/proc/self/cwd/codex-rs/serve",
+        },
+        "//conditions:default": {},
+    }),
+)

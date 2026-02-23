@@ -22,6 +22,8 @@ const COLLAB_PROMPT_PREVIEW_GRAPHEMES: usize = 160;
 const COLLAB_AGENT_ERROR_PREVIEW_GRAPHEMES: usize = 160;
 const COLLAB_AGENT_RESPONSE_PREVIEW_GRAPHEMES: usize = 240;
 
+const TEAM_SPAWN_CALL_PREFIX: &str = "team/spawn:";
+
 #[derive(Clone, Copy)]
 struct AgentLabel<'a> {
     thread_id: Option<ThreadId>,
@@ -117,14 +119,19 @@ pub(crate) fn waiting_begin(ev: CollabWaitingBeginEvent) -> PlainHistoryCell {
 
 pub(crate) fn waiting_end(ev: CollabWaitingEndEvent) -> PlainHistoryCell {
     let CollabWaitingEndEvent {
-        call_id: _,
+        call_id,
         sender_thread_id: _,
         agent_statuses,
         receiver_names,
         statuses,
     } = ev;
     let details = wait_complete_lines(&statuses, &agent_statuses, &receiver_names);
-    collab_event(title_text("Finished waiting"), details)
+    let title = if call_id.starts_with(TEAM_SPAWN_CALL_PREFIX) {
+        title_text("Created agent team")
+    } else {
+        title_text("Finished waiting")
+    };
+    collab_event(title, details)
 }
 
 pub(crate) fn close_end(ev: CollabCloseEndEvent) -> PlainHistoryCell {
@@ -568,6 +575,29 @@ mod tests {
 
         assert!(text.contains("planner [develop]: Completed"));
         assert_eq!(text.contains(&planner_id_text), false);
+    }
+
+    #[test]
+    fn waiting_end_team_spawn_title() {
+        let sender_thread_id = ThreadId::from_string("00000000-0000-0000-0000-000000000001")
+            .expect("valid sender thread id");
+        let member_id = ThreadId::from_string("00000000-0000-0000-0000-000000000002")
+            .expect("valid member thread id");
+
+        let mut statuses = HashMap::new();
+        statuses.insert(member_id, AgentStatus::Completed(None));
+        let mut receiver_names = HashMap::new();
+        receiver_names.insert(member_id, "planner [develop]".to_string());
+
+        let cell = waiting_end(CollabWaitingEndEvent {
+            sender_thread_id,
+            call_id: "team/spawn:call-spawn-team".to_string(),
+            agent_statuses: Vec::new(),
+            receiver_names,
+            statuses,
+        });
+        let text = cell_to_text(&cell);
+        assert_snapshot!("collab_team_spawn_end", text);
     }
 
     fn cell_to_text(cell: &PlainHistoryCell) -> String {
