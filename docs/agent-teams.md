@@ -41,6 +41,10 @@ When `spawn_team` succeeds, Codex persists:
 
 - Team config: `$CODEX_HOME/teams/<team_id>/config.json`
 - Initial tasks: `$CODEX_HOME/tasks/<team_id>/*.json`
+- Durable inbox (per thread): `$CODEX_HOME/teams/<team_id>/inbox/<thread_id>.jsonl`
+- Durable inbox cursor: `$CODEX_HOME/teams/<team_id>/inbox/<thread_id>.cursor.json`
+- Durable inbox lock: `$CODEX_HOME/teams/<team_id>/inbox/<thread_id>.lock`
+- Tasks lock: `$CODEX_HOME/tasks/<team_id>/tasks.lock`
 
 Team config is updated after partial `close_team`. Team config/tasks are removed after full close/cleanup.
 
@@ -62,8 +66,16 @@ Typical flow:
 
 - `team_message`: send input to one member by `member_name`.
 - `team_broadcast`: send one message/items payload to all team members.
+- `team_ask_lead`: allow a member thread to ask the lead a question.
+- `team_inbox_pop`: pop messages from the caller's inbox (cursor-based).
+- `team_inbox_ack`: acknowledge popped messages using `ack_token`.
 
-Both accept either `message` or `items` (not both), and optional `interrupt`.
+`team_message`, `team_broadcast`, and `team_ask_lead` are durable-first:
+
+1. Append the payload to the receiver's inbox JSONL.
+2. Best-effort live delivery via agent_control (delivery errors do not drop the persisted message).
+
+These tools accept either `message` or `items` (not both), and optional `interrupt`.
 
 ## End-to-end JSON example (`spawn_team` -> `team_cleanup`)
 
