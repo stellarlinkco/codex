@@ -2270,6 +2270,11 @@ mod close_team {
                 .await;
             let close_result =
                 if matches!(status_before, AgentStatus::Shutdown | AgentStatus::NotFound) {
+                    let _ = session
+                        .services
+                        .agent_control
+                        .shutdown_agent(member.agent_id)
+                        .await;
                     Ok(String::new())
                 } else {
                     session
@@ -2888,6 +2893,11 @@ mod team_cleanup {
                 .await;
             let close_result =
                 if matches!(status_before, AgentStatus::Shutdown | AgentStatus::NotFound) {
+                    let _ = session
+                        .services
+                        .agent_control
+                        .shutdown_agent(member.agent_id)
+                        .await;
                     Ok(String::new())
                 } else {
                     session
@@ -3026,36 +3036,13 @@ pub mod close_agent {
             .await
         {
             Ok(mut status_rx) => status_rx.borrow_and_update().clone(),
-            Err(err) => {
-                let status = session.services.agent_control.get_status(agent_id).await;
-                session
-                    .send_event(
-                        &turn,
-                        CollabCloseEndEvent {
-                            call_id: call_id.clone(),
-                            sender_thread_id: session.conversation_id,
-                            receiver_thread_id: agent_id,
-                            receiver_agent_nickname: None,
-                            receiver_agent_role: None,
-                            status,
-                        }
-                        .into(),
-                    )
-                    .await;
-                return Err(collab_agent_error(agent_id, err));
-            }
+            Err(_) => session.services.agent_control.get_status(agent_id).await,
         };
-        let result = if !matches!(status, AgentStatus::Shutdown) {
-            session
-                .services
-                .agent_control
-                .shutdown_agent(agent_id)
-                .await
-                .map_err(|err| collab_agent_error(agent_id, err))
-                .map(|_| ())
-        } else {
-            Ok(())
-        };
+        let result = session
+            .services
+            .agent_control
+            .shutdown_agent(agent_id)
+            .await;
         session
             .send_event(
                 &turn,
@@ -3070,7 +3057,14 @@ pub mod close_agent {
                 .into(),
             )
             .await;
-        result?;
+        match result {
+            Ok(_) => {}
+            Err(err) => {
+                if !matches!(status, AgentStatus::Shutdown | AgentStatus::NotFound) {
+                    return Err(collab_agent_error(agent_id, err));
+                }
+            }
+        }
         if let Err(err) = cleanup_agent_worktree(session.as_ref(), turn.as_ref(), agent_id).await {
             return Err(FunctionCallError::RespondToModel(err));
         }
@@ -3844,6 +3838,123 @@ mod tests {
             list_worktree_paths(codex_home.as_path(), lead_thread_id).is_empty(),
             true
         );
+    }
+
+    #[tokio::test]
+    async fn close_agent_releases_slot_for_already_shutdown_agent() {
+        #[derive(Debug, Deserialize)]
+        struct SpawnAgentResult {
+            agent_id: String,
+        }
+
+        let (mut session, mut turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let mut config = (*turn.config).clone();
+        config.agent_max_threads = Some(1);
+        turn.config = Arc::new(config);
+
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        let spawn_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({"message": "hello"})),
+        );
+        let spawn_output = MultiAgentHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("spawn_agent should succeed");
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(spawn_content),
+            success: spawn_success,
+            ..
+        } = spawn_output
+        else {
+            panic!("expected function output");
+        };
+        assert_eq!(spawn_success, Some(true));
+        let spawn_result: SpawnAgentResult =
+            serde_json::from_str(&spawn_content).expect("spawn_agent result should be json");
+        let agent_thread_id = agent_id(&spawn_result.agent_id).expect("valid agent id");
+
+        let thread = manager
+            .get_thread(agent_thread_id)
+            .await
+            .expect("spawned agent should exist");
+        let _ = thread
+            .submit(Op::Shutdown {})
+            .await
+            .expect("shutdown should submit");
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    manager.agent_control().get_status(agent_thread_id).await,
+                    AgentStatus::Shutdown
+                ) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("agent should reach shutdown");
+
+        let blocked_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_agent",
+            function_payload(json!({"message": "blocked"})),
+        );
+        let Err(err) = MultiAgentHandler.handle(blocked_invocation).await else {
+            panic!("spawn_agent should fail when max threads already reached");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "collab spawn failed: agent thread limit reached (max 1)".to_string()
+            )
+        );
+
+        let close_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "close_agent",
+            function_payload(json!({"id": spawn_result.agent_id})),
+        );
+        MultiAgentHandler
+            .handle(close_invocation)
+            .await
+            .expect("close_agent should succeed");
+
+        let unblocked_invocation = invocation(
+            session,
+            turn,
+            "spawn_agent",
+            function_payload(json!({"message": "unblocked"})),
+        );
+        let unblocked_output = MultiAgentHandler
+            .handle(unblocked_invocation)
+            .await
+            .expect("spawn_agent should succeed after close_agent releases slot");
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(unblocked_content),
+            success: unblocked_success,
+            ..
+        } = unblocked_output
+        else {
+            panic!("expected function output");
+        };
+        assert_eq!(unblocked_success, Some(true));
+        let unblocked_result: SpawnAgentResult =
+            serde_json::from_str(&unblocked_content).expect("spawn_agent result should be json");
+        let unblocked_thread_id = agent_id(&unblocked_result.agent_id).expect("valid agent id");
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(unblocked_thread_id)
+            .await;
     }
 
     #[tokio::test]
