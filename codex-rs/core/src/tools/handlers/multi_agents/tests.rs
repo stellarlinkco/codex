@@ -3454,6 +3454,7 @@ async fn team_message_persists_inbox_when_delivery_fails() {
     let message_result: TeamMessageDurableResult =
         serde_json::from_str(&message_content).expect("team_message result should be json");
     assert_eq!(message_result.member_name, "planner".to_string());
+    assert_eq!(message_result.agent_id, member_id.to_string());
     assert_eq!(message_result.delivered, false);
     assert_eq!(message_result.submission_id.is_empty(), true);
     assert_eq!(message_result.inbox_entry_id.is_empty(), false);
@@ -3543,6 +3544,11 @@ async fn team_ask_lead_persists_and_lead_can_pop_and_ack() {
         serde_json::from_str(&ask_content).expect("team_ask_lead result should be json");
     assert_eq!(ask_result.team_id.is_empty(), false);
     assert_eq!(ask_result.lead_thread_id, lead_thread_id.to_string());
+    if ask_result.delivered {
+        assert_eq!(ask_result.submission_id.is_empty(), false);
+    } else {
+        assert_eq!(ask_result.submission_id.is_empty(), true);
+    }
     assert_eq!(ask_result.inbox_entry_id.is_empty(), false);
     assert_eq!(ask_result.error.is_none(), ask_result.delivered);
 
@@ -3575,6 +3581,12 @@ async fn team_ask_lead_persists_and_lead_can_pop_and_ack() {
     assert_eq!(pop_result.messages.is_empty(), false);
     assert_eq!(pop_result.ack_token.is_empty(), false);
     assert_eq!(pop_result.messages[0].from_name, Some("worker".to_string()));
+    let message = &pop_result.messages[0];
+    assert_eq!(message.id.is_empty(), false);
+    assert_eq!(message.created_at > 0, true);
+    assert_eq!(message.from_thread_id, member_id.to_string());
+    assert_eq!(message.input_items.is_empty(), false);
+    assert_eq!(message.prompt.is_empty(), false);
 
     let ack_output = MultiAgentHandler
         .handle(invocation(
@@ -3598,6 +3610,7 @@ async fn team_ask_lead_persists_and_lead_can_pop_and_ack() {
     let ack_result: TeamInboxAckResult =
         serde_json::from_str(&ack_content).expect("team_inbox_ack result should be json");
     assert_eq!(ack_result.acked, true);
+    assert_eq!(ack_result.thread_id, lead_thread_id.to_string());
 
     let pop_again_output = MultiAgentHandler
         .handle(invocation(

@@ -128,8 +128,9 @@ pub(super) async fn append_inbox_entry(
         prompt: prompt.to_string(),
     };
 
-    let serialized = serde_json::to_string(&entry)
+    let mut serialized = serde_json::to_string(&entry)
         .map_err(|err| inbox_error("serialize", team_id, receiver_thread_id, err))?;
+    serialized.push('\n');
     let mut file = tokio::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -137,9 +138,6 @@ pub(super) async fn append_inbox_entry(
         .await
         .map_err(|err| inbox_error("open", team_id, receiver_thread_id, err))?;
     file.write_all(serialized.as_bytes())
-        .await
-        .map_err(|err| inbox_error("append", team_id, receiver_thread_id, err))?;
-    file.write_all(b"\n")
         .await
         .map_err(|err| inbox_error("append", team_id, receiver_thread_id, err))?;
 

@@ -144,9 +144,7 @@ fn parse_skill_scoped_hooks(
     contents: &str,
     warnings: &mut Vec<String>,
 ) -> Option<CommandHooksConfig> {
-    let Some(frontmatter) = extract_frontmatter(contents) else {
-        return None;
-    };
+    let frontmatter = extract_frontmatter(contents)?;
 
     let parsed: SkillFrontmatterHooks = match serde_yaml::from_str(&frontmatter) {
         Ok(parsed) => parsed,
@@ -159,9 +157,7 @@ fn parse_skill_scoped_hooks(
             return None;
         }
     };
-    let Some(event_hooks) = parsed.hooks else {
-        return None;
-    };
+    let event_hooks = parsed.hooks?;
 
     let mut hooks = CommandHooksConfig::default();
     for (event_name, matcher_groups) in event_hooks {

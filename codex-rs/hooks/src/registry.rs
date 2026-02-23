@@ -461,7 +461,7 @@ impl Hooks {
         let mut guard = self
             .scoped_hooks
             .lock()
-            .expect("scoped_hooks mutex poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.insert(scope_id, scoped);
     }
 
@@ -469,7 +469,7 @@ impl Hooks {
         let mut guard = self
             .scoped_hooks
             .lock()
-            .expect("scoped_hooks mutex poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.remove(scope_id);
     }
 
@@ -510,7 +510,7 @@ impl Hooks {
         let guard = self
             .scoped_hooks
             .lock()
-            .expect("scoped_hooks mutex poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut entries = guard.iter().collect::<Vec<_>>();
         entries.sort_by_key(|(scope_id, _)| scope_id.as_str());
 
@@ -718,14 +718,11 @@ fn hook_from_config(
             )
         }
         HookHandlerType::Prompt => {
-            let Some(prompt) = config
+            let prompt = config
                 .prompt
                 .as_deref()
                 .map(str::trim)
-                .filter(|p| !p.is_empty())
-            else {
-                return None;
-            };
+                .filter(|p| !p.is_empty())?;
             if !event_key.supports_prompt_and_agent_hooks() {
                 (
                     HookHandler::Command {
@@ -748,14 +745,11 @@ fn hook_from_config(
             }
         }
         HookHandlerType::Agent => {
-            let Some(prompt) = config
+            let prompt = config
                 .prompt
                 .as_deref()
                 .map(str::trim)
-                .filter(|p| !p.is_empty())
-            else {
-                return None;
-            };
+                .filter(|p| !p.is_empty())?;
             if !event_key.supports_prompt_and_agent_hooks() {
                 (
                     HookHandler::Command {
