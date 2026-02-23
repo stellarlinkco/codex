@@ -2792,6 +2792,10 @@ impl CodexMessageProcessor {
         self.thread_state_manager
             .remove_connection(connection_id)
             .await;
+        self.fuzzy_search_sessions
+            .lock()
+            .await
+            .retain(|_, session| session.owner_connection_id != connection_id);
     }
 
     /// Best-effort: ensure initialized connections are subscribed to this thread.
@@ -6066,8 +6070,12 @@ impl CodexMessageProcessor {
             return;
         }
 
-        let session =
-            start_fuzzy_file_search_session(session_id.clone(), roots, self.outgoing.clone());
+        let session = start_fuzzy_file_search_session(
+            session_id.clone(),
+            roots,
+            self.outgoing.clone(),
+            request_id.connection_id,
+        );
         match session {
             Ok(session) => {
                 let mut sessions = self.fuzzy_search_sessions.lock().await;

@@ -12,6 +12,7 @@ use codex_app_server_protocol::ServerNotification;
 use codex_file_search as file_search;
 use tracing::warn;
 
+use crate::outgoing_message::ConnectionId;
 use crate::outgoing_message::OutgoingMessageSender;
 
 const MATCH_LIMIT: usize = 50;
@@ -86,6 +87,7 @@ pub(crate) async fn run_fuzzy_file_search(
 }
 
 pub(crate) struct FuzzyFileSearchSession {
+    pub(crate) owner_connection_id: ConnectionId,
     session: file_search::FileSearchSession,
     shared: Arc<SessionShared>,
 }
@@ -114,6 +116,7 @@ pub(crate) fn start_fuzzy_file_search_session(
     session_id: String,
     roots: Vec<String>,
     outgoing: Arc<OutgoingMessageSender>,
+    owner_connection_id: ConnectionId,
 ) -> anyhow::Result<FuzzyFileSearchSession> {
     #[expect(clippy::expect_used)]
     let limit = NonZero::new(MATCH_LIMIT).expect("MATCH_LIMIT should be a valid non-zero usize");
@@ -149,7 +152,11 @@ pub(crate) fn start_fuzzy_file_search_session(
         Some(canceled),
     )?;
 
-    Ok(FuzzyFileSearchSession { session, shared })
+    Ok(FuzzyFileSearchSession {
+        owner_connection_id,
+        session,
+        shared,
+    })
 }
 
 struct SessionShared {
@@ -244,4 +251,49 @@ fn collect_files(snapshot: &file_search::FileSearchSnapshot) -> Vec<FuzzyFileSea
         _,
     >(|f| f.score, |f| f.path.as_str()));
     files
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use pretty_assertions::assert_eq;
+    use std::collections::HashMap;
+    use tempfile::tempdir;
+    use tokio::sync::mpsc;
+
+    use crate::outgoing_message::OutgoingEnvelope;
+
+    #[tokio::test]
+    async fn fuzzy_file_search_sessions_can_be_cleaned_up_by_connection_id() -> anyhow::Result<()> {
+        let temp_dir = tempdir()?;
+        std::fs::write(temp_dir.path().join("a.txt"), "test")?;
+
+        let roots = vec![temp_dir.path().to_string_lossy().to_string()];
+        let (tx, mut rx) = mpsc::channel::<OutgoingEnvelope>(128);
+        let outgoing = Arc::new(OutgoingMessageSender::new(tx));
+        tokio::spawn(async move { while rx.recv().await.is_some() {} });
+
+        let session_a = start_fuzzy_file_search_session(
+            "sess-a".to_string(),
+            roots.clone(),
+            Arc::clone(&outgoing),
+            ConnectionId(1),
+        )?;
+        let session_b = start_fuzzy_file_search_session(
+            "sess-b".to_string(),
+            roots,
+            outgoing,
+            ConnectionId(2),
+        )?;
+
+        let mut sessions = HashMap::new();
+        sessions.insert("sess-a".to_string(), session_a);
+        sessions.insert("sess-b".to_string(), session_b);
+
+        sessions.retain(|_, session| session.owner_connection_id != ConnectionId(1));
+
+        assert_eq!(sessions.len(), 1);
+        assert!(sessions.contains_key("sess-b"));
+        Ok(())
+    }
 }
