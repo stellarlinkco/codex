@@ -55,7 +55,7 @@ and are labeled as connected; others are marked as can be installed.
 
 ## Hooks
 
-Codex can run command hooks at lifecycle boundaries such as `session_start`, `session_end`, `user_prompt_submit`, `pre_tool_use`, `permission_request`, `post_tool_use`, `post_tool_use_failure`, `stop`, `subagent_stop`, and `pre_compact`.
+Codex can run hooks at lifecycle boundaries such as `session_start`, `session_end`, `user_prompt_submit`, `pre_tool_use`, `permission_request`, `notification`, `post_tool_use`, `post_tool_use_failure`, `stop`, `subagent_start`, `subagent_stop`, `teammate_idle`, `task_completed`, `config_change`, and `pre_compact`.
 
 Example:
 
@@ -71,9 +71,9 @@ once = true
 tool_name_regex = "^(shell|exec)$"
 ```
 
-Hooks receive a JSON payload on `stdin`. If the hook exits with code `0`, Codex will attempt to parse a JSON object from `stdout` (either the full output or the first parseable JSON line). Exit code `2` blocks execution for hook events that support blocking; other non-zero exit codes are treated as non-blocking errors.
+Hooks receive a JSON payload on `stdin`. If the hook exits with code `0`, Codex will attempt to parse a JSON object from `stdout` (either the full output or the first parseable JSON line). Exit code `2` blocks execution for hook events that support blocking; other non-zero exit codes are treated as non-blocking errors. All matching hooks run in parallel and identical handlers are deduplicated.
 
-`command` can be either an argv list (`["python3", "..."]`) or a shell command string (`"python3 ..."`). Matchers can filter by `tool_name`, `tool_name_regex`, or `prompt_regex`.
+`command` can be either an argv list (`["python3", "..."]`) or a shell command string (`"python3 ..."`). Matchers can filter by `matcher`, and tool events can also filter by `tool_name` / `tool_name_regex`.
 
 See `docs/hooks.md` for hook payload fields and `stdout` response options.
 

@@ -673,6 +673,14 @@ mod spawn {
             .await;
         let new_thread_id = result?;
 
+        dispatch_subagent_start_hook(
+            session.as_ref(),
+            turn.as_ref(),
+            new_thread_id,
+            role_name.unwrap_or("default"),
+        )
+        .await;
+
         let content = serde_json::to_string(&SpawnAgentResult {
             agent_id: new_thread_id.to_string(),
         })
@@ -1308,6 +1316,152 @@ fn git_error_text(output: &Output) -> String {
     format!("git exited with status {}", output.status)
 }
 
+async fn dispatch_subagent_start_hook(
+    session: &Session,
+    turn: &TurnContext,
+    agent_id: ThreadId,
+    agent_type: &str,
+) {
+    let outcomes = session
+        .hooks()
+        .dispatch(HookPayload {
+            session_id: session.conversation_id,
+            transcript_path: session.transcript_path().await,
+            cwd: turn.cwd.clone(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy).to_string(),
+            hook_event: HookEvent::SubagentStart {
+                agent_id: agent_id.to_string(),
+                agent_type: agent_type.to_string(),
+            },
+        })
+        .await;
+
+    let mut additional_context = Vec::new();
+    for outcome in outcomes {
+        let hook_name = outcome.hook_name;
+        let result = outcome.result;
+
+        if let Some(error) = result.error.as_deref() {
+            warn!(
+                hook_name = %hook_name,
+                error,
+                "subagent_start hook failed; continuing"
+            );
+        }
+
+        if let HookResultControl::Block { reason } = result.control {
+            warn!(
+                hook_name = %hook_name,
+                reason,
+                "subagent_start hook returned a blocking decision; ignoring"
+            );
+        }
+
+        additional_context.extend(result.additional_context);
+    }
+
+    session.record_hook_context(turn, &additional_context).await;
+}
+
+async fn dispatch_teammate_idle_hook(
+    session: &Session,
+    turn: &TurnContext,
+    team_id: &str,
+    teammate_name: &str,
+) -> Option<String> {
+    let outcomes = session
+        .hooks()
+        .dispatch(HookPayload {
+            session_id: session.conversation_id,
+            transcript_path: session.transcript_path().await,
+            cwd: turn.cwd.clone(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy).to_string(),
+            hook_event: HookEvent::TeammateIdle {
+                teammate_name: teammate_name.to_string(),
+                team_name: team_id.to_string(),
+            },
+        })
+        .await;
+
+    let mut additional_context = Vec::new();
+    let mut blocked = None;
+    for outcome in outcomes {
+        let hook_name = outcome.hook_name;
+        let result = outcome.result;
+
+        if let Some(error) = result.error.as_deref() {
+            warn!(
+                hook_name = %hook_name,
+                error,
+                "teammate_idle hook failed; continuing"
+            );
+        }
+
+        if blocked.is_none()
+            && let HookResultControl::Block { reason } = result.control
+        {
+            blocked = Some((hook_name, reason));
+        }
+
+        additional_context.extend(result.additional_context);
+    }
+
+    session.record_hook_context(turn, &additional_context).await;
+    blocked.map(|(hook_name, reason)| format!("teammate_idle hook '{hook_name}' blocked: {reason}"))
+}
+
+async fn dispatch_task_completed_hook(
+    session: &Session,
+    turn: &TurnContext,
+    team_id: &str,
+    task_id: &str,
+    task_subject: &str,
+    teammate_name: Option<&str>,
+) -> Option<String> {
+    let outcomes = session
+        .hooks()
+        .dispatch(HookPayload {
+            session_id: session.conversation_id,
+            transcript_path: session.transcript_path().await,
+            cwd: turn.cwd.clone(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy).to_string(),
+            hook_event: HookEvent::TaskCompleted {
+                task_id: task_id.to_string(),
+                task_subject: task_subject.to_string(),
+                task_description: None,
+                teammate_name: teammate_name.map(std::string::ToString::to_string),
+                team_name: Some(team_id.to_string()),
+            },
+        })
+        .await;
+
+    let mut additional_context = Vec::new();
+    let mut blocked = None;
+    for outcome in outcomes {
+        let hook_name = outcome.hook_name;
+        let result = outcome.result;
+
+        if let Some(error) = result.error.as_deref() {
+            warn!(
+                hook_name = %hook_name,
+                error,
+                "task_completed hook failed; continuing"
+            );
+        }
+
+        if blocked.is_none()
+            && let HookResultControl::Block { reason } = result.control
+        {
+            blocked = Some((hook_name, reason));
+        }
+
+        additional_context.extend(result.additional_context);
+    }
+
+    session.record_hook_context(turn, &additional_context).await;
+    blocked.map(|(hook_name, reason)| format!("task_completed hook '{hook_name}' blocked: {reason}"))
+}
+
 async fn dispatch_worktree_hook(
     session: &Session,
     turn: &TurnContext,
@@ -1693,6 +1847,14 @@ mod spawn_team {
                 agent_id,
                 agent_type: member.agent_type.clone(),
             });
+
+            dispatch_subagent_start_hook(
+                session.as_ref(),
+                turn.as_ref(),
+                agent_id,
+                role_name.unwrap_or("default"),
+            )
+            .await;
         }
         let team_record = TeamRecord {
             members: spawned_members.clone(),
@@ -1919,6 +2081,29 @@ mod wait_team {
                 .into(),
             )
             .await;
+
+        for (agent_id, state) in &wait_result.statuses {
+            if !crate::agent::status::is_final(state) {
+                continue;
+            }
+            let Some(member) = team
+                .members
+                .iter()
+                .find(|candidate| candidate.agent_id == *agent_id)
+            else {
+                continue;
+            };
+            if let Some(err) = dispatch_teammate_idle_hook(
+                session.as_ref(),
+                turn.as_ref(),
+                &team_id,
+                &member.name,
+            )
+            .await
+            {
+                return Err(FunctionCallError::RespondToModel(err));
+            }
+        }
 
         let mut member_statuses = Vec::with_capacity(team.members.len());
         for member in &team.members {
@@ -2450,6 +2635,19 @@ mod team_task_complete {
                 "task `{}` is already completed",
                 task.id
             )));
+        }
+
+        if let Some(err) = dispatch_task_completed_hook(
+            session.as_ref(),
+            turn.as_ref(),
+            &team_id,
+            &task.id,
+            &task.title,
+            Some(&task.assignee.name),
+        )
+        .await
+        {
+            return Err(FunctionCallError::RespondToModel(err));
         }
 
         task.state = PersistedTaskState::Completed;
@@ -3050,6 +3248,10 @@ mod tests {
     use crate::protocol::SessionSource;
     use crate::protocol::SubAgentSource;
     use crate::turn_diff_tracker::TurnDiffTracker;
+    use codex_hooks::CommandHookConfig;
+    use codex_hooks::CommandHooksConfig;
+    use codex_hooks::Hooks;
+    use codex_hooks::HooksConfig;
     use codex_protocol::ThreadId;
     use codex_protocol::models::ContentItem;
     use codex_protocol::models::ResponseItem;
@@ -3445,6 +3647,71 @@ mod tests {
         let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
         let status = manager.agent_control().get_status(agent_id).await;
         assert_ne!(status, AgentStatus::NotFound);
+
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(agent_id)
+            .await
+            .expect("shutdown spawned agent");
+    }
+
+    #[tokio::test]
+    async fn spawn_agent_dispatches_subagent_start_hook() {
+        #[derive(Debug, Deserialize)]
+        struct SpawnAgentResult {
+            agent_id: String,
+        }
+
+        let (mut session, mut turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let cwd = tempfile::tempdir().expect("temp dir");
+        turn.cwd = cwd.path().to_path_buf();
+
+        let marker_path = turn.config.codex_home.join("subagent_start.log");
+        let script = r#"import sys, json; data=json.load(sys.stdin); open(sys.argv[1], "a").write(data["hook_event_name"] + "\n")"#;
+        session.services.hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                subagent_start: vec![CommandHookConfig {
+                    command: vec![
+                        "python3".to_string(),
+                        "-c".to_string(),
+                        script.to_string(),
+                        marker_path.to_string_lossy().into_owned(),
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+
+        let invocation = invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo"
+            })),
+        );
+        let output = MultiAgentHandler
+            .handle(invocation)
+            .await
+            .expect("spawn_agent should succeed");
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(content),
+            ..
+        } = output
+        else {
+            panic!("expected function output");
+        };
+        let result: SpawnAgentResult =
+            serde_json::from_str(&content).expect("spawn_agent result should be json");
+        let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
+
+        let hook_events = tokio::fs::read_to_string(&marker_path)
+            .await
+            .expect("subagent_start hook should write marker");
+        assert_eq!(hook_events.trim(), "SubagentStart");
 
         let _ = manager
             .agent_control()
