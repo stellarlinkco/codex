@@ -1350,6 +1350,123 @@ async fn close_agent_submits_shutdown_and_returns_status() {
     assert_eq!(status_after, AgentStatus::NotFound);
 }
 
+#[tokio::test]
+async fn close_agent_releases_slot_for_already_shutdown_agent() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let mut config = (*turn.config).clone();
+    config.agent_max_threads = Some(1);
+    turn.config = Arc::new(config);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let spawn_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_agent",
+        function_payload(json!({"message": "hello"})),
+    );
+    let spawn_output = MultiAgentHandler
+        .handle(spawn_invocation)
+        .await
+        .expect("spawn_agent should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(spawn_content),
+        success: spawn_success,
+        ..
+    } = spawn_output
+    else {
+        panic!("expected function output");
+    };
+    assert_eq!(spawn_success, Some(true));
+    let spawn_result: SpawnAgentResult =
+        serde_json::from_str(&spawn_content).expect("spawn_agent result should be json");
+    let agent_thread_id = agent_id(&spawn_result.agent_id).expect("valid agent id");
+
+    let thread = manager
+        .get_thread(agent_thread_id)
+        .await
+        .expect("spawned agent should exist");
+    let _ = thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                manager.agent_control().get_status(agent_thread_id).await,
+                AgentStatus::Shutdown
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("agent should reach shutdown");
+
+    let blocked_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_agent",
+        function_payload(json!({"message": "blocked"})),
+    );
+    let Err(err) = MultiAgentHandler.handle(blocked_invocation).await else {
+        panic!("spawn_agent should fail when max threads already reached");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "collab spawn failed: agent thread limit reached (max 1)".to_string()
+        )
+    );
+
+    let close_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "close_agent",
+        function_payload(json!({"id": spawn_result.agent_id})),
+    );
+    MultiAgentHandler
+        .handle(close_invocation)
+        .await
+        .expect("close_agent should succeed");
+
+    let unblocked_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_agent",
+        function_payload(json!({"message": "unblocked"})),
+    );
+    let unblocked_output = MultiAgentHandler
+        .handle(unblocked_invocation)
+        .await
+        .expect("spawn_agent should succeed after close_agent releases slot");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(unblocked_content),
+        success: unblocked_success,
+        ..
+    } = unblocked_output
+    else {
+        panic!("expected function output");
+    };
+    assert_eq!(unblocked_success, Some(true));
+    let unblocked_result: SpawnAgentResult =
+        serde_json::from_str(&unblocked_content).expect("spawn_agent result should be json");
+    let unblocked_thread_id = agent_id(&unblocked_result.agent_id).expect("valid agent id");
+    let _ = manager
+        .agent_control()
+        .shutdown_agent(unblocked_thread_id)
+        .await;
+}
+
 #[derive(Debug, Deserialize)]
 struct SpawnTeamResult {
     team_id: String,
@@ -1527,6 +1644,254 @@ struct TeamCleanupResult {
     removed_team_config: bool,
     removed_task_dir: bool,
     closed: Vec<TeamCleanupMemberResult>,
+}
+
+#[tokio::test]
+async fn close_team_releases_slot_for_already_shutdown_member() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let mut config = (*turn.config).clone();
+    config.agent_max_threads = Some(1);
+    turn.config = Arc::new(config);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let spawn_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_team",
+        function_payload(json!({
+            "members": [
+                {"name": "worker", "task": "work"}
+            ]
+        })),
+    );
+    let spawn_output = MultiAgentHandler
+        .handle(spawn_invocation)
+        .await
+        .expect("spawn_team should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(spawn_content),
+        success: spawn_success,
+        ..
+    } = spawn_output
+    else {
+        panic!("expected function output");
+    };
+    assert_eq!(spawn_success, Some(true));
+    let spawn_result: SpawnTeamResult =
+        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
+    assert_eq!(spawn_result.members.len(), 1);
+    let member_thread_id = agent_id(&spawn_result.members[0].agent_id).expect("valid agent id");
+
+    let thread = manager
+        .get_thread(member_thread_id)
+        .await
+        .expect("spawned member should exist");
+    let _ = thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                manager.agent_control().get_status(member_thread_id).await,
+                AgentStatus::Shutdown
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("member should reach shutdown");
+
+    let blocked_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_agent",
+        function_payload(json!({"message": "blocked"})),
+    );
+    let Err(err) = MultiAgentHandler.handle(blocked_invocation).await else {
+        panic!("spawn_agent should fail when max threads already reached");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "collab spawn failed: agent thread limit reached (max 1)".to_string()
+        )
+    );
+
+    let close_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "close_team",
+        function_payload(json!({
+            "team_id": spawn_result.team_id
+        })),
+    );
+    MultiAgentHandler
+        .handle(close_invocation)
+        .await
+        .expect("close_team should succeed");
+
+    let unblocked_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_agent",
+        function_payload(json!({"message": "unblocked"})),
+    );
+    let unblocked_output = MultiAgentHandler
+        .handle(unblocked_invocation)
+        .await
+        .expect("spawn_agent should succeed after close_team releases slot");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(unblocked_content),
+        success: unblocked_success,
+        ..
+    } = unblocked_output
+    else {
+        panic!("expected function output");
+    };
+    assert_eq!(unblocked_success, Some(true));
+    let unblocked_result: SpawnAgentResult =
+        serde_json::from_str(&unblocked_content).expect("spawn_agent result should be json");
+    let unblocked_thread_id = agent_id(&unblocked_result.agent_id).expect("valid agent id");
+    let _ = manager
+        .agent_control()
+        .shutdown_agent(unblocked_thread_id)
+        .await;
+}
+
+#[tokio::test]
+async fn team_cleanup_releases_slot_for_already_shutdown_member() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let mut config = (*turn.config).clone();
+    config.agent_max_threads = Some(1);
+    turn.config = Arc::new(config);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let spawn_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_team",
+        function_payload(json!({
+            "members": [
+                {"name": "worker", "task": "work"}
+            ]
+        })),
+    );
+    let spawn_output = MultiAgentHandler
+        .handle(spawn_invocation)
+        .await
+        .expect("spawn_team should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(spawn_content),
+        success: spawn_success,
+        ..
+    } = spawn_output
+    else {
+        panic!("expected function output");
+    };
+    assert_eq!(spawn_success, Some(true));
+    let spawn_result: SpawnTeamResult =
+        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
+    assert_eq!(spawn_result.members.len(), 1);
+    let member_thread_id = agent_id(&spawn_result.members[0].agent_id).expect("valid agent id");
+
+    let thread = manager
+        .get_thread(member_thread_id)
+        .await
+        .expect("spawned member should exist");
+    let _ = thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                manager.agent_control().get_status(member_thread_id).await,
+                AgentStatus::Shutdown
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("member should reach shutdown");
+
+    let blocked_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_agent",
+        function_payload(json!({"message": "blocked"})),
+    );
+    let Err(err) = MultiAgentHandler.handle(blocked_invocation).await else {
+        panic!("spawn_agent should fail when max threads already reached");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "collab spawn failed: agent thread limit reached (max 1)".to_string()
+        )
+    );
+
+    let cleanup_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "team_cleanup",
+        function_payload(json!({
+            "team_id": spawn_result.team_id
+        })),
+    );
+    MultiAgentHandler
+        .handle(cleanup_invocation)
+        .await
+        .expect("team_cleanup should succeed");
+
+    let unblocked_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_agent",
+        function_payload(json!({"message": "unblocked"})),
+    );
+    let unblocked_output = MultiAgentHandler
+        .handle(unblocked_invocation)
+        .await
+        .expect("spawn_agent should succeed after team_cleanup releases slot");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(unblocked_content),
+        success: unblocked_success,
+        ..
+    } = unblocked_output
+    else {
+        panic!("expected function output");
+    };
+    assert_eq!(unblocked_success, Some(true));
+    let unblocked_result: SpawnAgentResult =
+        serde_json::from_str(&unblocked_content).expect("spawn_agent result should be json");
+    let unblocked_thread_id = agent_id(&unblocked_result.agent_id).expect("valid agent id");
+    let _ = manager
+        .agent_control()
+        .shutdown_agent(unblocked_thread_id)
+        .await;
 }
 
 #[tokio::test]

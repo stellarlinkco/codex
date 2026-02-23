@@ -106,6 +106,11 @@ pub async fn handle(
             .await;
         let close_result = if matches!(status_before, AgentStatus::Shutdown | AgentStatus::NotFound)
         {
+            let _ = session
+                .services
+                .agent_control
+                .shutdown_agent(member.agent_id)
+                .await;
             Ok(String::new())
         } else {
             session

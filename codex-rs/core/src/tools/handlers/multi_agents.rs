@@ -1345,36 +1345,13 @@ pub mod close_agent {
             .await
         {
             Ok(mut status_rx) => status_rx.borrow_and_update().clone(),
-            Err(err) => {
-                let status = session.services.agent_control.get_status(agent_id).await;
-                session
-                    .send_event(
-                        &turn,
-                        CollabCloseEndEvent {
-                            call_id: call_id.clone(),
-                            sender_thread_id: session.conversation_id,
-                            receiver_thread_id: agent_id,
-                            receiver_agent_nickname: None,
-                            receiver_agent_role: None,
-                            status,
-                        }
-                        .into(),
-                    )
-                    .await;
-                return Err(collab_agent_error(agent_id, err));
-            }
+            Err(_) => session.services.agent_control.get_status(agent_id).await,
         };
-        let result = if !matches!(status, AgentStatus::Shutdown) {
-            session
-                .services
-                .agent_control
-                .shutdown_agent(agent_id)
-                .await
-                .map_err(|err| collab_agent_error(agent_id, err))
-                .map(|_| ())
-        } else {
-            Ok(())
-        };
+        let result = session
+            .services
+            .agent_control
+            .shutdown_agent(agent_id)
+            .await;
         session
             .send_event(
                 &turn,
@@ -1389,7 +1366,14 @@ pub mod close_agent {
                 .into(),
             )
             .await;
-        result?;
+        match result {
+            Ok(_) => {}
+            Err(err) => {
+                if !matches!(status, AgentStatus::Shutdown | AgentStatus::NotFound) {
+                    return Err(collab_agent_error(agent_id, err));
+                }
+            }
+        }
         if let Err(err) = cleanup_agent_worktree(session.as_ref(), turn.as_ref(), agent_id).await {
             return Err(FunctionCallError::RespondToModel(err));
         }
