@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::Mutex as StdMutex;
 
 use portable_pty::MasterPty;
+use portable_pty::PtySize;
 use portable_pty::SlavePty;
 use tokio::sync::broadcast;
 use tokio::sync::mpsc;
@@ -89,6 +90,25 @@ impl ProcessHandle {
     /// Returns a broadcast receiver that yields stdout/stderr chunks.
     pub fn output_receiver(&self) -> broadcast::Receiver<Vec<u8>> {
         self.output_tx.subscribe()
+    }
+
+    /// Resize the PTY.
+    ///
+    /// This is a no-op for non-PTY sessions.
+    pub fn resize(&self, cols: u16, rows: u16) -> anyhow::Result<()> {
+        let mut guard = self
+            ._pty_handles
+            .lock()
+            .map_err(|_| anyhow::anyhow!("pty handles lock poisoned"))?;
+        let Some(handles) = guard.as_mut() else {
+            return Ok(());
+        };
+        handles._master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
     }
 
     /// True if the child process has exited.

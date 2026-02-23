@@ -21,6 +21,7 @@ use codex_exec::Command as ExecCommand;
 use codex_exec::ReviewArgs;
 use codex_execpolicy::ExecPolicyCheckCommand;
 use codex_responses_api_proxy::Args as ResponsesApiProxyArgs;
+use codex_serve::Cli as ServeCli;
 use codex_tui::AppExitInfo;
 use codex_tui::Cli as TuiCli;
 use codex_tui::ExitReason;
@@ -101,6 +102,9 @@ enum Subcommand {
 
     /// [experimental] Run the app server or related tooling.
     AppServer(AppServerCommand),
+
+    /// Start Codex Web UI server (HTTP + SSE).
+    Serve(ServeCli),
 
     /// Launch the Codex desktop app (downloads the macOS installer if missing).
     #[cfg(target_os = "macos")]
@@ -627,6 +631,13 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                 )?;
             }
         },
+        Some(Subcommand::Serve(mut serve_cli)) => {
+            prepend_config_flags(
+                &mut serve_cli.config_overrides,
+                root_config_overrides.clone(),
+            );
+            codex_serve::run_main(serve_cli, codex_linux_sandbox_exe).await?;
+        }
         #[cfg(target_os = "macos")]
         Some(Subcommand::App(app_cli)) => {
             app_cmd::run_app(app_cli).await?;
