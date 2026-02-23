@@ -79,6 +79,7 @@ Options:
 ```
 
 启动输出示例：
+
 ```
 Codex Web UI running at http://127.0.0.1:3847?token=a1b2c3d4
 ```
@@ -106,65 +107,65 @@ Codex Web UI running at http://127.0.0.1:3847?token=a1b2c3d4
 
 ### 5.1 会话管理
 
-| Method | Path | 说明 |
-|--------|------|------|
-| GET | `/api/sessions` | 列出所有会话 |
-| POST | `/api/sessions` | 创建新会话 |
-| GET | `/api/sessions/:id` | 获取会话详情 |
-| PATCH | `/api/sessions/:id` | 重命名会话 |
-| DELETE | `/api/sessions/:id` | 删除会话 |
-| POST | `/api/sessions/:id/resume` | 恢复会话 |
-| POST | `/api/sessions/:id/abort` | 中止会话 |
-| POST | `/api/sessions/:id/archive` | 归档会话 |
+| Method | Path                        | 说明         |
+| ------ | --------------------------- | ------------ |
+| GET    | `/api/sessions`             | 列出所有会话 |
+| POST   | `/api/sessions`             | 创建新会话   |
+| GET    | `/api/sessions/:id`         | 获取会话详情 |
+| PATCH  | `/api/sessions/:id`         | 重命名会话   |
+| DELETE | `/api/sessions/:id`         | 删除会话     |
+| POST   | `/api/sessions/:id/resume`  | 恢复会话     |
+| POST   | `/api/sessions/:id/abort`   | 中止会话     |
+| POST   | `/api/sessions/:id/archive` | 归档会话     |
 
 ### 5.2 消息
 
-| Method | Path | 说明 |
-|--------|------|------|
-| GET | `/api/sessions/:id/messages` | 获取消息（分页） |
-| POST | `/api/sessions/:id/messages` | 发送消息 |
+| Method | Path                         | 说明             |
+| ------ | ---------------------------- | ---------------- |
+| GET    | `/api/sessions/:id/messages` | 获取消息（分页） |
+| POST   | `/api/sessions/:id/messages` | 发送消息         |
 
 Query params for GET: `limit`, `before_seq`
 
 ### 5.3 工具审批
 
-| Method | Path | 说明 |
-|--------|------|------|
-| POST | `/api/sessions/:id/permissions/:reqId/approve` | 批准工具调用 |
-| POST | `/api/sessions/:id/permissions/:reqId/deny` | 拒绝工具调用 |
+| Method | Path                                           | 说明         |
+| ------ | ---------------------------------------------- | ------------ |
+| POST   | `/api/sessions/:id/permissions/:reqId/approve` | 批准工具调用 |
+| POST   | `/api/sessions/:id/permissions/:reqId/deny`    | 拒绝工具调用 |
 
 ### 5.4 配置
 
-| Method | Path | 说明 |
-|--------|------|------|
-| POST | `/api/sessions/:id/permission-mode` | 切换权限模式 |
-| POST | `/api/sessions/:id/model` | 切换模型 |
-| GET | `/api/sessions/:id/slash-commands` | 获取 slash commands |
-| GET | `/api/sessions/:id/skills` | 获取 skills 列表 |
+| Method | Path                                | 说明                |
+| ------ | ----------------------------------- | ------------------- |
+| POST   | `/api/sessions/:id/permission-mode` | 切换权限模式        |
+| POST   | `/api/sessions/:id/model`           | 切换模型            |
+| GET    | `/api/sessions/:id/slash-commands`  | 获取 slash commands |
+| GET    | `/api/sessions/:id/skills`          | 获取 skills 列表    |
 
 ### 5.5 文件与 Git
 
-| Method | Path | 说明 |
-|--------|------|------|
-| GET | `/api/sessions/:id/git-status` | Git 状态 |
-| GET | `/api/sessions/:id/git-diff-file` | 文件 diff |
-| GET | `/api/sessions/:id/file` | 读取文件 |
-| GET | `/api/sessions/:id/files` | 搜索文件 |
-| GET | `/api/sessions/:id/directory` | 列出目录 |
+| Method | Path                              | 说明      |
+| ------ | --------------------------------- | --------- |
+| GET    | `/api/sessions/:id/git-status`    | Git 状态  |
+| GET    | `/api/sessions/:id/git-diff-file` | 文件 diff |
+| GET    | `/api/sessions/:id/file`          | 读取文件  |
+| GET    | `/api/sessions/:id/files`         | 搜索文件  |
+| GET    | `/api/sessions/:id/directory`     | 列出目录  |
 
 ### 5.6 SSE
 
-| Method | Path | 说明 |
-|--------|------|------|
-| GET | `/api/events` | SSE 事件流 |
+| Method | Path          | 说明       |
+| ------ | ------------- | ---------- |
+| GET    | `/api/events` | SSE 事件流 |
 
 Query params: `sessionId`（可选，订阅特定会话）
 
 ### 5.7 静态资源
 
-| Method | Path | 说明 |
-|--------|------|------|
-| GET | `/*` | 前端静态文件（SPA fallback） |
+| Method | Path | 说明                         |
+| ------ | ---- | ---------------------------- |
+| GET    | `/*` | 前端静态文件（SPA fallback） |
 
 ---
 
@@ -318,6 +319,7 @@ pub struct WebMessage {
 ### 复用范围
 
 从 `reference/hapi/web` 直接复用：
+
 - `components/` — 全部 UI 组件
 - `chat/` — 聊天状态管理
 - `hooks/` — React Query hooks
@@ -327,14 +329,14 @@ pub struct WebMessage {
 
 ### 需要适配的部分
 
-| 模块 | 变更 |
-|------|------|
-| `api/client.ts` | 移除 Telegram auth，改用 token auth；baseUrl 指向本地 serve |
-| `hooks/useSSE.ts` | 保持不变（已是标准 EventSource） |
-| `hooks/useAuth.ts` | 简化为 token-based auth |
-| `components/NewSession/` | 移除 machine 选择（本地单机），简化为目录选择 |
-| `realtime/` | 移除（不复用语音功能） |
-| `components/Terminal/` | WebSocket URL 指向本地 serve |
+| 模块                     | 变更                                                        |
+| ------------------------ | ----------------------------------------------------------- |
+| `api/client.ts`          | 移除 Telegram auth，改用 token auth；baseUrl 指向本地 serve |
+| `hooks/useSSE.ts`        | 保持不变（已是标准 EventSource）                            |
+| `hooks/useAuth.ts`       | 简化为 token-based auth                                     |
+| `components/NewSession/` | 移除 machine 选择（本地单机），简化为目录选择               |
+| `realtime/`              | 移除（不复用语音功能）                                      |
+| `components/Terminal/`   | WebSocket URL 指向本地 serve                                |
 
 ### 移除的功能
 
@@ -444,10 +446,10 @@ tracing = "0.1"
 
 ## 15. 风险与缓解
 
-| 风险 | 缓解 |
-|------|------|
-| hapi/web 依赖 Socket.IO，适配 SSE 工作量大 | hapi/web 的 SSE hook 已是标准 EventSource，Socket.IO 仅用于 CLI↔Hub 通信，Web 端不直接使用 |
-| core API 不够稳定，serve 直接依赖可能频繁变更 | 定义 serve 内部的 trait 抽象层，隔离 core 变更 |
-| 前端构建产物体积影响二进制大小 | gzip 压缩嵌入，典型 React SPA 约 1-3MB |
-| SQLite 并发写入限制 | 单进程场景，WAL 模式足够 |
-| 终端 PTY 跨平台兼容性 | 使用 portable-pty crate，已有跨平台支持 |
+| 风险                                          | 缓解                                                                                        |
+| --------------------------------------------- | ------------------------------------------------------------------------------------------- |
+| hapi/web 依赖 Socket.IO，适配 SSE 工作量大    | hapi/web 的 SSE hook 已是标准 EventSource，Socket.IO 仅用于 CLI↔Hub 通信，Web 端不直接使用 |
+| core API 不够稳定，serve 直接依赖可能频繁变更 | 定义 serve 内部的 trait 抽象层，隔离 core 变更                                              |
+| 前端构建产物体积影响二进制大小                | gzip 压缩嵌入，典型 React SPA 约 1-3MB                                                      |
+| SQLite 并发写入限制                           | 单进程场景，WAL 模式足够                                                                    |
+| 终端 PTY 跨平台兼容性                         | 使用 portable-pty crate，已有跨平台支持                                                     |
