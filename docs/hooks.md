@@ -174,6 +174,12 @@ Event payload fields:
 - `WorktreeCreate`: `repo_path`, `worktree_path`
 - `WorktreeRemove`: `repo_path`, `worktree_path`
 
+Notes on when the multi-agent events fire:
+
+- `SubagentStart`: after `spawn_agent` / `spawn_team` returns a new `agent_id`.
+- `TeammateIdle`: after `wait_team` returns a final status for one or more teammates.
+- `TaskCompleted`: when `team_task_complete` is called (and can block completion before it is persisted).
+
 ## Hook output (stdout JSON)
 
 If the hook exits `0`, it may return a JSON object on `stdout`. Codex recognizes these keys:

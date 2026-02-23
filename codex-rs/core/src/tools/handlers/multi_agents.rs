@@ -1459,7 +1459,8 @@ async fn dispatch_task_completed_hook(
     }
 
     session.record_hook_context(turn, &additional_context).await;
-    blocked.map(|(hook_name, reason)| format!("task_completed hook '{hook_name}' blocked: {reason}"))
+    blocked
+        .map(|(hook_name, reason)| format!("task_completed hook '{hook_name}' blocked: {reason}"))
 }
 
 async fn dispatch_worktree_hook(
@@ -2093,13 +2094,9 @@ mod wait_team {
             else {
                 continue;
             };
-            if let Some(err) = dispatch_teammate_idle_hook(
-                session.as_ref(),
-                turn.as_ref(),
-                &team_id,
-                &member.name,
-            )
-            .await
+            if let Some(err) =
+                dispatch_teammate_idle_hook(session.as_ref(), turn.as_ref(), &team_id, &member.name)
+                    .await
             {
                 return Err(FunctionCallError::RespondToModel(err));
             }
@@ -4952,6 +4949,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn wait_team_is_blocked_by_teammate_idle_hook() {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        session.services.hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                teammate_idle: vec![CommandHookConfig {
+                    name: Some("idle-blocker".to_string()),
+                    command: vec![
+                        "python3".to_string(),
+                        "-c".to_string(),
+                        r#"import sys; sys.stderr.write("idle-blocked"); raise SystemExit(2)"#
+                            .to_string(),
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        let spawn_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_team",
+            function_payload(json!({
+                "members": [
+                    {"name": "planner", "task": "plan the work"},
+                    {"name": "worker", "task": "execute the task"}
+                ]
+            })),
+        );
+        let spawn_output = MultiAgentHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("spawn_team should succeed");
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(spawn_content),
+            ..
+        } = spawn_output
+        else {
+            panic!("expected function output");
+        };
+        let spawn_result: SpawnTeamResult =
+            serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
+
+        for member in &spawn_result.members {
+            let agent_id = agent_id(&member.agent_id).expect("valid agent id");
+            let _ = manager
+                .agent_control()
+                .shutdown_agent(agent_id)
+                .await
+                .expect("shutdown spawned team member");
+        }
+
+        let wait_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "wait_team",
+            function_payload(json!({
+                "team_id": spawn_result.team_id,
+                "mode": "all",
+                "timeout_ms": 1_000
+            })),
+        );
+        let Err(err) = MultiAgentHandler.handle(wait_invocation).await else {
+            panic!("wait_team should be blocked by teammate_idle hook");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "teammate_idle hook 'idle-blocker' blocked: idle-blocked".to_string()
+            )
+        );
+
+        let cleanup_invocation = invocation(
+            session,
+            turn,
+            "team_cleanup",
+            function_payload(json!({
+                "team_id": spawn_result.team_id
+            })),
+        );
+        MultiAgentHandler
+            .handle(cleanup_invocation)
+            .await
+            .expect("team_cleanup should succeed");
+    }
+
+    #[tokio::test]
     async fn spawn_team_accepts_backendground_alias() {
         let (mut session, turn) = make_session_and_context().await;
         let manager = thread_manager();
@@ -5888,6 +5976,134 @@ mod tests {
             .is_err(),
             true
         );
+    }
+
+    #[tokio::test]
+    async fn team_task_complete_is_blocked_by_task_completed_hook() {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        session.services.hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                task_completed: vec![CommandHookConfig {
+                    name: Some("task-blocker".to_string()),
+                    command: vec![
+                        "python3".to_string(),
+                        "-c".to_string(),
+                        r#"import sys; sys.stderr.write("task-blocked"); raise SystemExit(2)"#
+                            .to_string(),
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+
+        let spawn_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_team",
+            function_payload(json!({
+                "members": [
+                    {"name": "planner", "task": "plan"}
+                ]
+            })),
+        );
+        let spawn_output = MultiAgentHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("spawn_team should succeed");
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(spawn_content),
+            ..
+        } = spawn_output
+        else {
+            panic!("expected function output");
+        };
+        let spawn_result: SpawnTeamResult =
+            serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
+
+        let list_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "team_task_list",
+            function_payload(json!({
+                "team_id": spawn_result.team_id
+            })),
+        );
+        let list_output = MultiAgentHandler
+            .handle(list_invocation)
+            .await
+            .expect("team_task_list should succeed");
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(list_content),
+            ..
+        } = list_output
+        else {
+            panic!("expected function output");
+        };
+        let list_result: TeamTaskListResult =
+            serde_json::from_str(&list_content).expect("team_task_list should return json");
+        assert_eq!(list_result.tasks.len(), 1);
+        let task_id = list_result.tasks[0].task_id.clone();
+
+        let complete_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "team_task_complete",
+            function_payload(json!({
+                "team_id": spawn_result.team_id,
+                "task_id": task_id
+            })),
+        );
+        let Err(err) = MultiAgentHandler.handle(complete_invocation).await else {
+            panic!("team_task_complete should be blocked by task_completed hook");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(
+                "task_completed hook 'task-blocker' blocked: task-blocked".to_string()
+            )
+        );
+
+        let list_after_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "team_task_list",
+            function_payload(json!({
+                "team_id": spawn_result.team_id
+            })),
+        );
+        let list_after_output = MultiAgentHandler
+            .handle(list_after_invocation)
+            .await
+            .expect("team_task_list should succeed");
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(list_after_content),
+            ..
+        } = list_after_output
+        else {
+            panic!("expected function output");
+        };
+        let list_after: TeamTaskListResult =
+            serde_json::from_str(&list_after_content).expect("team_task_list should return json");
+        assert_eq!(list_after.tasks.len(), 1);
+        assert_ne!(list_after.tasks[0].state, PersistedTaskState::Completed);
+
+        let cleanup_invocation = invocation(
+            session,
+            turn,
+            "team_cleanup",
+            function_payload(json!({
+                "team_id": spawn_result.team_id
+            })),
+        );
+        MultiAgentHandler
+            .handle(cleanup_invocation)
+            .await
+            .expect("team_cleanup should succeed");
     }
 
     #[tokio::test]
