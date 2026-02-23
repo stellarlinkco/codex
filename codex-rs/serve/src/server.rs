@@ -977,17 +977,17 @@ async fn handle_events(
                         return Some((Ok(sse_json(&event)), (rx, session_filter, heartbeat)));
                     }
                     msg = rx.recv() => {
-                        match msg {
-                            Ok(event) => {
-                                if let Some(ref wanted) = session_filter {
-                                    if !event_matches_session(&event, wanted) {
-                                        continue;
-                                    }
-                                }
-                                return Some((Ok(sse_json(&event)), (rx, session_filter, heartbeat)));
-                            }
-                            Err(broadcast::error::RecvError::Closed) => return None,
-                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
+	                        match msg {
+	                            Ok(event) => {
+	                                if let Some(wanted) = session_filter.as_deref()
+	                                    && !event_matches_session(&event, wanted)
+	                                {
+	                                    continue;
+	                                }
+	                                return Some((Ok(sse_json(&event)), (rx, session_filter, heartbeat)));
+	                            }
+	                            Err(broadcast::error::RecvError::Closed) => return None,
+	                            Err(broadcast::error::RecvError::Lagged(_)) => continue,
                         }
                     }
                 }
@@ -1400,9 +1400,10 @@ async fn handle_rename_session(
         .map(|s| s.thread_id)
         .or_else(|| ThreadId::from_string(&id).ok());
 
-    if let (Some(thread_id), Some(ref name)) = (thread_id, normalized.as_ref()) {
-        if let Err(err) = persist_thread_name(&state.config.codex_home, thread_id, name).await {
-            warn!("failed to persist thread name: {err}");
+    if let (Some(thread_id), Some(name)) = (thread_id, normalized.as_deref()) {
+        match persist_thread_name(&state.config.codex_home, thread_id, name).await {
+            Ok(()) => {}
+            Err(err) => warn!("failed to persist thread name: {err}"),
         }
     }
 
@@ -1605,7 +1606,7 @@ async fn handle_approve_permission(
             status: "approved".to_string(),
             reason: None,
             mode: body.mode.clone(),
-            decision: Some(decision.clone()),
+            decision: Some(decision),
             allow_tools: body.allow_tools.clone(),
             answers: body.answers.clone(),
         };
@@ -1829,14 +1830,14 @@ async fn handle_machine_spawn(
         .into_response();
     }
 
-    if let Some(agent) = body.agent.as_deref() {
-        if agent != "codex" {
-            return Json(SpawnError {
-                kind: "error",
-                message: format!("unsupported agent: {agent}"),
-            })
-            .into_response();
-        }
+    if let Some(agent) = body.agent.as_deref()
+        && agent != "codex"
+    {
+        return Json(SpawnError {
+            kind: "error",
+            message: format!("unsupported agent: {agent}"),
+        })
+        .into_response();
     }
 
     let mut overrides = state.base_overrides.clone();
@@ -2053,7 +2054,7 @@ async fn handle_search_files(
 
     let matches = tokio::task::spawn_blocking(move || {
         let options = codex_file_search::FileSearchOptions {
-            limit: std::num::NonZero::new(limit).unwrap(),
+            limit: std::num::NonZero::new(limit).unwrap_or(std::num::NonZero::<usize>::MIN),
             ..Default::default()
         };
         codex_file_search::run(&q, vec![cwd], options, None)
@@ -2785,9 +2786,9 @@ fn parse_rfc3339_ms(input: &str) -> Option<u64> {
     Some(dt.timestamp_millis() as u64)
 }
 
-fn safe_join(root: &PathBuf, rel: &str) -> Result<PathBuf, String> {
+fn safe_join(root: &FsPath, rel: &str) -> Result<PathBuf, String> {
     let rel_path = FsPath::new(rel);
-    let mut out = root.clone();
+    let mut out = root.to_path_buf();
     for component in rel_path.components() {
         match component {
             std::path::Component::Normal(part) => out.push(part),
