@@ -192,20 +192,27 @@ If the hook exits `0`, it may return a JSON object on `stdout`. Codex recognizes
   - `updatedInput` / `updated_input` (any JSON value; only consumed by `pre_tool_use`)
 - Blocking decisions (supported events only):
   - `decision` (string)
-    - For `user_prompt_submit`, `stop`, `subagent_stop`, `config_change`: `block|deny|abort` blocks
+    - Case-insensitive; accepted values:
+      - allow: `allow|approve|continue`
+      - deny: `deny|block|abort`
+      - ask: `ask`
+    - Prefer the canonical `allow|deny|ask` in new hooks.
+    - For `user_prompt_submit`, `stop`, `subagent_stop`, `config_change`: `deny` blocks
     - For `pre_tool_use`: `deny|ask` blocks
-    - For `permission_request`: `allow|deny|ask` maps to `permissionDecision` behavior
+    - For `permission_request`: `decision` is treated like `permissionDecision` behavior
   - `reason` / `stopReason` (string; used when `decision` blocks)
 - Permission decisions (`permission_request` and `pre_tool_use`):
-  - `permissionDecision` / `permission_decision` (string; `allow|deny|ask`)
+  - `permissionDecision` / `permission_decision` (string; same accepted values as `decision`; prefer canonical `allow|deny|ask`)
   - `permissionDecisionReason` / `permission_decision_reason` (string)
-  - `hookSpecificOutput.decision.behavior` (string; `allow|deny|ask`) for `permission_request`
+  - `hookSpecificOutput.decision.behavior` (string; same accepted values as `decision`) for `permission_request`
 
 Output precedence when multiple keys are present:
 
 - `updatedInput` prefers top-level over `hookSpecificOutput.updatedInput`.
 - Permission decisions prefer `hookSpecificOutput.permissionDecision` over top-level `permissionDecision`.
-- Block reason prefers `reason` → `stopReason` → `permissionDecisionReason` → fallback.
+- Block reason:
+  - For `user_prompt_submit`, `stop`, `subagent_stop`, `config_change`: `reason` → `stopReason` → fallback.
+  - For `pre_tool_use`: `permissionDecisionReason` (prefers `hookSpecificOutput`) → `reason` → `stopReason` → fallback.
 
 ## Event capabilities (summary)
 
@@ -216,6 +223,11 @@ Output precedence when multiple keys are present:
   - `config_change`
 - Events that honor `stdout` decisions (`decision` / `permissionDecision`):
   - `user_prompt_submit`, `pre_tool_use`, `permission_request`, `stop`, `subagent_stop`, `config_change`
+- Events that support `prompt` / `agent` hooks:
+  - `user_prompt_submit`, `pre_tool_use`, `permission_request`
+  - `post_tool_use`, `post_tool_use_failure`
+  - `stop`, `subagent_stop`
+  - `task_completed`
 - `updatedInput` is only consumed for `pre_tool_use`.
 - Permission decisions are consumed for `pre_tool_use` and `permission_request`:
   - `permission_request`: `allow|deny` bypasses the approval UI; `ask` keeps the UI path.
