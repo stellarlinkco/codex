@@ -30,6 +30,7 @@ import { queryKeys } from '@/lib/query-keys'
 import { useToast } from '@/lib/toast-context'
 import { useTranslation } from '@/lib/use-translation'
 import { fetchLatestMessages, seedMessageWindowFromSession } from '@/lib/message-window-store'
+import { getComposerAutocompleteSuggestions } from '@/lib/autocomplete'
 import FilesPage from '@/routes/sessions/files'
 import FilePage from '@/routes/sessions/file'
 import TerminalPage from '@/routes/sessions/terminal'
@@ -274,10 +275,7 @@ function SessionPage() {
     } = useSkills(api, sessionId)
 
     const getAutocompleteSuggestions = useCallback(async (query: string) => {
-        if (query.startsWith('$')) {
-            return await getSkillSuggestions(query)
-        }
-        return await getSlashSuggestions(query)
+        return await getComposerAutocompleteSuggestions(query, { getSlashSuggestions, getSkillSuggestions })
     }, [getSkillSuggestions, getSlashSuggestions])
 
     const refreshSelectedSession = useCallback(() => {

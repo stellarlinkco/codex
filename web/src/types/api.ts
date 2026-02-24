@@ -38,6 +38,8 @@ export type DecryptedMessage = ProtocolDecryptedMessage & {
     originalText?: string
 }
 
+export type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh'
+
 export type Machine = {
     id: string
     active: boolean

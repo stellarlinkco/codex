@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import type { ApiClient } from '@/api/client'
-import type { SpawnResponse } from '@/types/api'
+import type { ReasoningEffort, SpawnResponse } from '@/types/api'
 import { queryKeys } from '@/lib/query-keys'
 
 type SpawnInput = {
@@ -8,6 +8,7 @@ type SpawnInput = {
     directory: string
     agent?: 'claude' | 'codex' | 'gemini' | 'opencode'
     model?: string
+    reasoningEffort?: ReasoningEffort
     yolo?: boolean
     sessionType?: 'simple' | 'worktree'
     worktreeName?: string
@@ -32,7 +33,8 @@ export function useSpawnSession(api: ApiClient | null): {
                 input.model,
                 input.yolo,
                 input.sessionType,
-                input.worktreeName
+                input.worktreeName,
+                input.reasoningEffort
             )
         },
         onSuccess: () => {

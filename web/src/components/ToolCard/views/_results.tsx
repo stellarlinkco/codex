@@ -202,6 +202,50 @@ function isProbablyMarkdownList(text: string): boolean {
     return trimmed.startsWith('- ') || trimmed.startsWith('* ') || trimmed.startsWith('1. ')
 }
 
+function tryParseJsonObject(result: unknown): Record<string, unknown> | null {
+    if (result === null || result === undefined) return null
+
+    if (typeof result === 'string') {
+        const trimmed = result.trim()
+        if (!looksLikeJson(trimmed) || trimmed.startsWith('[')) return null
+        try {
+            const parsed = JSON.parse(trimmed) as unknown
+            return isObject(parsed) ? parsed : null
+        } catch {
+            return null
+        }
+    }
+
+    return isObject(result) ? result : null
+}
+
+function formatAgentStatus(status: unknown): { label: string; detail?: string } {
+    if (typeof status === 'string') return { label: status }
+    if (isObject(status)) {
+        const record = status as Record<string, unknown>
+        if (typeof record.completed === 'string') return { label: 'completed', detail: record.completed }
+        if (typeof record.errored === 'string') return { label: 'errored', detail: record.errored }
+
+        const keys = Object.keys(record)
+        if (keys.length === 1) {
+            const key = keys[0]
+            const detail = typeof record[key] === 'string' ? record[key] as string : undefined
+            return { label: key, detail }
+        }
+    }
+
+    return { label: safeStringify(status) }
+}
+
+function resolveTeamId(result: Record<string, unknown>): string | null {
+    const teamId = typeof result.team_id === 'string'
+        ? result.team_id
+        : typeof result.teamId === 'string'
+            ? result.teamId
+            : null
+    return teamId && teamId.trim().length > 0 ? teamId : null
+}
+
 const AskUserQuestionResultView: ToolViewComponent = (props: ToolViewProps) => {
     const answers = props.block.tool.permission?.answers ?? null
 
@@ -593,6 +637,146 @@ const GenericResultView: ToolViewComponent = (props: ToolViewProps) => {
     return <CodeBlock code={safeStringify(result)} language="json" />
 }
 
+const TeamToolResultView: ToolViewComponent = (props: ToolViewProps) => {
+    const result = props.block.tool.result
+    const parsed = tryParseJsonObject(result)
+    if (!parsed) {
+        return <GenericResultView {...props} />
+    }
+
+    const teamId = resolveTeamId(parsed)
+    if (!teamId) {
+        return <GenericResultView {...props} />
+    }
+
+    const members = Array.isArray(parsed.members) ? parsed.members.filter(isObject) : null
+    if (members) {
+        return (
+            <div className="flex flex-col gap-2">
+                <div className="text-xs text-[var(--app-hint)]">Team: {teamId}</div>
+                <div className="flex flex-col gap-1">
+                    {members.map((member, idx) => {
+                        const name = typeof member.name === 'string' ? member.name : `member-${idx + 1}`
+                        const agentId = typeof member.agent_id === 'string'
+                            ? member.agent_id
+                            : typeof member.agentId === 'string'
+                                ? member.agentId
+                                : null
+                        const status = formatAgentStatus(member.status)
+                        return (
+                            <div key={`${name}:${agentId ?? idx}`} className="flex flex-col">
+                                <div className="text-sm text-[var(--app-fg)]">
+                                    {name}{agentId ? <span className="text-[var(--app-hint)]"> ({agentId})</span> : null}
+                                </div>
+                                <div className="text-xs text-[var(--app-hint)]">
+                                    {status.label}{status.detail ? `: ${status.detail}` : ''}
+                                </div>
+                            </div>
+                        )
+                    })}
+                </div>
+            </div>
+        )
+    }
+
+    const memberStatuses = Array.isArray(parsed.member_statuses)
+        ? parsed.member_statuses.filter(isObject)
+        : null
+    if (memberStatuses) {
+        const completed = typeof parsed.completed === 'boolean' ? parsed.completed : null
+        const mode = typeof parsed.mode === 'string' ? parsed.mode : null
+        const triggered = isObject(parsed.triggered_member) ? parsed.triggered_member as Record<string, unknown> : null
+        const triggeredName = triggered && typeof triggered.name === 'string' ? triggered.name : null
+
+        return (
+            <div className="flex flex-col gap-2">
+                <div className="text-xs text-[var(--app-hint)]">Team: {teamId}</div>
+                <div className="text-xs text-[var(--app-hint)]">
+                    {completed !== null ? `Completed: ${completed ? 'yes' : 'no'} · ` : ''}
+                    {mode ? `Mode: ${mode}` : ''}
+                    {triggeredName ? ` · Triggered: ${triggeredName}` : ''}
+                </div>
+                <div className="flex flex-col gap-1">
+                    {memberStatuses.map((entry, idx) => {
+                        const name = typeof entry.name === 'string' ? entry.name : `member-${idx + 1}`
+                        const agentId = typeof entry.agent_id === 'string'
+                            ? entry.agent_id
+                            : typeof entry.agentId === 'string'
+                                ? entry.agentId
+                                : null
+                        const status = formatAgentStatus(entry.state)
+                        return (
+                            <div key={`${name}:${agentId ?? idx}`} className="flex flex-col">
+                                <div className="text-sm text-[var(--app-fg)]">
+                                    {name}{agentId ? <span className="text-[var(--app-hint)]"> ({agentId})</span> : null}
+                                </div>
+                                <div className="text-xs text-[var(--app-hint)]">
+                                    {status.label}{status.detail ? `: ${status.detail}` : ''}
+                                </div>
+                            </div>
+                        )
+                    })}
+                </div>
+            </div>
+        )
+    }
+
+    const tasks = Array.isArray(parsed.tasks) ? parsed.tasks.filter(isObject) : null
+    if (tasks) {
+        return (
+            <div className="flex flex-col gap-2">
+                <div className="text-xs text-[var(--app-hint)]">Team: {teamId}</div>
+                <div className="flex flex-col gap-1">
+                    {tasks.map((task, idx) => {
+                        const taskId = typeof task.task_id === 'string' ? task.task_id : `task-${idx + 1}`
+                        const title = typeof task.title === 'string' ? task.title : null
+                        const state = typeof task.state === 'string' ? task.state : null
+                        return (
+                            <div key={taskId} className="text-sm text-[var(--app-fg)]">
+                                {taskId}{title ? ` · ${title}` : ''}{state ? <span className="text-[var(--app-hint)]"> ({state})</span> : null}
+                            </div>
+                        )
+                    })}
+                </div>
+            </div>
+        )
+    }
+
+    const closed = Array.isArray(parsed.closed) ? parsed.closed.filter(isObject) : null
+    if (closed) {
+        return (
+            <div className="flex flex-col gap-2">
+                <div className="text-xs text-[var(--app-hint)]">Team: {teamId}</div>
+                <div className="flex flex-col gap-1">
+                    {closed.map((entry, idx) => {
+                        const name = typeof entry.name === 'string' ? entry.name : `member-${idx + 1}`
+                        const ok = typeof entry.ok === 'boolean' ? entry.ok : null
+                        const status = formatAgentStatus(entry.status)
+                        const error = typeof entry.error === 'string' ? entry.error : null
+                        return (
+                            <div key={name} className="flex flex-col">
+                                <div className="text-sm text-[var(--app-fg)]">
+                                    {name}{ok !== null ? <span className="text-[var(--app-hint)]"> ({ok ? 'ok' : 'failed'})</span> : null}
+                                </div>
+                                <div className="text-xs text-[var(--app-hint)]">
+                                    {status.label}{status.detail ? `: ${status.detail}` : ''}{error ? ` · ${error}` : ''}
+                                </div>
+                            </div>
+                        )
+                    })}
+                </div>
+            </div>
+        )
+    }
+
+    return (
+        <div className="flex flex-col gap-2">
+            <div className="text-xs text-[var(--app-hint)]">Team: {teamId}</div>
+            <CodeBlock code={safeStringify(parsed)} language="json" />
+        </div>
+    )
+}
+
 export const toolResultViewRegistry: Record<string, ToolViewComponent> = {
     Task: MarkdownResultView,
     Bash: BashResultView,
@@ -614,7 +798,20 @@ export const toolResultViewRegistry: Record<string, ToolViewComponent> = {
     AskUserQuestion: AskUserQuestionResultView,
     ExitPlanMode: MarkdownResultView,
     ask_user_question: AskUserQuestionResultView,
-    exit_plan_mode: MarkdownResultView
+    exit_plan_mode: MarkdownResultView,
+    spawn_team: TeamToolResultView,
+    wait_team: TeamToolResultView,
+    close_team: TeamToolResultView,
+    team_cleanup: TeamToolResultView,
+    team_message: TeamToolResultView,
+    team_broadcast: TeamToolResultView,
+    team_ask_lead: TeamToolResultView,
+    team_task_list: TeamToolResultView,
+    team_task_claim: TeamToolResultView,
+    team_task_claim_next: TeamToolResultView,
+    team_task_complete: TeamToolResultView,
+    team_inbox_pop: TeamToolResultView,
+    team_inbox_ack: TeamToolResultView
 }
 
 export function getToolResultViewComponent(toolName: string): ToolViewComponent {
