@@ -13,10 +13,13 @@ import { AgentSelector } from './AgentSelector'
 import { DirectorySection } from './DirectorySection'
 import { MachineSelector } from './MachineSelector'
 import { ModelSelector } from './ModelSelector'
+import { ReasoningEffortSelector, type ReasoningEffortPreference } from './ReasoningEffortSelector'
 import {
     loadPreferredAgent,
+    loadPreferredReasoningEffort,
     loadPreferredYoloMode,
     savePreferredAgent,
+    savePreferredReasoningEffort,
     savePreferredYoloMode,
 } from './preferences'
 import { YoloToggle } from './YoloToggle'
@@ -32,7 +35,14 @@ export function NewSession(props: {
     const { spawnSession, isPending, error: spawnError } = useSpawnSession(props.api)
     const { sessions } = useSessions(props.api)
     const isFormDisabled = Boolean(isPending || props.isLoading)
-    const { getRecentPaths, addRecentPath, getLastUsedMachineId, setLastUsedMachineId } = useRecentPaths()
+    const {
+        getRecentPaths,
+        addRecentPath,
+        removeRecentPath,
+        clearRecentPaths,
+        getLastUsedMachineId,
+        setLastUsedMachineId,
+    } = useRecentPaths()
 
     const [machineId, setMachineId] = useState<string | null>(null)
     const [directory, setDirectory] = useState('')
@@ -41,6 +51,7 @@ export function NewSession(props: {
     const [pathExistence, setPathExistence] = useState<Record<string, boolean>>({})
     const [agent, setAgent] = useState<AgentType>(loadPreferredAgent)
     const [model, setModel] = useState('auto')
+    const [reasoningEffort, setReasoningEffort] = useState<ReasoningEffortPreference>(loadPreferredReasoningEffort)
     const [yoloMode, setYoloMode] = useState(loadPreferredYoloMode)
     const [error, setError] = useState<string | null>(null)
 
@@ -55,6 +66,10 @@ export function NewSession(props: {
     useEffect(() => {
         savePreferredYoloMode(yoloMode)
     }, [yoloMode])
+
+    useEffect(() => {
+        savePreferredReasoningEffort(reasoningEffort)
+    }, [reasoningEffort])
 
     useEffect(() => {
         if (props.machines.length === 0) return
@@ -87,25 +102,58 @@ export function NewSession(props: {
     useEffect(() => {
         let cancelled = false
 
-        if (!machineId || pathsToCheck.length === 0) {
+        if (!machineId) {
             setPathExistence({})
             return () => { cancelled = true }
         }
 
-        void props.api.checkMachinePathsExists(machineId, pathsToCheck)
+        const unknownPaths = pathsToCheck.filter((path) => typeof pathExistence[path] !== 'boolean')
+        if (unknownPaths.length === 0) {
+            return () => {
+                cancelled = true
+            }
+        }
+
+        void props.api.checkMachinePathsExists(machineId, unknownPaths)
             .then((result) => {
                 if (cancelled) return
-                setPathExistence(result.exists ?? {})
+                setPathExistence((prev) => ({ ...prev, ...(result.exists ?? {}) }))
             })
             .catch(() => {
-                if (cancelled) return
-                setPathExistence({})
+                // Ignore errors: fall back to server-side validation on create.
             })
 
         return () => {
             cancelled = true
         }
-    }, [machineId, pathsToCheck, props.api])
+    }, [machineId, pathsToCheck, pathExistence, props.api])
+
+    const directoryToCheck = directory.trim()
+
+    useEffect(() => {
+        let cancelled = false
+        if (!machineId || !directoryToCheck) {
+            return () => { cancelled = true }
+        }
+
+        const handle = window.setTimeout(() => {
+            void props.api.checkMachinePathsExists(machineId, [directoryToCheck])
+                .then((result) => {
+                    if (cancelled) return
+                    const exists = result.exists?.[directoryToCheck]
+                    if (typeof exists !== 'boolean') return
+                    setPathExistence((prev) => ({ ...prev, [directoryToCheck]: exists }))
+                })
+                .catch(() => {
+                    // Ignore errors: fall back to server-side validation on create.
+                })
+        }, 200)
+
+        return () => {
+            cancelled = true
+            window.clearTimeout(handle)
+        }
+    }, [machineId, directoryToCheck, props.api])
 
     const verifiedPaths = useMemo(
         () => allPaths.filter((path) => pathExistence[path]),
@@ -133,6 +181,7 @@ export function NewSession(props: {
     )
 
     const handleMachineChange = useCallback((newMachineId: string) => {
+        setPathExistence({})
         setMachineId(newMachineId)
         const paths = getRecentPaths(newMachineId)
         if (paths[0]) {
@@ -145,6 +194,16 @@ export function NewSession(props: {
     const handlePathClick = useCallback((path: string) => {
         setDirectory(path)
     }, [])
+
+    const handlePathRemove = useCallback((path: string) => {
+        if (!machineId) return
+        removeRecentPath(machineId, path)
+    }, [machineId, removeRecentPath])
+
+    const handleClearRecentPaths = useCallback(() => {
+        if (!machineId) return
+        clearRecentPaths(machineId)
+    }, [machineId, clearRecentPaths])
 
     const handleSuggestionSelect = useCallback((index: number) => {
         const suggestion = suggestions[index]
@@ -200,11 +259,13 @@ export function NewSession(props: {
         setError(null)
         try {
             const resolvedModel = model !== 'auto' && agent !== 'opencode' ? model : undefined
+            const resolvedReasoningEffort = reasoningEffort !== 'auto' ? reasoningEffort : undefined
             const result = await spawnSession({
                 machineId,
                 directory: directory.trim(),
                 agent,
                 model: resolvedModel,
+                reasoningEffort: resolvedReasoningEffort,
                 yolo: yoloMode,
             })
 
@@ -224,7 +285,7 @@ export function NewSession(props: {
         }
     }
 
-    const canCreate = Boolean(machineId && directory.trim() && !isFormDisabled)
+    const canCreate = Boolean(machineId && directory.trim() && !isFormDisabled && pathExistence[directory.trim()] !== false)
 
     return (
         <div className="flex flex-col divide-y divide-[var(--app-divider)]">
@@ -237,6 +298,7 @@ export function NewSession(props: {
             />
             <DirectorySection
                 directory={directory}
+                directoryExists={directory.trim().length > 0 ? pathExistence[directory.trim()] : undefined}
                 suggestions={suggestions}
                 selectedIndex={selectedIndex}
                 isDisabled={isFormDisabled}
@@ -247,6 +309,8 @@ export function NewSession(props: {
                 onDirectoryKeyDown={handleDirectoryKeyDown}
                 onSuggestionSelect={handleSuggestionSelect}
                 onPathClick={handlePathClick}
+                onPathRemove={handlePathRemove}
+                onClearRecentPaths={handleClearRecentPaths}
             />
             <AgentSelector
                 agent={agent}
@@ -258,6 +322,11 @@ export function NewSession(props: {
                 model={model}
                 isDisabled={isFormDisabled}
                 onModelChange={setModel}
+            />
+            <ReasoningEffortSelector
+                reasoningEffort={reasoningEffort}
+                isDisabled={isFormDisabled}
+                onReasoningEffortChange={setReasoningEffort}
             />
             <YoloToggle
                 yoloMode={yoloMode}

@@ -14,6 +14,7 @@ import type {
     PushSubscriptionPayload,
     PushUnsubscribePayload,
     PushVapidPublicKeyResponse,
+    ReasoningEffort,
     SlashCommandsResponse,
     SkillsResponse,
     SpawnResponse,
@@ -376,11 +377,12 @@ export class ApiClient {
         model?: string,
         yolo?: boolean,
         sessionType?: 'simple' | 'worktree',
-        worktreeName?: string
+        worktreeName?: string,
+        reasoningEffort?: ReasoningEffort
     ): Promise<SpawnResponse> {
         return await this.request<SpawnResponse>(`/api/machines/${encodeURIComponent(machineId)}/spawn`, {
             method: 'POST',
-            body: JSON.stringify({ directory, agent, model, yolo, sessionType, worktreeName })
+            body: JSON.stringify({ directory, agent, model, yolo, sessionType, worktreeName, reasoningEffort })
         })
     }
 

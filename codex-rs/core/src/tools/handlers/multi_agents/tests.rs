@@ -486,29 +486,34 @@ async fn spawn_agent_dispatches_subagent_start_hook() {
         .expect("subagent_start hook should write marker");
     assert_eq!(hook_events.trim(), "SubagentStart");
 
-    let history = manager
+    let thread = manager
         .get_thread(agent_id)
         .await
-        .expect("spawned agent should exist")
-        .codex
-        .session
-        .clone_history()
-        .await;
-    let items = history.raw_items();
+        .expect("spawned agent should exist");
 
     let mut injected_index = None;
     let mut prompt_index = None;
-    for (index, item) in items.iter().enumerate() {
-        let text = serde_json::to_string(item).expect("response item should serialize");
-        if injected_index.is_none() && text.contains(injected_context) {
-            injected_index = Some(index);
-        }
-        if prompt_index.is_none() && text.contains("inspect this repo") {
-            prompt_index = Some(index);
+    for _ in 0..50 {
+        injected_index = None;
+        prompt_index = None;
+        let history = thread.codex.session.clone_history().await;
+        let items = history.raw_items();
+        for (index, item) in items.iter().enumerate() {
+            let text = serde_json::to_string(item).expect("response item should serialize");
+            if injected_index.is_none() && text.contains(injected_context) {
+                injected_index = Some(index);
+            }
+            if prompt_index.is_none() && text.contains("inspect this repo") {
+                prompt_index = Some(index);
+            }
+            if injected_index.is_some() && prompt_index.is_some() {
+                break;
+            }
         }
         if injected_index.is_some() && prompt_index.is_some() {
             break;
         }
+        tokio::time::sleep(Duration::from_millis(50)).await;
     }
     let injected_index = injected_index.expect("subagent_start context should be injected");
     let prompt_index = prompt_index.expect("prompt should be recorded");

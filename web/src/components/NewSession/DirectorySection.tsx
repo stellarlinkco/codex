@@ -6,6 +6,7 @@ import { useTranslation } from '@/lib/use-translation'
 
 export function DirectorySection(props: {
     directory: string
+    directoryExists?: boolean
     suggestions: readonly Suggestion[]
     selectedIndex: number
     isDisabled: boolean
@@ -16,6 +17,8 @@ export function DirectorySection(props: {
     onDirectoryKeyDown: (event: ReactKeyboardEvent<HTMLInputElement>) => void
     onSuggestionSelect: (index: number) => void
     onPathClick: (path: string) => void
+    onPathRemove: (path: string) => void
+    onClearRecentPaths: () => void
 }) {
     const { t } = useTranslation()
 
@@ -49,21 +52,53 @@ export function DirectorySection(props: {
                 )}
             </div>
 
+            {props.directory.trim().length > 0 && props.directoryExists === false ? (
+                <div className="text-xs text-red-600">
+                    {t('newSession.directory.notFound')}
+                </div>
+            ) : null}
+
             {props.recentPaths.length > 0 && (
                 <div className="flex flex-col gap-1 mt-1">
-                    <span className="text-xs text-[var(--app-hint)]">{t('newSession.recent')}:</span>
+                    <div className="flex items-center justify-between gap-2">
+                        <span className="text-xs text-[var(--app-hint)]">
+                            {t('newSession.recent')}:
+                        </span>
+                        <button
+                            type="button"
+                            onClick={props.onClearRecentPaths}
+                            disabled={props.isDisabled}
+                            className="text-xs text-[var(--app-link)] hover:underline disabled:opacity-50"
+                        >
+                            {t('newSession.recent.clear')}
+                        </button>
+                    </div>
                     <div className="flex flex-wrap gap-1">
                         {props.recentPaths.map((path) => (
-                            <button
+                            <div
                                 key={path}
-                                type="button"
-                                onClick={() => props.onPathClick(path)}
-                                disabled={props.isDisabled}
-                                className="rounded bg-[var(--app-subtle-bg)] px-2 py-1 text-xs text-[var(--app-fg)] hover:bg-[var(--app-secondary-bg)] transition-colors truncate max-w-[200px] disabled:opacity-50"
-                                title={path}
+                                className="flex items-stretch rounded bg-[var(--app-subtle-bg)] text-xs text-[var(--app-fg)] overflow-hidden max-w-[260px] disabled:opacity-50"
                             >
-                                {path}
-                            </button>
+                                <button
+                                    type="button"
+                                    onClick={() => props.onPathClick(path)}
+                                    disabled={props.isDisabled}
+                                    className="px-2 py-1 hover:bg-[var(--app-secondary-bg)] transition-colors truncate max-w-[220px] disabled:opacity-50"
+                                    title={path}
+                                >
+                                    {path}
+                                </button>
+                                <button
+                                    type="button"
+                                    onClick={() => props.onPathRemove(path)}
+                                    disabled={props.isDisabled}
+                                    className="px-2 py-1 text-[var(--app-hint)] hover:bg-[var(--app-secondary-bg)] hover:text-[var(--app-fg)] transition-colors disabled:opacity-50"
+                                    aria-label={t('newSession.recent.remove')}
+                                    title={t('newSession.recent.remove')}
+                                >
+                                    ×
+                                </button>
+                            </div>
                         ))}
                     </div>
                 </div>

@@ -47,6 +47,30 @@ export function useRecentPaths() {
         })
     }, [])
 
+    const removeRecentPath = useCallback((machineId: string, path: string): void => {
+        const trimmed = path.trim()
+        if (!trimmed) return
+
+        setData((prev) => {
+            const existing = prev[machineId] ?? []
+            const updated = existing.filter((p) => p !== trimmed)
+            const newData = { ...prev, [machineId]: updated }
+            saveRecentPaths(newData)
+            return newData
+        })
+    }, [])
+
+    const clearRecentPaths = useCallback((machineId: string): void => {
+        setData((prev) => {
+            if (!prev[machineId] || prev[machineId].length === 0) {
+                return prev
+            }
+            const newData = { ...prev, [machineId]: [] }
+            saveRecentPaths(newData)
+            return newData
+        })
+    }, [])
+
     const getLastUsedMachineId = useCallback((): string | null => {
         try {
             return localStorage.getItem(LAST_MACHINE_ID_KEY)
@@ -66,7 +90,16 @@ export function useRecentPaths() {
     return useMemo(() => ({
         getRecentPaths,
         addRecentPath,
+        removeRecentPath,
+        clearRecentPaths,
         getLastUsedMachineId,
         setLastUsedMachineId,
-    }), [getRecentPaths, addRecentPath, getLastUsedMachineId, setLastUsedMachineId])
+    }), [
+        getRecentPaths,
+        addRecentPath,
+        removeRecentPath,
+        clearRecentPaths,
+        getLastUsedMachineId,
+        setLastUsedMachineId,
+    ])
 }

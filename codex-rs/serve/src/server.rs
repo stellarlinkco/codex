@@ -26,12 +26,22 @@ use codex_core::CodexThread;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
+use codex_core::skills::SkillLoadOutcome;
 use codex_protocol::ThreadId;
+use codex_protocol::config_types::CollaborationMode;
+use codex_protocol::config_types::CollaborationModeMask;
+use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
+use codex_protocol::config_types::Settings;
+use codex_protocol::custom_prompts::CustomPrompt;
+use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
+use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::ReviewDecision;
+use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::request_user_input::RequestUserInputAnswer;
@@ -84,6 +94,7 @@ struct SessionState {
     name: Option<String>,
     cwd: PathBuf,
     model: String,
+    reasoning_effort: Option<ReasoningEffort>,
     created_at: u64,
     updated_at: u64,
     active: bool,
@@ -518,9 +529,86 @@ enum AuthRequest {
 
 #[cfg(test)]
 mod tests {
+    use super::AppState;
     use super::AuthRequest;
+    use super::MessagePostRequest;
+    use super::ReasoningSummaryConfig;
+    use super::SpawnRequest;
+    use super::custom_prompts_to_slash_commands;
+    use super::extract_reasoning_effort_from_history;
+    use super::handle_machine_spawn;
+    use super::handle_post_message;
+    use super::handle_resume_session;
+    use super::handle_skills;
+    use super::handle_slash_commands;
+    use super::plan_mode_developer_instructions;
     use super::safe_join;
+    use super::skills_outcome_to_summaries;
+    use axum::Json;
+    use axum::extract::Path;
+    use axum::extract::State;
+    use axum::http::StatusCode;
+    use codex_core::AuthManager;
+    use codex_core::ThreadManager;
+    use codex_core::config::Config;
+    use codex_core::config::ConfigOverrides;
+    use codex_core::skills::SkillLoadOutcome;
+    use codex_core::skills::SkillMetadata;
+    use codex_protocol::config_types::CollaborationMode;
+    use codex_protocol::config_types::CollaborationModeMask;
+    use codex_protocol::config_types::ModeKind;
+    use codex_protocol::config_types::Settings;
+    use codex_protocol::custom_prompts::CustomPrompt;
+    use codex_protocol::openai_models::ReasoningEffort;
+    use codex_protocol::protocol::AskForApproval;
+    use codex_protocol::protocol::InitialHistory;
+    use codex_protocol::protocol::Op;
+    use codex_protocol::protocol::RolloutItem;
+    use codex_protocol::protocol::SandboxPolicy;
+    use codex_protocol::protocol::SessionSource;
+    use codex_protocol::protocol::SkillScope;
+    use codex_protocol::protocol::TurnContextItem;
+    use std::collections::HashMap;
+    use std::collections::HashSet;
+    use std::ffi::OsString;
     use std::path::PathBuf;
+    use std::sync::Arc;
+    use tokio::sync::RwLock;
+    use tokio::sync::broadcast;
+
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
+            let previous = std::env::var_os(key);
+            // Safety: guarded by ENV_LOCK so tests don't concurrently mutate the process env.
+            unsafe { std::env::set_var(key, value.as_os_str()) };
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                // Safety: guarded by ENV_LOCK so tests don't concurrently mutate the process env.
+                unsafe { std::env::set_var(self.key, previous) };
+            } else {
+                // Safety: guarded by ENV_LOCK so tests don't concurrently mutate the process env.
+                unsafe { std::env::remove_var(self.key) };
+            }
+        }
+    }
+
+    fn temp_dir(prefix: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("{prefix}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        dir
+    }
 
     #[test]
     fn auth_request_accepts_access_token_aliases() {
@@ -575,6 +663,247 @@ mod tests {
         let joined = safe_join(&root, "foo..bar").unwrap();
         assert!(joined.ends_with("foo..bar"));
     }
+
+    #[test]
+    fn spawn_request_accepts_reasoning_effort() {
+        let req: SpawnRequest =
+            serde_json::from_str(r#"{"directory":"x","reasoningEffort":"high"}"#).unwrap();
+        assert_eq!(req.reasoning_effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn plan_mode_developer_instructions_extracts_plan_preset() {
+        let masks = vec![
+            CollaborationModeMask {
+                name: "Default".to_string(),
+                mode: Some(ModeKind::Default),
+                model: None,
+                reasoning_effort: None,
+                developer_instructions: Some(Some("default".to_string())),
+            },
+            CollaborationModeMask {
+                name: "Plan".to_string(),
+                mode: Some(ModeKind::Plan),
+                model: None,
+                reasoning_effort: None,
+                developer_instructions: Some(Some("plan instructions".to_string())),
+            },
+        ];
+
+        assert_eq!(
+            plan_mode_developer_instructions(&masks),
+            Some("plan instructions".to_string())
+        );
+    }
+
+    #[test]
+    fn custom_prompts_to_slash_commands_formats_prompt_names() {
+        let prompt = CustomPrompt {
+            name: "my-prompt".to_string(),
+            path: PathBuf::from("/tmp/my-prompt.md"),
+            content: "Hello".to_string(),
+            description: Some("desc".to_string()),
+            argument_hint: None,
+        };
+        let cmds = custom_prompts_to_slash_commands(vec![prompt]);
+        assert_eq!(cmds.len(), 1);
+        assert_eq!(cmds[0]["name"], "prompts:my-prompt");
+        assert_eq!(cmds[0]["source"], "user");
+        assert_eq!(cmds[0]["content"], "Hello");
+    }
+
+    #[test]
+    fn skills_outcome_to_summaries_filters_disabled_paths() {
+        let enabled_skill = SkillMetadata {
+            name: "a".to_string(),
+            description: "A".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            permissions: None,
+            path: PathBuf::from("/tmp/a/SKILL.md"),
+            scope: SkillScope::User,
+        };
+        let disabled_skill = SkillMetadata {
+            name: "b".to_string(),
+            description: "B".to_string(),
+            short_description: None,
+            interface: None,
+            dependencies: None,
+            policy: None,
+            permissions: None,
+            path: PathBuf::from("/tmp/b/SKILL.md"),
+            scope: SkillScope::User,
+        };
+        let mut disabled_paths = HashSet::new();
+        disabled_paths.insert(disabled_skill.path.clone());
+        let outcome = SkillLoadOutcome {
+            skills: vec![enabled_skill.clone(), disabled_skill],
+            errors: Vec::new(),
+            disabled_paths,
+        };
+
+        let skills = skills_outcome_to_summaries(outcome);
+        assert_eq!(skills.len(), 1);
+        assert_eq!(skills[0]["name"], enabled_skill.name);
+    }
+
+    #[test]
+    fn extract_reasoning_effort_prefers_collaboration_mode_over_effort_field() {
+        let ctx = TurnContextItem {
+            turn_id: None,
+            cwd: PathBuf::from("/tmp"),
+            approval_policy: AskForApproval::OnRequest,
+            sandbox_policy: SandboxPolicy::new_workspace_write_policy(),
+            network: None,
+            model: "gpt-5.2".to_string(),
+            personality: None,
+            collaboration_mode: Some(CollaborationMode {
+                mode: ModeKind::Default,
+                settings: Settings {
+                    model: "gpt-5.2".to_string(),
+                    reasoning_effort: Some(ReasoningEffort::High),
+                    developer_instructions: None,
+                },
+            }),
+            effort: Some(ReasoningEffort::Low),
+            summary: ReasoningSummaryConfig::Auto,
+            user_instructions: None,
+            developer_instructions: None,
+            final_output_json_schema: None,
+            truncation_policy: None,
+        };
+        let history = InitialHistory::Forked(vec![RolloutItem::TurnContext(ctx)]);
+        assert_eq!(
+            extract_reasoning_effort_from_history(&history),
+            Some(ReasoningEffort::High)
+        );
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn web_handlers_smoke_spawn_plan_resume_and_aux_endpoints() {
+        let _lock = ENV_LOCK.lock().await;
+        codex_core::test_support::set_thread_manager_test_mode(true);
+
+        let codex_home = temp_dir("codex-home");
+        let _env = EnvVarGuard::set("CODEX_HOME", codex_home.as_path());
+
+        let base_overrides = ConfigOverrides {
+            cwd: Some(codex_home.clone()),
+            ..Default::default()
+        };
+        let config = Config::load_with_cli_overrides_and_harness_overrides(
+            Vec::new(),
+            base_overrides.clone(),
+        )
+        .await
+        .expect("load config");
+
+        let auth_manager = AuthManager::shared(
+            config.codex_home.clone(),
+            false,
+            config.cli_auth_credentials_store_mode,
+        );
+        let thread_manager = Arc::new(ThreadManager::new(
+            config.codex_home.clone(),
+            auth_manager.clone(),
+            SessionSource::Cli,
+            config.model_catalog.clone(),
+        ));
+        let (events_tx, _) = broadcast::channel(64);
+
+        let state = AppState {
+            token: Arc::new("test-token".to_string()),
+            static_dir: None,
+            config: Arc::new(config),
+            cli_overrides: Vec::new(),
+            base_overrides,
+            auth_manager,
+            thread_manager,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            events_tx,
+        };
+
+        let prompts_dir = state.config.codex_home.join("prompts");
+        tokio::fs::create_dir_all(&prompts_dir)
+            .await
+            .expect("create prompts dir");
+        tokio::fs::write(prompts_dir.join("hello.md"), "Hello")
+            .await
+            .expect("write prompt");
+
+        let resp = handle_slash_commands(State(state.clone()), Path("any".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let session_dir = temp_dir("session-cwd");
+        let spawn_req = SpawnRequest {
+            directory: session_dir.display().to_string(),
+            agent: Some("codex".to_string()),
+            model: None,
+            reasoning_effort: Some(ReasoningEffort::High),
+            yolo: Some(false),
+        };
+        let resp = handle_machine_spawn(
+            State(state.clone()),
+            Path("local".to_string()),
+            Json(spawn_req),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let (session_id, session) = {
+            let sessions = state.sessions.read().await;
+            let (id, session) = sessions.iter().next().expect("spawned session");
+            (id.clone(), Arc::clone(session))
+        };
+        assert_eq!(
+            session.state.read().await.reasoning_effort,
+            Some(ReasoningEffort::High)
+        );
+
+        session.state.write().await.permission_mode = "plan".to_string();
+        let msg = MessagePostRequest {
+            text: "hi".to_string(),
+            local_id: None,
+            attachments: None,
+        };
+        let resp =
+            handle_post_message(State(state.clone()), Path(session_id.clone()), Json(msg)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(session.state.read().await.messages.len(), 1);
+
+        let resp = handle_skills(State(state.clone()), Path(session_id.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let resp = handle_skills(State(state.clone()), Path("missing-session".to_string())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let rollout_path = session.rollout_path.clone().expect("rollout path");
+        let mut effort = None;
+        for _ in 0..100 {
+            if tokio::fs::try_exists(&rollout_path).await.unwrap_or(false)
+                && let Ok(history) =
+                    codex_core::RolloutRecorder::get_rollout_history(&rollout_path).await
+            {
+                effort = extract_reasoning_effort_from_history(&history);
+                if effort == Some(ReasoningEffort::High) {
+                    break;
+                }
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+        assert_eq!(effort, Some(ReasoningEffort::High));
+
+        let _ = session.thread.submit(Op::Shutdown).await;
+        state.sessions.write().await.remove(&session_id);
+
+        let resp = handle_resume_session(State(state.clone()), Path(session_id.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert!(state.sessions.read().await.contains_key(&session_id));
+
+        let _ = state.thread_manager.remove_and_close_all_threads().await;
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -583,6 +912,7 @@ struct SpawnRequest {
     directory: String,
     agent: Option<String>,
     model: Option<String>,
+    reasoning_effort: Option<ReasoningEffort>,
     yolo: Option<bool>,
 }
 
@@ -1243,9 +1573,10 @@ async fn handle_resume_session(State(state): State<AppState>, Path(id): Path<Str
         .session_cwd()
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
 
+    let recovered_effort = extract_reasoning_effort_from_history(&initial_history);
     let mut overrides = state.base_overrides.clone();
     overrides.cwd = Some(cwd);
-    let config = match Config::load_with_cli_overrides_and_harness_overrides(
+    let mut config = match Config::load_with_cli_overrides_and_harness_overrides(
         state.cli_overrides.clone(),
         overrides,
     )
@@ -1260,6 +1591,9 @@ async fn handle_resume_session(State(state): State<AppState>, Path(id): Path<Str
                 .into_response();
         }
     };
+    if let Some(effort) = recovered_effort {
+        config.model_reasoning_effort = Some(effort);
+    }
 
     let new_thread = match state
         .thread_manager
@@ -1286,6 +1620,7 @@ async fn handle_resume_session(State(state): State<AppState>, Path(id): Path<Str
             name: new_thread.session_configured.thread_name.clone(),
             cwd: new_thread.session_configured.cwd.clone(),
             model: new_thread.session_configured.model.clone(),
+            reasoning_effort: new_thread.session_configured.reasoning_effort,
             created_at: now_ms(),
             updated_at: now_ms(),
             active: true,
@@ -1478,8 +1813,6 @@ async fn handle_post_message(
     };
 
     let created_at = now_ms();
-    let (approval_policy, sandbox_policy) =
-        permission_mode_to_policies(&session.state.read().await.permission_mode);
     let text = body.text;
     let text_for_content = text.clone();
     let local_id = body.local_id;
@@ -1517,6 +1850,22 @@ async fn handle_post_message(
         };
         guard.messages.push(message.clone());
 
+        let (approval_policy, sandbox_policy) = permission_mode_to_policies(&guard.permission_mode);
+        let collaboration_mode = if guard.permission_mode == "plan" {
+            let masks = state.thread_manager.list_collaboration_modes();
+            let developer_instructions = plan_mode_developer_instructions(&masks);
+            Some(CollaborationMode {
+                mode: ModeKind::Plan,
+                settings: Settings {
+                    model: guard.model.clone(),
+                    reasoning_effort: guard.reasoning_effort,
+                    developer_instructions,
+                },
+            })
+        } else {
+            None
+        };
+
         let op = Op::UserTurn {
             items: vec![UserInput::Text {
                 text,
@@ -1526,10 +1875,10 @@ async fn handle_post_message(
             approval_policy,
             sandbox_policy,
             model: guard.model.clone(),
-            effort: None,
+            effort: guard.reasoning_effort,
             summary: ReasoningSummaryConfig::Auto,
             final_output_json_schema: None,
-            collaboration_mode: None,
+            collaboration_mode,
             personality: None,
         };
 
@@ -1845,7 +2194,7 @@ async fn handle_machine_spawn(
     if let Some(model) = body.model.clone() {
         overrides.model = Some(model);
     }
-    let config = match Config::load_with_cli_overrides_and_harness_overrides(
+    let mut config = match Config::load_with_cli_overrides_and_harness_overrides(
         state.cli_overrides.clone(),
         overrides,
     )
@@ -1860,6 +2209,9 @@ async fn handle_machine_spawn(
             .into_response();
         }
     };
+    if let Some(effort) = body.reasoning_effort {
+        config.model_reasoning_effort = Some(effort);
+    }
 
     let new_thread = match state
         .thread_manager
@@ -1892,6 +2244,7 @@ async fn handle_machine_spawn(
             name: new_thread.session_configured.thread_name.clone(),
             cwd: directory,
             model: new_thread.session_configured.model.clone(),
+            reasoning_effort: new_thread.session_configured.reasoning_effort,
             created_at: now_ms(),
             updated_at: now_ms(),
             active: true,
@@ -2319,19 +2672,42 @@ async fn handle_delete_upload(
     .into_response()
 }
 
-async fn handle_slash_commands() -> Response {
+async fn handle_slash_commands(State(state): State<AppState>, Path(_id): Path<String>) -> Response {
+    let prompts_dir = state.config.codex_home.join("prompts");
+    let prompts = codex_core::custom_prompts::discover_prompts_in(&prompts_dir).await;
+    let commands = custom_prompts_to_slash_commands(prompts);
+
     Json(SlashCommandsResponse {
         success: true,
-        commands: Some(Vec::new()),
+        commands: Some(commands),
         error: None,
     })
     .into_response()
 }
 
-async fn handle_skills() -> Response {
+async fn handle_skills(State(state): State<AppState>, Path(id): Path<String>) -> Response {
+    let cwd = match resolve_session_cwd(&state, &id).await {
+        Ok(cwd) => cwd,
+        Err(err) => {
+            return Json(SkillsResponse {
+                success: false,
+                skills: None,
+                error: Some(err),
+            })
+            .into_response();
+        }
+    };
+
+    let outcome = state
+        .thread_manager
+        .skills_manager()
+        .skills_for_cwd(&cwd, false)
+        .await;
+    let skills = skills_outcome_to_summaries(outcome);
+
     Json(SkillsResponse {
         success: true,
-        skills: Some(Vec::new()),
+        skills: Some(skills),
         error: None,
     })
     .into_response()
@@ -2754,6 +3130,68 @@ async fn build_session_json(session: &ActiveSession) -> Session {
         permission_mode: Some(guard.permission_mode.clone()),
         model_mode: Some(guard.model_mode.clone()),
     }
+}
+
+fn extract_reasoning_effort_from_history(history: &InitialHistory) -> Option<ReasoningEffort> {
+    let items = match history {
+        InitialHistory::New => return None,
+        InitialHistory::Resumed(resumed) => &resumed.history,
+        InitialHistory::Forked(items) => items,
+    };
+
+    items.iter().rev().find_map(|item| match item {
+        RolloutItem::TurnContext(ctx) => ctx
+            .collaboration_mode
+            .as_ref()
+            .and_then(CollaborationMode::reasoning_effort)
+            .or(ctx.effort),
+        _ => None,
+    })
+}
+
+fn plan_mode_developer_instructions(masks: &[CollaborationModeMask]) -> Option<String> {
+    masks
+        .iter()
+        .find(|mask| mask.mode == Some(ModeKind::Plan))
+        .and_then(|mask| mask.developer_instructions.clone().flatten())
+}
+
+fn custom_prompts_to_slash_commands(prompts: Vec<CustomPrompt>) -> Vec<JsonValue> {
+    prompts
+        .into_iter()
+        .map(|prompt| {
+            serde_json::json!({
+                "name": format!("{PROMPTS_CMD_PREFIX}:{}", prompt.name),
+                "description": prompt.description,
+                "source": "user",
+                "content": prompt.content,
+            })
+        })
+        .collect()
+}
+
+fn skills_outcome_to_summaries(outcome: SkillLoadOutcome) -> Vec<JsonValue> {
+    let mut out = outcome
+        .skills_with_enabled()
+        .filter(|(_, enabled)| *enabled)
+        .map(|(skill, _)| {
+            let description = skill
+                .short_description
+                .as_ref()
+                .filter(|desc| !desc.trim().is_empty())
+                .cloned()
+                .unwrap_or_else(|| skill.description.clone());
+            (
+                skill.name.clone(),
+                serde_json::json!({
+                    "name": skill.name,
+                    "description": description,
+                }),
+            )
+        })
+        .collect::<Vec<_>>();
+    out.sort_by(|(a, _), (b, _)| a.cmp(b));
+    out.into_iter().map(|(_, value)| value).collect()
 }
 
 fn permission_mode_to_policies(mode: &str) -> (AskForApproval, SandboxPolicy) {
