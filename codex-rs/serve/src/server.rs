@@ -882,14 +882,13 @@ mod tests {
         let rollout_path = session.rollout_path.clone().expect("rollout path");
         let mut effort = None;
         for _ in 0..100 {
-            if tokio::fs::try_exists(&rollout_path).await.unwrap_or(false) {
-                if let Ok(history) =
+            if tokio::fs::try_exists(&rollout_path).await.unwrap_or(false)
+                && let Ok(history) =
                     codex_core::RolloutRecorder::get_rollout_history(&rollout_path).await
-                {
-                    effort = extract_reasoning_effort_from_history(&history);
-                    if effort == Some(ReasoningEffort::High) {
-                        break;
-                    }
+            {
+                effort = extract_reasoning_effort_from_history(&history);
+                if effort == Some(ReasoningEffort::High) {
+                    break;
                 }
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
