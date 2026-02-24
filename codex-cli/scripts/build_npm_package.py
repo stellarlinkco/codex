@@ -265,7 +265,7 @@ def stage_sources(staging_dir: Path, version: str, package: str) -> None:
         package_json = {
             "name": CODEX_NPM_NAME,
             "version": platform_version,
-            "license": codex_package_json.get("license", "Apache-2.0"),
+            "license": codex_package_json.get("license", "AGPL-3.0-only"),
             "os": [platform_package["os"]],
             "cpu": [platform_package["cpu"]],
             "files": ["vendor"],

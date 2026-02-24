@@ -1,7 +1,7 @@
 {
   "name": "@openai/codex-responses-api-proxy",
   "version": "0.0.0-dev",
-  "license": "Apache-2.0",
+  "license": "AGPL-3.0-only",
   "bin": {
     "codex-responses-api-proxy": "bin/codex-responses-api-proxy.js"
   },

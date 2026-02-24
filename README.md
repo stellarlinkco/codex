@@ -53,4 +53,4 @@ codex serve
 - https://github.com/openai/codex
 - https://github.com/tiann/hapi
 
-This repository is licensed under the [AGPL-3.0 License](LICENSE). It contains upstream material from openai/codex licensed under Apache-2.0 (see `LICENSE-APACHE-2.0`).
+This repository is licensed under the [AGPL-3.0 License](LICENSE).
