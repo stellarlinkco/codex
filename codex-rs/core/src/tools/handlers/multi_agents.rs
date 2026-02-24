@@ -1209,9 +1209,7 @@ async fn dispatch_worktree_create_hook(
             "worktree_create hooks ({}) did not print a worktree path on stdout",
             hook_names.join(", ")
         ))),
-        1 => Ok(Some(
-            worktree_paths.pop().expect("worktree_paths len checked"),
-        )),
+        1 => Ok(worktree_paths.pop()),
         _ => Err(FunctionCallError::RespondToModel(format!(
             "worktree_create hooks ({}) printed multiple worktree paths on stdout",
             worktree_paths
