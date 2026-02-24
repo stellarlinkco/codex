@@ -368,6 +368,27 @@ fn required_non_empty<'a>(value: &'a str, field: &str) -> Result<&'a str, Functi
     Ok(trimmed)
 }
 
+fn required_path_segment<'a>(value: &'a str, field: &str) -> Result<&'a str, FunctionCallError> {
+    let trimmed = required_non_empty(value, field)?;
+    if trimmed == "." || trimmed == ".." {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "{field} must not be `.` or `..`"
+        )));
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "{field} must not contain path separators"
+        )));
+    }
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "{field} must not start with a Windows drive prefix"
+        )));
+    }
+    Ok(trimmed)
+}
+
 fn find_team_member(
     team: &TeamRecord,
     team_id: &str,
@@ -440,7 +461,7 @@ async fn read_team_task(
     team_id: &str,
     task_id: &str,
 ) -> Result<PersistedTeamTask, FunctionCallError> {
-    let task_id = required_non_empty(task_id, "task_id")?;
+    let task_id = required_path_segment(task_id, "task_id")?;
     let task_path = team_task_path(codex_home, team_id, task_id);
     let raw = match tokio::fs::read_to_string(&task_path).await {
         Ok(raw) => raw,
@@ -461,7 +482,8 @@ async fn write_team_task(
     team_id: &str,
     task: &PersistedTeamTask,
 ) -> Result<(), FunctionCallError> {
-    let task_path = team_task_path(codex_home, team_id, &task.id);
+    let task_id = required_path_segment(&task.id, "task_id")?;
+    let task_path = team_task_path(codex_home, team_id, task_id);
     write_json_atomic(&task_path, task)
         .await
         .map_err(|err| team_persistence_error("write team task", team_id, err))
@@ -639,6 +661,7 @@ mod wait;
 struct WaitForAgentsResult {
     statuses: Vec<(ThreadId, AgentStatus)>,
     timed_out: bool,
+    triggered_id: Option<ThreadId>,
 }
 
 fn normalize_wait_timeout(timeout_ms: Option<i64>) -> Result<i64, FunctionCallError> {
@@ -702,6 +725,10 @@ async fn wait_for_agents(
     let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
     match mode {
         WaitMode::Any => {
+            let mut triggered_id = receiver_thread_ids
+                .iter()
+                .find(|id| final_statuses.contains_key(id))
+                .copied();
             if final_statuses.is_empty() {
                 let mut futures = FuturesUnordered::new();
                 for (id, rx) in status_rxs {
@@ -713,6 +740,7 @@ async fn wait_for_agents(
                 loop {
                     match timeout_at(deadline, futures.next()).await {
                         Ok(Some(Some(result))) => {
+                            triggered_id = Some(result.0);
                             results.push(result);
                             break;
                         }
@@ -740,9 +768,14 @@ async fn wait_for_agents(
                 .iter()
                 .filter_map(|id| final_statuses.get(id).cloned().map(|status| (*id, status)))
                 .collect::<Vec<_>>();
+            let timed_out = statuses.is_empty();
+            if timed_out {
+                triggered_id = None;
+            }
             Ok(WaitForAgentsResult {
-                timed_out: statuses.is_empty(),
+                timed_out,
                 statuses,
+                triggered_id,
             })
         }
         WaitMode::All => {
@@ -773,19 +806,14 @@ async fn wait_for_agents(
             Ok(WaitForAgentsResult {
                 statuses,
                 timed_out,
+                triggered_id: None,
             })
         }
     }
 }
 
 fn normalized_team_id(team_id: &str) -> Result<String, FunctionCallError> {
-    let team_id = team_id.trim();
-    if team_id.is_empty() {
-        return Err(FunctionCallError::RespondToModel(
-            "team_id must be non-empty".to_string(),
-        ));
-    }
-    Ok(team_id.to_string())
+    Ok(required_path_segment(team_id, "team_id")?.to_string())
 }
 
 fn optional_non_empty<'a>(
@@ -899,6 +927,19 @@ fn remove_team_record(sender_thread_id: ThreadId, team_id: &str) -> Result<(), F
     if teams.is_empty() {
         registry.remove(&sender_thread_id);
     }
+    Ok(())
+}
+
+fn restore_team_record(
+    sender_thread_id: ThreadId,
+    team_id: &str,
+    record: TeamRecord,
+) -> Result<(), FunctionCallError> {
+    let mut registry = team_registry()
+        .lock()
+        .map_err(|_| FunctionCallError::Fatal("team registry poisoned".to_string()))?;
+    let teams = registry.entry(sender_thread_id).or_default();
+    teams.insert(team_id.to_string(), record);
     Ok(())
 }
 

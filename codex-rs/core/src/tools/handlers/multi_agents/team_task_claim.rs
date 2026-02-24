@@ -1,4 +1,5 @@
 use super::*;
+use std::collections::HashSet;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
@@ -22,10 +23,21 @@ pub async fn handle(
 ) -> Result<ToolOutput, FunctionCallError> {
     let args: TeamTaskClaimArgs = parse_arguments(&arguments)?;
     let team_id = normalized_team_id(&args.team_id)?;
-    let _ = get_team_record(session.conversation_id, &team_id)?;
+    let team = get_team_record(session.conversation_id, &team_id)?;
+    let valid_member_agent_ids = team
+        .members
+        .iter()
+        .map(|member| member.agent_id.to_string())
+        .collect::<HashSet<_>>();
     let _lock = lock_team_tasks(turn.config.codex_home.as_path(), &team_id).await?;
     let mut task =
         read_team_task(turn.config.codex_home.as_path(), &team_id, &args.task_id).await?;
+    if !valid_member_agent_ids.contains(&task.assignee.agent_id) {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "task `{}` is assigned to a removed team member",
+            task.id
+        )));
+    }
 
     match task.state {
         PersistedTaskState::Pending => {}

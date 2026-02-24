@@ -38,6 +38,7 @@ pub async fn handle(
             "team `{team_id}` has no members"
         )));
     }
+    let original_team = team.clone();
 
     let selected_names = match args.members {
         Some(names) => {
@@ -98,6 +99,7 @@ pub async fn handle(
 
     let mut statuses = HashMap::new();
     let mut closed = Vec::with_capacity(selected_members.len());
+    let mut members_to_remove = Vec::new();
     for member in &selected_members {
         let status_before = session
             .services
@@ -167,44 +169,32 @@ pub async fn handle(
                 error: Some(format!("{err}; {cleanup_err}")),
             }),
         }
+        if closed.last().is_some_and(|result| result.ok) {
+            members_to_remove.push(member.name.clone());
+        }
     }
 
-    let remaining_team = remove_members_from_team(
-        session.conversation_id,
-        &team_id,
-        &selected_members
-            .iter()
-            .map(|member| member.name.clone())
-            .collect::<Vec<_>>(),
-    )?;
-    let persistence_result = if let Some(team) = remaining_team.as_ref() {
-        persist_team_state(
-            turn.config.codex_home.as_path(),
-            session.conversation_id,
-            &team_id,
-            team,
-            None,
-        )
-        .await
-    } else {
-        remove_team_persistence(turn.config.codex_home.as_path(), &team_id).await
-    };
-    if let Err(err) = persistence_result {
-        session
-            .send_event(
-                &turn,
-                CollabWaitingEndEvent {
-                    sender_thread_id: session.conversation_id,
-                    call_id: event_call_id,
-                    agent_statuses: Vec::new(),
-                    statuses,
-                    receiver_names,
-                }
-                .into(),
+    let mut persistence_error = None;
+    if !members_to_remove.is_empty() {
+        let remaining_team =
+            remove_members_from_team(session.conversation_id, &team_id, &members_to_remove)?;
+        let persistence_result = if let Some(team) = remaining_team.as_ref() {
+            persist_team_state(
+                turn.config.codex_home.as_path(),
+                session.conversation_id,
+                &team_id,
+                team,
+                None,
             )
-            .await;
-        return Err(err);
-    }
+            .await
+        } else {
+            remove_team_persistence(turn.config.codex_home.as_path(), &team_id).await
+        };
+        if let Err(err) = persistence_result {
+            let _ = restore_team_record(session.conversation_id, &team_id, original_team);
+            persistence_error = Some(err);
+        }
+    };
 
     session
         .send_event(
@@ -219,6 +209,10 @@ pub async fn handle(
             .into(),
         )
         .await;
+
+    if let Some(err) = persistence_error {
+        return Err(err);
+    }
 
     let content = serde_json::to_string(&CloseTeamResult { team_id, closed }).map_err(|err| {
         FunctionCallError::Fatal(format!("failed to serialize close_team result: {err}"))

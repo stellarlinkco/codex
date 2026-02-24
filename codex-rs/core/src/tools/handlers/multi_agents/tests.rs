@@ -4266,6 +4266,124 @@ async fn team_task_claim_is_exclusive_under_concurrency() {
 }
 
 #[tokio::test]
+async fn team_task_complete_dispatches_hook_once_under_concurrency() {
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let cwd = tempfile::tempdir().expect("temp dir");
+    turn.cwd = cwd.path().to_path_buf();
+
+    let marker_path = turn.config.codex_home.join("task_completed.log");
+    let script = r#"import json, sys, time; data=json.load(sys.stdin); time.sleep(0.1); open(sys.argv[1], "a").write(data["hook_event_name"] + "\n")"#;
+    session.services.hooks = Hooks::new(HooksConfig {
+        command_hooks: CommandHooksConfig {
+            task_completed: vec![CommandHookConfig {
+                command: vec![
+                    "python3".to_string(),
+                    "-c".to_string(),
+                    script.to_string(),
+                    marker_path.to_string_lossy().into_owned(),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    });
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+    let spawn_output = MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_team",
+            function_payload(json!({
+                "members": [
+                    {"name": "planner", "task": "plan"},
+                    {"name": "worker", "task": "work"}
+                ]
+            })),
+        ))
+        .await
+        .expect("spawn_team should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(spawn_content),
+        ..
+    } = spawn_output
+    else {
+        panic!("expected function output");
+    };
+    let spawn_result: SpawnTeamResult =
+        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
+
+    let list_output = MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "team_task_list",
+            function_payload(json!({"team_id": spawn_result.team_id})),
+        ))
+        .await
+        .expect("team_task_list should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(list_content),
+        ..
+    } = list_output
+    else {
+        panic!("expected function output");
+    };
+    let list_result: TeamTaskListResult =
+        serde_json::from_str(&list_content).expect("team_task_list result should be json");
+    let task_id = list_result.tasks.first().expect("task").task_id.clone();
+
+    let mut set = JoinSet::new();
+    for _ in 0..10 {
+        let session = session.clone();
+        let turn = turn.clone();
+        let team_id = list_result.team_id.clone();
+        let task_id = task_id.clone();
+        set.spawn(async move {
+            MultiAgentHandler
+                .handle(invocation(
+                    session,
+                    turn,
+                    "team_task_complete",
+                    function_payload(json!({"team_id": team_id, "task_id": task_id})),
+                ))
+                .await
+        });
+    }
+
+    let mut success = 0usize;
+    let mut already_completed = 0usize;
+    while let Some(result) = set.join_next().await {
+        let output = result.expect("join");
+        match output {
+            Ok(_) => success += 1,
+            Err(FunctionCallError::RespondToModel(msg)) if msg.contains("already completed") => {
+                already_completed += 1
+            }
+            Err(other) => panic!("unexpected result: {other:?}"),
+        }
+    }
+
+    assert_eq!(success, 1);
+    assert_eq!(already_completed, 9);
+
+    let hook_events = tokio::fs::read_to_string(&marker_path)
+        .await
+        .expect("task_completed hook should write marker");
+    assert_eq!(
+        hook_events
+            .lines()
+            .filter(|line| !line.trim().is_empty())
+            .count(),
+        1
+    );
+    assert_eq!(hook_events.trim(), "TaskCompleted");
+}
+
+#[tokio::test]
 async fn build_agent_spawn_config_uses_turn_context_values() {
     fn pick_allowed_sandbox_policy(
         constraint: &crate::config::Constrained<SandboxPolicy>,

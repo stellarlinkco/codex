@@ -166,15 +166,16 @@ pub async fn handle(
         });
     }
 
-    let triggered_member = if wait_mode == WaitMode::Any && !wait_result.statuses.is_empty() {
-        let (triggered_id, _) = wait_result.statuses[0];
-        team.members
-            .iter()
-            .find(|member| member.agent_id == triggered_id)
-            .map(|member| WaitTeamTriggeredMember {
-                name: member.name.clone(),
-                agent_id: member.agent_id.to_string(),
-            })
+    let triggered_member = if wait_mode == WaitMode::Any {
+        wait_result.triggered_id.and_then(|triggered_id| {
+            team.members
+                .iter()
+                .find(|member| member.agent_id == triggered_id)
+                .map(|member| WaitTeamTriggeredMember {
+                    name: member.name.clone(),
+                    agent_id: member.agent_id.to_string(),
+                })
+        })
     } else {
         None
     };
