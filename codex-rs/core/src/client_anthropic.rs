@@ -46,6 +46,8 @@ const ANTHROPIC_AUTH_TOKEN_ENV_VAR: &str = "ANTHROPIC_AUTH_TOKEN";
 const ANTHROPIC_OUTPUT_SCHEMA_INSTRUCTIONS: &str =
     "Respond with JSON only. It must strictly match this schema:";
 const ANTHROPIC_SCHEMA_REPAIR_MAX_RETRIES: usize = 2;
+const ANTHROPIC_SCHEMA_REPAIR_PREVIOUS_OUTPUT_MAX_BYTES: usize = 8_192;
+const ANTHROPIC_SCHEMA_REPAIR_SCAN_MAX_BYTES: usize = 65_536;
 
 pub(crate) async fn stream_anthropic(
     provider: &ModelProviderInfo,
@@ -58,15 +60,17 @@ pub(crate) async fn stream_anthropic(
 
     let (tx_event, rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
     tokio::spawn(async move {
-        match stream_anthropic_inner(&client, prompt, model_info).await {
-            Ok(events) => {
-                if let Err(err) = send_events(&tx_event, events).await {
-                    let _ = tx_event.send(Err(err)).await;
-                }
+        let result = if prompt.output_schema.is_some() {
+            match stream_anthropic_inner(&client, prompt, model_info).await {
+                Ok(events) => send_events(&tx_event, events).await,
+                Err(err) => Err(err),
             }
-            Err(err) => {
-                let _ = tx_event.send(Err(err)).await;
-            }
+        } else {
+            stream_anthropic_once_to_channel(&client, &prompt, &model_info, &tx_event).await
+        };
+
+        if let Err(err) = result {
+            let _ = tx_event.send(Err(err)).await;
         }
     });
 
@@ -118,6 +122,31 @@ async fn stream_anthropic_inner(
     ))
 }
 
+async fn stream_anthropic_once_to_channel(
+    client: &Anthropic,
+    prompt: &Prompt,
+    model_info: &ModelInfo,
+    tx_event: &mpsc::Sender<Result<ResponseEvent>>,
+) -> Result<()> {
+    let request = build_anthropic_request(prompt, model_info)?;
+    let mut stream = client
+        .messages
+        .create_stream(request, None)
+        .await
+        .map_err(map_anthropic_error)?;
+
+    let mut state = AnthropicStreamState::new(&prompt.tools);
+    while let Some(event_result) = stream.next().await {
+        match event_result {
+            Ok(event) => state.handle_event(event, tx_event).await?,
+            Err(err) => return Err(map_anthropic_error(err)),
+        }
+    }
+
+    state.finish(tx_event).await?;
+    Ok(())
+}
+
 async fn stream_anthropic_once(
     client: &Anthropic,
     prompt: &Prompt,
@@ -132,18 +161,19 @@ async fn stream_anthropic_once(
 
     let mut state = AnthropicStreamState::new(&prompt.tools);
     let (tx_event, mut rx_event) = mpsc::channel::<Result<ResponseEvent>>(1600);
+    let mut events = Vec::new();
 
     while let Some(event_result) = stream.next().await {
         match event_result {
             Ok(event) => state.handle_event(event, &tx_event).await?,
             Err(err) => return Err(map_anthropic_error(err)),
         }
+        drain_buffered_events(&mut rx_event, &mut events)?;
     }
 
     state.finish(&tx_event).await?;
     drop(tx_event);
 
-    let mut events = Vec::new();
     while let Some(event) = rx_event.recv().await {
         events.push(event?);
     }
@@ -151,13 +181,35 @@ async fn stream_anthropic_once(
     Ok(events)
 }
 
+fn drain_buffered_events(
+    rx_event: &mut mpsc::Receiver<Result<ResponseEvent>>,
+    events: &mut Vec<ResponseEvent>,
+) -> Result<()> {
+    while let Ok(event) = rx_event.try_recv() {
+        events.push(event?);
+    }
+    Ok(())
+}
+
 fn append_output_schema_retry_message(
     prompt: &mut Prompt,
     validation_error: &str,
     previous_output: &str,
 ) {
+    let (previous_output, truncated) =
+        if previous_output.len() > ANTHROPIC_SCHEMA_REPAIR_PREVIOUS_OUTPUT_MAX_BYTES {
+            let mut end = ANTHROPIC_SCHEMA_REPAIR_PREVIOUS_OUTPUT_MAX_BYTES;
+            while !previous_output.is_char_boundary(end) {
+                end -= 1;
+            }
+            (&previous_output[..end], true)
+        } else {
+            (previous_output, false)
+        };
+    let truncated_note = if truncated { "\n\n[truncated]" } else { "" };
+
     let retry_text = format!(
-        "Your previous answer did not satisfy the required JSON Schema.\nValidation error: {validation_error}\nPrevious output:\n{previous_output}\n\nReturn JSON only, strictly matching the schema."
+        "Your previous answer did not satisfy the required JSON Schema.\nValidation error: {validation_error}\nPrevious output:\n{previous_output}{truncated_note}\n\nReturn JSON only, strictly matching the schema."
     );
     prompt.input.push(ResponseItem::Message {
         id: None,
@@ -254,8 +306,12 @@ fn resolve_anthropic_credentials(
         return Ok((None, auth_token));
     }
 
+    if provider_key.is_some() {
+        return Ok((provider_key, None));
+    }
+
     let auth_token = experimental_bearer_token.or(fallback_auth_token);
-    Ok((provider_key, auth_token))
+    Ok((None, auth_token))
 }
 
 fn provider_headers(provider: &ModelProviderInfo) -> HeaderMap {
@@ -423,11 +479,34 @@ fn anthropic_output_schema_instruction(output_schema: &Value) -> String {
     format!("{ANTHROPIC_OUTPUT_SCHEMA_INSTRUCTIONS} {schema}")
 }
 
+fn parse_base64_data_url(image_url: &str) -> Option<(&str, &str)> {
+    let rest = image_url.strip_prefix("data:")?;
+    let (meta, data) = rest.split_once(',')?;
+    if data.trim().is_empty() {
+        return None;
+    }
+
+    let mut parts = meta.split(';');
+    let media_type = parts.next()?.trim();
+    if media_type.is_empty() {
+        return None;
+    }
+    let is_base64 = parts.any(|part| part.trim().eq_ignore_ascii_case("base64"));
+    if !is_base64 {
+        return None;
+    }
+
+    Some((media_type, data))
+}
+
 fn content_text(content: &[ContentItem]) -> String {
     content
         .iter()
         .map(|item| match item {
             ContentItem::InputText { text } | ContentItem::OutputText { text } => text.clone(),
+            ContentItem::InputImage { image_url } if parse_base64_data_url(image_url).is_some() => {
+                "[image: data-url]".to_string()
+            }
             ContentItem::InputImage { image_url } => format!("[image: {image_url}]"),
         })
         .collect::<Vec<String>>()
@@ -447,10 +526,26 @@ fn content_blocks(content: &[ContentItem]) -> Vec<Value> {
                 }));
             }
             ContentItem::InputImage { image_url } => {
-                blocks.push(json!({
-                    "type": "text",
-                    "text": format!("[image: {image_url}]"),
-                }));
+                if let Some((media_type, data)) = parse_base64_data_url(image_url) {
+                    blocks.push(json!({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": media_type,
+                            "data": data,
+                        },
+                    }));
+                } else if image_url.starts_with("data:") {
+                    blocks.push(json!({
+                        "type": "text",
+                        "text": "[image: data-url]",
+                    }));
+                } else {
+                    blocks.push(json!({
+                        "type": "text",
+                        "text": format!("[image: {image_url}]"),
+                    }));
+                }
             }
             _ => {}
         }
@@ -1004,6 +1099,64 @@ fn validate_assistant_output_against_schema(
     Ok(())
 }
 
+fn find_schema_matching_json_in_output(
+    compiled_schema: &JSONSchema,
+    assistant_output: &str,
+    offset: usize,
+) -> Option<(usize, String)> {
+    let bytes = assistant_output.as_bytes();
+    let mut stack = Vec::<usize>::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    let mut best: Option<(usize, String)> = None;
+
+    for end in 0..bytes.len() {
+        let byte = bytes[end];
+        if in_string {
+            if escaped {
+                escaped = false;
+                continue;
+            }
+            if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+            continue;
+        }
+
+        if byte == b'"' {
+            in_string = true;
+            continue;
+        }
+
+        if byte == b'{' {
+            stack.push(end);
+            continue;
+        }
+
+        if byte == b'}' {
+            let Some(start) = stack.pop() else {
+                continue;
+            };
+
+            let candidate = &assistant_output[start..=end];
+            if let Ok(value) = serde_json::from_str::<Value>(candidate)
+                && compiled_schema.is_valid(&value)
+                && let Ok(serialized) = serde_json::to_string(&value)
+            {
+                let start_index = offset + start;
+                match &best {
+                    Some((best_start, _)) if *best_start <= start_index => {}
+                    _ => best = Some((start_index, serialized)),
+                }
+            }
+        }
+    }
+
+    best
+}
+
 fn extract_schema_matching_json(schema: &Value, assistant_output: &str) -> Option<String> {
     let compiled_schema = JSONSchema::compile(schema).ok()?;
     if let Ok(value) = serde_json::from_str::<Value>(assistant_output)
@@ -1012,56 +1165,33 @@ fn extract_schema_matching_json(schema: &Value, assistant_output: &str) -> Optio
         return serde_json::to_string(&value).ok();
     }
 
-    let bytes = assistant_output.as_bytes();
-    for start in 0..bytes.len() {
-        if bytes[start] != b'{' {
-            continue;
-        }
+    if assistant_output.len() <= ANTHROPIC_SCHEMA_REPAIR_SCAN_MAX_BYTES {
+        return find_schema_matching_json_in_output(&compiled_schema, assistant_output, 0)
+            .map(|(_, candidate)| candidate);
+    }
 
-        let mut depth = 0usize;
-        let mut in_string = false;
-        let mut escaped = false;
-        for end in start..bytes.len() {
-            let byte = bytes[end];
-            if in_string {
-                if escaped {
-                    escaped = false;
-                    continue;
-                }
-                if byte == b'\\' {
-                    escaped = true;
-                } else if byte == b'"' {
-                    in_string = false;
-                }
-                continue;
-            }
+    let mut suffix_start = assistant_output
+        .len()
+        .saturating_sub(ANTHROPIC_SCHEMA_REPAIR_SCAN_MAX_BYTES);
+    while !assistant_output.is_char_boundary(suffix_start) {
+        suffix_start += 1;
+    }
+    let suffix = &assistant_output[suffix_start..];
+    let mut best = find_schema_matching_json_in_output(&compiled_schema, suffix, suffix_start);
 
-            if byte == b'"' {
-                in_string = true;
-                continue;
-            }
-            if byte == b'{' {
-                depth += 1;
-                continue;
-            }
-            if byte == b'}' {
-                if depth == 0 {
-                    break;
-                }
-                depth -= 1;
-                if depth == 0 {
-                    let candidate = &assistant_output[start..=end];
-                    if let Ok(value) = serde_json::from_str::<Value>(candidate)
-                        && compiled_schema.is_valid(&value)
-                    {
-                        return serde_json::to_string(&value).ok();
-                    }
-                    break;
-                }
-            }
+    let mut prefix_end = ANTHROPIC_SCHEMA_REPAIR_SCAN_MAX_BYTES.min(assistant_output.len());
+    while !assistant_output.is_char_boundary(prefix_end) {
+        prefix_end -= 1;
+    }
+    let prefix = &assistant_output[..prefix_end];
+    if let Some(candidate) = find_schema_matching_json_in_output(&compiled_schema, prefix, 0) {
+        match &best {
+            Some((best_start, _)) if *best_start <= candidate.0 => {}
+            _ => best = Some(candidate),
         }
     }
-    None
+
+    best.map(|(_, candidate)| candidate)
 }
 
 fn replace_last_assistant_message(events: &mut Vec<ResponseEvent>, normalized_json: &str) {
@@ -1221,6 +1351,33 @@ mod tests {
         })
     }
 
+    fn test_model_info() -> ModelInfo {
+        serde_json::from_value::<ModelInfo>(json!({
+            "slug": "claude-test",
+            "display_name": "claude-test",
+            "description": "desc",
+            "default_reasoning_level": "medium",
+            "supported_reasoning_levels": [{"effort":"medium","description":"medium"}],
+            "shell_type": "shell_command",
+            "visibility": "list",
+            "supported_in_api": true,
+            "priority": 1,
+            "upgrade": null,
+            "base_instructions": "base",
+            "model_messages": null,
+            "supports_reasoning_summaries": false,
+            "support_verbosity": false,
+            "default_verbosity": null,
+            "apply_patch_tool_type": null,
+            "truncation_policy": {"mode":"bytes","limit":10000},
+            "supports_parallel_tool_calls": true,
+            "context_window": 200000,
+            "auto_compact_token_limit": null,
+            "experimental_supported_tools": []
+        }))
+        .expect("deserialize model info")
+    }
+
     #[test]
     fn resolve_credentials_accepts_auth_token_env_fallback() {
         let (api_key, auth_token) = resolve_anthropic_credentials(
@@ -1247,6 +1404,20 @@ mod tests {
 
         assert_eq!(api_key, None);
         assert_eq!(auth_token, Some("session-token".to_string()));
+    }
+
+    #[test]
+    fn resolve_credentials_does_not_mix_api_key_and_auth_token() {
+        let (api_key, auth_token) = resolve_anthropic_credentials(
+            Some("ANTHROPIC_API_KEY"),
+            Ok(Some("api-key".to_string())),
+            Some("config-token".to_string()),
+            Some("env-token".to_string()),
+        )
+        .expect("resolve credentials");
+
+        assert_eq!(api_key, Some("api-key".to_string()));
+        assert_eq!(auth_token, None);
     }
 
     #[test]
@@ -1334,31 +1505,7 @@ mod tests {
             personality: None,
             output_schema: None,
         };
-
-        let model_info = serde_json::from_value::<ModelInfo>(json!({
-            "slug": "claude-test",
-            "display_name": "claude-test",
-            "description": "desc",
-            "default_reasoning_level": "medium",
-            "supported_reasoning_levels": [{"effort":"medium","description":"medium"}],
-            "shell_type": "shell_command",
-            "visibility": "list",
-            "supported_in_api": true,
-            "priority": 1,
-            "upgrade": null,
-            "base_instructions": "base",
-            "model_messages": null,
-            "supports_reasoning_summaries": false,
-            "support_verbosity": false,
-            "default_verbosity": null,
-            "apply_patch_tool_type": null,
-            "truncation_policy": {"mode":"bytes","limit":10000},
-            "supports_parallel_tool_calls": true,
-            "context_window": 200000,
-            "auto_compact_token_limit": null,
-            "experimental_supported_tools": []
-        }))
-        .expect("deserialize model info");
+        let model_info = test_model_info();
 
         let request = build_anthropic_request(&prompt, &model_info).expect("build request");
         assert_eq!(request.model, "claude-test");
@@ -1411,30 +1558,7 @@ mod tests {
             personality: None,
             output_schema: Some(schema.clone()),
         };
-        let model_info = serde_json::from_value::<ModelInfo>(json!({
-            "slug": "claude-test",
-            "display_name": "claude-test",
-            "description": "desc",
-            "default_reasoning_level": "medium",
-            "supported_reasoning_levels": [{"effort":"medium","description":"medium"}],
-            "shell_type": "shell_command",
-            "visibility": "list",
-            "supported_in_api": true,
-            "priority": 1,
-            "upgrade": null,
-            "base_instructions": "base",
-            "model_messages": null,
-            "supports_reasoning_summaries": false,
-            "support_verbosity": false,
-            "default_verbosity": null,
-            "apply_patch_tool_type": null,
-            "truncation_policy": {"mode":"bytes","limit":10000},
-            "supports_parallel_tool_calls": true,
-            "context_window": 200000,
-            "auto_compact_token_limit": null,
-            "experimental_supported_tools": []
-        }))
-        .expect("deserialize model info");
+        let model_info = test_model_info();
 
         let request = build_anthropic_request(&prompt, &model_info).expect("build request");
         let system = request
@@ -1446,6 +1570,90 @@ mod tests {
         assert!(system.contains(ANTHROPIC_OUTPUT_SCHEMA_INSTRUCTIONS));
         let serialized_schema = serde_json::to_string(&schema).expect("serialize schema");
         assert!(system.contains(&serialized_schema));
+    }
+
+    #[test]
+    fn builds_anthropic_request_maps_base64_input_image_to_image_block() {
+        let prompt = Prompt {
+            input: vec![ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![
+                    ContentItem::InputImage {
+                        image_url: "data:image/png;base64,AAA".to_string(),
+                    },
+                    ContentItem::InputText {
+                        text: "hi".to_string(),
+                    },
+                ],
+                end_turn: None,
+                phase: None,
+            }],
+            tools: Vec::new(),
+            parallel_tool_calls: true,
+            base_instructions: codex_protocol::models::BaseInstructions {
+                text: "be concise".to_string(),
+            },
+            personality: None,
+            output_schema: None,
+        };
+        let model_info = test_model_info();
+
+        let request = build_anthropic_request(&prompt, &model_info).expect("build request");
+        assert_eq!(request.messages.len(), 1);
+
+        let anthropic_sdk::types::messages::MessageContent::Blocks(blocks) =
+            &request.messages[0].content
+        else {
+            panic!("expected message blocks");
+        };
+
+        assert_eq!(
+            blocks[0],
+            json!({
+                "type": "image",
+                "source": {
+                    "type": "base64",
+                    "media_type": "image/png",
+                    "data": "AAA",
+                },
+            })
+        );
+        assert_eq!(
+            blocks[1],
+            json!({
+                "type": "text",
+                "text": "hi",
+            })
+        );
+    }
+
+    #[test]
+    fn append_output_schema_retry_message_truncates_previous_output() {
+        let mut prompt = Prompt {
+            input: Vec::new(),
+            tools: Vec::new(),
+            parallel_tool_calls: true,
+            base_instructions: codex_protocol::models::BaseInstructions {
+                text: "be concise".to_string(),
+            },
+            personality: None,
+            output_schema: None,
+        };
+
+        let previous_output = "x".repeat(ANTHROPIC_SCHEMA_REPAIR_PREVIOUS_OUTPUT_MAX_BYTES + 10);
+        append_output_schema_retry_message(&mut prompt, "bad output", &previous_output);
+
+        let Some(ResponseItem::Message { content, .. }) = prompt.input.last() else {
+            panic!("expected retry message");
+        };
+        let [ContentItem::InputText { text }] = content.as_slice() else {
+            panic!("expected retry text content");
+        };
+
+        assert!(text.contains("Validation error: bad output"));
+        assert!(text.contains("[truncated]"));
+        assert!(!text.contains(&previous_output));
     }
 
     #[tokio::test]
@@ -2081,6 +2289,44 @@ mod tests {
             r#"prefix {"wrong":"value"} middle {"answer":"ok"}"#,
         );
         assert_eq!(recovered, Some(r#"{"answer":"ok"}"#.to_string()));
+    }
+
+    #[test]
+    fn extract_schema_matching_json_scans_limited_window() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"],
+            "additionalProperties": false
+        });
+
+        let assistant_output = format!(
+            "{}{{\"answer\":\"ok\"}}",
+            "x".repeat(ANTHROPIC_SCHEMA_REPAIR_SCAN_MAX_BYTES + 100)
+        );
+        let recovered = extract_schema_matching_json(&schema, &assistant_output);
+        assert_eq!(recovered, Some(r#"{"answer":"ok"}"#.to_string()));
+    }
+
+    #[test]
+    fn extract_schema_matching_json_prefers_earlier_match_across_windows() {
+        let schema = json!({
+            "type": "object",
+            "properties": {
+                "answer": { "type": "string" }
+            },
+            "required": ["answer"],
+            "additionalProperties": false
+        });
+
+        let assistant_output = format!(
+            "{{\"answer\":\"first\"}}{}{{\"answer\":\"second\"}}",
+            "x".repeat(ANTHROPIC_SCHEMA_REPAIR_SCAN_MAX_BYTES + 100)
+        );
+        let recovered = extract_schema_matching_json(&schema, &assistant_output);
+        assert_eq!(recovered, Some(r#"{"answer":"first"}"#.to_string()));
     }
 
     #[test]
