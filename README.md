@@ -9,7 +9,7 @@
 
 <table>
 <tr>
-<td width="180"><a href="https://www.packyapi.com/"><strong>PackyCode</strong></a></td>
+<td width="180"><a href="https://www.packyapi.com/"><img src="assets/partners/logos/packycode.png" alt="PackyCode" width="150"></a></td>
 <td>Thanks to PackyCode for sponsoring this project! PackyCode is a reliable and efficient API relay service provider, offering relay services for Claude Code, Codex, Gemini, and more.</td>
 </tr>
 </table>
@@ -19,6 +19,9 @@
 ## Quickstart
 
 ### Install (latest GitHub Release)
+
+
+****
 
 ```shell
 curl -fsSL https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/install.sh | bash
