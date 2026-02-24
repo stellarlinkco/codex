@@ -55,7 +55,7 @@ and are labeled as connected; others are marked as can be installed.
 
 ## Hooks
 
-Codex can run hooks at lifecycle boundaries such as `session_start`, `session_end`, `user_prompt_submit`, `pre_tool_use`, `permission_request`, `notification`, `post_tool_use`, `post_tool_use_failure`, `stop`, `subagent_start`, `subagent_stop`, `teammate_idle`, `task_completed`, `config_change`, and `pre_compact`.
+Codex can run hooks at lifecycle boundaries such as `session_start`, `session_end`, `user_prompt_submit`, `pre_tool_use`, `permission_request`, `notification`, `post_tool_use`, `post_tool_use_failure`, `stop`, `subagent_start`, `subagent_stop`, `teammate_idle`, `task_completed`, `config_change`, `pre_compact`, `worktree_create`, and `worktree_remove`.
 
 Example:
 

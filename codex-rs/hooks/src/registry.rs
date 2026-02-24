@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::future::Future;
 use std::io;
 use std::io::ErrorKind;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::process::Output;
 use std::process::Stdio;
@@ -352,6 +353,8 @@ impl HookEventKey {
             HookEventKey::UserPromptSubmit
                 | HookEventKey::PreToolUse
                 | HookEventKey::PermissionRequest
+                | HookEventKey::PostToolUse
+                | HookEventKey::PostToolUseFailure
                 | HookEventKey::Stop
                 | HookEventKey::SubagentStop
                 | HookEventKey::ConfigChange
@@ -714,7 +717,8 @@ fn hook_from_config(
                     argv: Arc::new(config.command),
                     async_: config.async_,
                 },
-                None,
+                (matches!(event_key, HookEventKey::WorktreeCreate) && config.async_)
+                    .then(|| format!("{} hooks cannot be async", event_key.as_str())),
             )
         }
         HookHandlerType::Prompt => {
@@ -1023,11 +1027,54 @@ fn result_from_output(event_key: HookEventKey, output: &Output) -> HookResult {
         };
     }
 
+    if matches!(event_key, HookEventKey::WorktreeCreate) {
+        return result_from_worktree_create_stdout(&output.stdout);
+    }
+
     let Some(stdout_json) = parse_stdout_json(&output.stdout) else {
         return HookResult::success();
     };
 
     apply_stdout_json(event_key, stdout_json)
+}
+
+fn result_from_worktree_create_stdout(stdout: &[u8]) -> HookResult {
+    let text = match std::str::from_utf8(stdout) {
+        Ok(text) => text,
+        Err(_) => {
+            return HookResult {
+                error: Some("worktree_create hook printed a non-utf8 path".to_string()),
+                ..HookResult::success()
+            };
+        }
+    };
+    let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+    let Some(path_str) = lines.next() else {
+        return HookResult {
+            error: Some("worktree_create hook did not print a worktree path".to_string()),
+            ..HookResult::success()
+        };
+    };
+    if lines.next().is_some() {
+        return HookResult {
+            error: Some("worktree_create hook printed multiple non-empty lines".to_string()),
+            ..HookResult::success()
+        };
+    }
+
+    let path = PathBuf::from(path_str);
+    if !path.is_absolute() {
+        return HookResult {
+            error: Some(format!(
+                "worktree_create hook must print an absolute path; got `{path_str}`"
+            )),
+            ..HookResult::success()
+        };
+    }
+
+    let mut result = HookResult::success();
+    result.worktree_path = Some(path);
+    result
 }
 
 fn apply_stdout_json(event_key: HookEventKey, stdout_json: Value) -> HookResult {
@@ -1089,6 +1136,23 @@ fn apply_stdout_json(event_key: HookEventKey, stdout_json: Value) -> HookResult 
             })
         });
 
+    if obj
+        .get("continue")
+        .and_then(Value::as_bool)
+        .is_some_and(|should_continue| !should_continue)
+    {
+        let reason = obj
+            .get("stopReason")
+            .or_else(|| obj.get("reason"))
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| "hook stopped processing".to_string());
+        result.control = HookResultControl::Block { reason };
+        return result;
+    }
+
     apply_decisions(event_key, obj, hook_specific, &mut result);
     result
 }
@@ -1122,10 +1186,7 @@ fn apply_pre_tool_use_decisions(
         result.permission_decision_reason = extract_permission_decision_reason(obj, hook_specific);
     }
 
-    let parsed_decision = obj
-        .get("decision")
-        .and_then(Value::as_str)
-        .and_then(parse_decision);
+    let parsed_decision = decision_from_obj(obj);
     if matches!(
         parsed_decision,
         Some(ParsedDecision::Deny) | Some(ParsedDecision::Ask)
@@ -1156,23 +1217,16 @@ fn apply_permission_request_decisions(
 ) {
     let permission_decision = extract_permission_decision(obj, hook_specific)
         .or_else(|| extract_permission_behavior(hook_specific))
-        .or_else(|| {
-            obj.get("decision")
-                .and_then(Value::as_str)
-                .and_then(parse_permission_decision)
-        });
+        .or_else(|| permission_decision_from_obj(obj));
     if let Some(permission_decision) = permission_decision {
         result.permission_decision = Some(permission_decision);
-        result.permission_decision_reason = extract_permission_decision_reason(obj, hook_specific);
+        result.permission_decision_reason = extract_permission_decision_reason(obj, hook_specific)
+            .or_else(|| decision_reason(obj, hook_specific));
     }
 }
 
 fn apply_block_decision(obj: &serde_json::Map<String, Value>, result: &mut HookResult) {
-    let Some(decision) = obj
-        .get("decision")
-        .and_then(Value::as_str)
-        .and_then(parse_decision)
-    else {
+    let Some(decision) = decision_from_obj(obj) else {
         return;
     };
     if decision != ParsedDecision::Deny {
@@ -1251,6 +1305,20 @@ fn decision_reason(
                 .filter(|value| !value.is_empty())
                 .map(str::to_string)
         })
+}
+
+fn decision_from_obj(obj: &serde_json::Map<String, Value>) -> Option<ParsedDecision> {
+    obj.get("decision")
+        .and_then(Value::as_str)
+        .and_then(parse_decision)
+}
+
+fn permission_decision_from_obj(
+    obj: &serde_json::Map<String, Value>,
+) -> Option<HookPermissionDecision> {
+    obj.get("decision")
+        .and_then(Value::as_str)
+        .and_then(parse_permission_decision)
 }
 
 fn parse_permission_decision(decision: &str) -> Option<HookPermissionDecision> {
@@ -1372,6 +1440,22 @@ mod tests {
             "sh".to_string(),
             "-c".to_string(),
             format!("echo {stderr} 1>&2; exit {code}"),
+        ]
+    }
+
+    #[cfg(windows)]
+    fn echo_path_command(path: &str) -> Vec<String> {
+        vec!["cmd".to_string(), "/C".to_string(), format!("echo {path}")]
+    }
+
+    #[cfg(not(windows))]
+    fn echo_path_command(path: &str) -> Vec<String> {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            "printf '%s\\n' \"$1\"".to_string(),
+            "--".to_string(),
+            path.to_string(),
         ]
     }
 
@@ -1615,8 +1699,7 @@ mod tests {
             .dispatch(payload(
                 dir.path(),
                 HookEvent::WorktreeCreate {
-                    repo_path: PathBuf::from("/repo"),
-                    worktree_path: PathBuf::from("/repo/wt"),
+                    name: "wt-1".to_string(),
                 },
             ))
             .await;
@@ -1626,6 +1709,66 @@ mod tests {
             outcomes[0].result.control,
             HookResultControl::Continue
         ));
+        assert!(outcomes[0].result.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn worktree_create_stdout_is_used_as_worktree_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let expected = if cfg!(windows) {
+            r"C:\worktree"
+        } else {
+            "/tmp/worktree"
+        };
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                worktree_create: vec![CommandHookConfig {
+                    command: echo_path_command(expected),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+
+        let outcomes = hooks
+            .dispatch(payload(
+                dir.path(),
+                HookEvent::WorktreeCreate {
+                    name: "wt-1".to_string(),
+                },
+            ))
+            .await;
+
+        assert_eq!(outcomes.len(), 1);
+        assert_eq!(
+            outcomes[0].result.worktree_path,
+            Some(PathBuf::from(expected))
+        );
+    }
+
+    #[tokio::test]
+    async fn worktree_create_requires_absolute_worktree_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                worktree_create: vec![CommandHookConfig {
+                    command: echo_path_command("repo/wt"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+
+        let outcomes = hooks
+            .dispatch(payload(
+                dir.path(),
+                HookEvent::WorktreeCreate {
+                    name: "wt-1".to_string(),
+                },
+            ))
+            .await;
+
+        assert_eq!(outcomes.len(), 1);
         assert!(outcomes[0].result.error.is_some());
     }
 
@@ -1646,7 +1789,6 @@ mod tests {
             .dispatch(payload(
                 dir.path(),
                 HookEvent::WorktreeRemove {
-                    repo_path: PathBuf::from("/repo"),
                     worktree_path: PathBuf::from("/repo/wt"),
                 },
             ))
@@ -2296,6 +2438,22 @@ mod tests {
     }
 
     #[test]
+    fn apply_stdout_json_blocks_on_continue_false_with_stop_reason() {
+        let result = apply_stdout_json(
+            HookEventKey::UserPromptSubmit,
+            json!({
+                "continue": false,
+                "stopReason": "nope",
+            }),
+        );
+
+        assert!(matches!(
+            result.control,
+            HookResultControl::Block { reason } if reason == "nope"
+        ));
+    }
+
+    #[test]
     fn apply_stdout_json_block_reason_does_not_fallback_to_permission_decision_reason() {
         let result = apply_stdout_json(
             HookEventKey::UserPromptSubmit,
@@ -2312,7 +2470,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_stdout_json_ignores_decisions_for_post_tool_use() {
+    fn apply_stdout_json_honors_decisions_for_post_tool_use() {
         let result = apply_stdout_json(
             HookEventKey::PostToolUse,
             json!({
@@ -2321,7 +2479,10 @@ mod tests {
             }),
         );
 
-        assert!(matches!(result.control, HookResultControl::Continue));
+        assert!(matches!(
+            result.control,
+            HookResultControl::Block { reason } if reason == "no"
+        ));
     }
 
     #[test]
@@ -2343,6 +2504,22 @@ mod tests {
         assert!(matches!(
             result.control,
             HookResultControl::Block { reason } if reason == "need approval"
+        ));
+    }
+
+    #[test]
+    fn apply_stdout_json_pre_tool_use_continue_false_blocks_with_reason() {
+        let result = apply_stdout_json(
+            HookEventKey::PreToolUse,
+            json!({
+                "continue": false,
+                "stopReason": "no tool",
+            }),
+        );
+
+        assert!(matches!(
+            result.control,
+            HookResultControl::Block { reason } if reason == "no tool"
         ));
     }
 
@@ -2383,6 +2560,24 @@ mod tests {
         );
         assert_eq!(result.permission_decision_reason, Some("ok".to_string()));
         assert!(matches!(result.control, HookResultControl::Continue));
+    }
+
+    #[test]
+    fn apply_stdout_json_permission_request_accepts_continue_boolean() {
+        let result = apply_stdout_json(
+            HookEventKey::PermissionRequest,
+            json!({
+                "continue": false,
+                "stopReason": "no",
+            }),
+        );
+
+        assert_eq!(result.permission_decision, None);
+        assert_eq!(result.permission_decision_reason, None);
+        assert!(matches!(
+            result.control,
+            HookResultControl::Block { reason } if reason == "no"
+        ));
     }
 
     #[test]

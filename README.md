@@ -5,7 +5,7 @@
   <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
 </p>
 
-## ❤️ Sponsor
+## Sponsor
 
 <table>
 <tr>
@@ -19,7 +19,6 @@
 ## Quickstart
 
 ### Install (latest GitHub Release)
-
 
 **macOS, Linux, WSL:**
 

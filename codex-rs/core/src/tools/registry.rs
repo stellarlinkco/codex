@@ -205,22 +205,35 @@ impl ToolRegistry {
             Err(err) => (err.to_string(), false),
         };
         emit_metric_for_tool_read(&invocation, success).await;
-        dispatch_post_tool_use_hook(PostToolUseHookDispatch {
-            invocation: &invocation,
-            output_preview: output_preview.clone(),
-            success,
-            executed: true,
-            duration,
-            mutating: is_mutating,
-        })
-        .await;
-
-        if let Err(err) = &result {
-            dispatch_post_tool_use_failure_hook(PostToolUseFailureHookDispatch {
-                invocation: &invocation,
-                error: err.to_string(),
-            })
-            .await;
+        let post_hook_error = match &result {
+            Ok((_, true)) => {
+                dispatch_post_tool_use_hook(PostToolUseHookDispatch {
+                    invocation: &invocation,
+                    output_preview: output_preview.clone(),
+                    success,
+                    executed: true,
+                    duration,
+                    mutating: is_mutating,
+                })
+                .await
+            }
+            Ok((_, false)) => {
+                dispatch_post_tool_use_failure_hook(PostToolUseFailureHookDispatch {
+                    invocation: &invocation,
+                    error: output_preview.clone(),
+                })
+                .await
+            }
+            Err(_) => {
+                dispatch_post_tool_use_failure_hook(PostToolUseFailureHookDispatch {
+                    invocation: &invocation,
+                    error: output_preview.clone(),
+                })
+                .await
+            }
+        };
+        if let Some(err) = post_hook_error {
+            return Err(err);
         }
 
         match result {
@@ -498,7 +511,9 @@ struct PostToolUseHookDispatch<'a> {
     mutating: bool,
 }
 
-async fn dispatch_post_tool_use_hook(dispatch: PostToolUseHookDispatch<'_>) {
+async fn dispatch_post_tool_use_hook(
+    dispatch: PostToolUseHookDispatch<'_>,
+) -> Option<FunctionCallError> {
     let PostToolUseHookDispatch { invocation, .. } = dispatch;
     let session = invocation.session.as_ref();
     let turn = invocation.turn.as_ref();
@@ -527,6 +542,7 @@ async fn dispatch_post_tool_use_hook(dispatch: PostToolUseHookDispatch<'_>) {
         .await;
 
     let mut additional_context = Vec::new();
+    let mut blocked = None;
     for hook_outcome in hook_outcomes {
         let hook_name = hook_outcome.hook_name;
         let result = hook_outcome.result;
@@ -541,20 +557,22 @@ async fn dispatch_post_tool_use_hook(dispatch: PostToolUseHookDispatch<'_>) {
             );
         }
 
-        if let HookResultControl::Block { reason } = result.control {
-            warn!(
-                call_id = %invocation.call_id,
-                tool_name = %invocation.tool_name,
-                hook_name = %hook_name,
-                reason,
-                "post_tool_use hook returned a blocking decision; ignoring"
-            );
+        if blocked.is_none()
+            && let HookResultControl::Block { reason } = result.control
+        {
+            blocked = Some((hook_name, reason));
         }
 
         additional_context.extend(result.additional_context);
     }
 
     session.record_hook_context(turn, &additional_context).await;
+    blocked.map(|(hook_name, reason)| {
+        FunctionCallError::RespondToModel(format!(
+            "post_tool_use hook '{hook_name}' blocked tool '{tool_name}': {reason}",
+            tool_name = invocation.tool_name
+        ))
+    })
 }
 
 struct PostToolUseFailureHookDispatch<'a> {
@@ -562,7 +580,9 @@ struct PostToolUseFailureHookDispatch<'a> {
     error: String,
 }
 
-async fn dispatch_post_tool_use_failure_hook(dispatch: PostToolUseFailureHookDispatch<'_>) {
+async fn dispatch_post_tool_use_failure_hook(
+    dispatch: PostToolUseFailureHookDispatch<'_>,
+) -> Option<FunctionCallError> {
     let PostToolUseFailureHookDispatch { invocation, error } = dispatch;
     let session = invocation.session.as_ref();
     let turn = invocation.turn.as_ref();
@@ -585,6 +605,7 @@ async fn dispatch_post_tool_use_failure_hook(dispatch: PostToolUseFailureHookDis
         .await;
 
     let mut additional_context = Vec::new();
+    let mut blocked = None;
     for hook_outcome in hook_outcomes {
         let hook_name = hook_outcome.hook_name;
         let result = hook_outcome.result;
@@ -599,20 +620,160 @@ async fn dispatch_post_tool_use_failure_hook(dispatch: PostToolUseFailureHookDis
             );
         }
 
+        if blocked.is_none()
+            && let HookResultControl::Block { reason } = result.control
+        {
+            blocked = Some((hook_name, reason));
+        }
+
         additional_context.extend(result.additional_context);
     }
 
     session.record_hook_context(turn, &additional_context).await;
+    blocked.map(|(hook_name, reason)| {
+        FunctionCallError::RespondToModel(format!(
+            "post_tool_use_failure hook '{hook_name}' blocked tool '{tool_name}': {reason}",
+            tool_name = invocation.tool_name
+        ))
+    })
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
     use codex_protocol::models::ShellToolCallParams;
     use pretty_assertions::assert_eq;
     use serde_json::json;
+    use tokio::sync::Mutex;
 
+    use crate::codex::make_session_and_context;
+    use crate::turn_diff_tracker::TurnDiffTracker;
+    use codex_hooks::CommandHookConfig;
+    use codex_hooks::CommandHooksConfig;
+    use codex_hooks::Hooks;
+    use codex_hooks::HooksConfig;
+
+    use super::ToolHandler;
+    use super::ToolInvocation;
     use super::ToolPayload;
+    use super::ToolRegistry;
     use super::apply_updated_tool_input;
+
+    fn invocation(
+        session: Arc<crate::codex::Session>,
+        turn: Arc<crate::codex::TurnContext>,
+    ) -> ToolInvocation {
+        ToolInvocation {
+            session,
+            turn,
+            tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
+            call_id: "call-1".to_string(),
+            tool_name: "dummy".to_string(),
+            payload: ToolPayload::Function {
+                arguments: json!({ "value": "hello" }).to_string(),
+            },
+        }
+    }
+
+    #[derive(Clone)]
+    struct DummyHandler {
+        output: super::ToolOutput,
+    }
+
+    #[async_trait]
+    impl ToolHandler for DummyHandler {
+        fn kind(&self) -> super::ToolKind {
+            super::ToolKind::Function
+        }
+
+        async fn handle(
+            &self,
+            _invocation: ToolInvocation,
+        ) -> Result<super::ToolOutput, crate::function_tool::FunctionCallError> {
+            Ok(self.output.clone())
+        }
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_hook_can_block_tool_output() {
+        let (mut session, turn) = make_session_and_context().await;
+        session.services.hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                post_tool_use: vec![CommandHookConfig {
+                    command: vec![
+                        "python3".to_string(),
+                        "-c".to_string(),
+                        r#"import json,sys; json.load(sys.stdin); print(json.dumps({"decision":"block","reason":"nope"}))"#.to_string(),
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+        let registry = ToolRegistry::new(HashMap::from([(
+            "dummy".to_string(),
+            Arc::new(DummyHandler {
+                output: super::ToolOutput::Function {
+                    body: codex_protocol::models::FunctionCallOutputBody::Text("ok".to_string()),
+                    success: Some(true),
+                },
+            }) as Arc<dyn ToolHandler>,
+        )]));
+        let invocation = invocation(Arc::new(session), Arc::new(turn));
+
+        let Err(err) = registry.dispatch(invocation).await else {
+            panic!("expected tool call to be blocked");
+        };
+        let crate::function_tool::FunctionCallError::RespondToModel(message) = err else {
+            panic!("expected RespondToModel error");
+        };
+        assert!(message.contains("post_tool_use hook"));
+        assert!(message.contains("blocked"));
+        assert!(message.contains("nope"));
+    }
+
+    #[tokio::test]
+    async fn post_tool_use_failure_hook_can_block_tool_output() {
+        let (mut session, turn) = make_session_and_context().await;
+        session.services.hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                post_tool_use_failure: vec![CommandHookConfig {
+                    command: vec![
+                        "python3".to_string(),
+                        "-c".to_string(),
+                        r#"import json,sys; json.load(sys.stdin); print(json.dumps({"decision":"block","reason":"nope"}))"#.to_string(),
+                    ],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+        let registry = ToolRegistry::new(HashMap::from([(
+            "dummy".to_string(),
+            Arc::new(DummyHandler {
+                output: super::ToolOutput::Function {
+                    body: codex_protocol::models::FunctionCallOutputBody::Text(
+                        "failed".to_string(),
+                    ),
+                    success: Some(false),
+                },
+            }) as Arc<dyn ToolHandler>,
+        )]));
+        let invocation = invocation(Arc::new(session), Arc::new(turn));
+
+        let Err(err) = registry.dispatch(invocation).await else {
+            panic!("expected tool call to be blocked");
+        };
+        let crate::function_tool::FunctionCallError::RespondToModel(message) = err else {
+            panic!("expected RespondToModel error");
+        };
+        assert!(message.contains("post_tool_use_failure hook"));
+        assert!(message.contains("blocked"));
+        assert!(message.contains("nope"));
+    }
 
     #[test]
     fn apply_updated_tool_input_updates_function_arguments() {
