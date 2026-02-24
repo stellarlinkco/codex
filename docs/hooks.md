@@ -171,18 +171,25 @@ Event payload fields:
 - `ConfigChange`: `source`, `file_path`
 - `SubagentStop`: `stop_hook_active`, `agent_id`, `agent_type`, `agent_transcript_path`, `last_assistant_message`
 - `PreCompact`: `trigger`, `custom_instructions`
-- `WorktreeCreate`: `repo_path`, `worktree_path`
-- `WorktreeRemove`: `repo_path`, `worktree_path`
+- `WorktreeCreate`: `name`
+- `WorktreeRemove`: `worktree_path`
+
+Notes on tool events:
+
+- `PostToolUse` fires after a tool call that returned `success=true`.
+- `PostToolUseFailure` fires after a tool call that returned `success=false` (or failed with an internal error).
 
 Notes on when the multi-agent events fire:
 
-- `SubagentStart`: after `spawn_agent` / `spawn_team` returns a new `agent_id`.
+- `SubagentStart`: when `spawn_agent` / `spawn_team` creates a new agent thread. The hook runs before the initial input is submitted, and any `additionalContext` output is injected into the spawned agent’s context.
 - `TeammateIdle`: after `wait_team` returns a final status for one or more teammates.
 - `TaskCompleted`: when `team_task_complete` is called (and can block completion before it is persisted).
+- `WorktreeCreate`: if configured, replaces the default `git worktree add` behavior. The hook must print the absolute path to the created worktree directory on `stdout`.
+- `WorktreeRemove`: fired when an agent worktree is being cleaned up. For hook-created worktrees, Codex does not run `git worktree remove` automatically; pair this hook with `worktree_create` to handle cleanup.
 
 ## Hook output (stdout JSON)
 
-If the hook exits `0`, it may return a JSON object on `stdout`. Codex recognizes these keys:
+If the hook exits `0`, it may return a JSON object on `stdout`. (Exception: `worktree_create` uses `stdout` as a plain-text worktree path.) Codex recognizes these JSON keys:
 
 - Context injection:
   - `systemMessage` / `system_message` (string)
@@ -191,13 +198,14 @@ If the hook exits `0`, it may return a JSON object on `stdout`. Codex recognizes
 - Input rewriting:
   - `updatedInput` / `updated_input` (any JSON value; only consumed by `pre_tool_use`)
 - Blocking decisions (supported events only):
+  - `continue` (boolean; Claude Code compatible): if `false`, stops processing and blocks execution. Takes precedence over any event-specific decision fields.
   - `decision` (string)
     - Case-insensitive; accepted values:
       - allow: `allow|approve|continue`
       - deny: `deny|block|abort`
       - ask: `ask`
     - Prefer the canonical `allow|deny|ask` in new hooks.
-    - For `user_prompt_submit`, `stop`, `subagent_stop`, `config_change`: `deny` blocks
+    - For `user_prompt_submit`, `post_tool_use`, `post_tool_use_failure`, `stop`, `subagent_stop`, `config_change`: `deny` blocks
     - For `pre_tool_use`: `deny|ask` blocks
     - For `permission_request`: `decision` is treated like `permissionDecision` behavior
   - `reason` / `stopReason` (string; used when `decision` blocks)
@@ -210,6 +218,7 @@ Output precedence when multiple keys are present:
 
 - `updatedInput` prefers top-level over `hookSpecificOutput.updatedInput`.
 - Permission decisions prefer `hookSpecificOutput.permissionDecision` over top-level `permissionDecision`.
+- `continue=false` takes precedence over any decision fields.
 - Block reason:
   - For `user_prompt_submit`, `stop`, `subagent_stop`, `config_change`: `reason` → `stopReason` → fallback.
   - For `pre_tool_use`:
@@ -224,13 +233,16 @@ Output precedence when multiple keys are present:
   - `teammate_idle`, `task_completed`
   - `config_change`
 - Events that honor `stdout` decisions (`decision` / `permissionDecision`):
-  - `user_prompt_submit`, `pre_tool_use`, `permission_request`, `stop`, `subagent_stop`, `config_change`
+  - `user_prompt_submit`, `pre_tool_use`, `permission_request`
+  - `post_tool_use`, `post_tool_use_failure`
+  - `stop`, `subagent_stop`, `config_change`
 - Events that support `prompt` / `agent` hooks:
   - `user_prompt_submit`, `pre_tool_use`, `permission_request`
   - `post_tool_use`, `post_tool_use_failure`
   - `stop`, `subagent_stop`
   - `task_completed`
 - `updatedInput` is only consumed for `pre_tool_use`.
+- `worktree_create` uses `stdout` as a plain-text absolute path to the created worktree directory.
 - Permission decisions are consumed for `pre_tool_use` and `permission_request`:
   - `permission_request`: `allow|deny` bypasses the approval UI; `ask` keeps the UI path.
   - `pre_tool_use`: `deny|ask` blocks; `allow` continues.

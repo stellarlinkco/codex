@@ -70,44 +70,131 @@ pub async fn handle(
     apply_member_model_overrides(&mut config, model_provider, model)?;
     apply_spawn_agent_overrides(&mut config, child_depth);
     let worktree_lease = if use_worktree {
-        let lease = create_agent_worktree(&session, &turn).await?;
-        config.cwd = lease.worktree_path.clone();
-        Some(lease)
+        match create_agent_worktree(&session, &turn).await {
+            Ok(lease) => {
+                config.cwd = lease.worktree_path.clone();
+                Some(lease)
+            }
+            Err(err) => {
+                session
+                    .send_event(
+                        &turn,
+                        CollabAgentSpawnEndEvent {
+                            call_id,
+                            sender_thread_id: session.conversation_id,
+                            new_thread_id: None,
+                            new_agent_nickname: None,
+                            new_agent_role: None,
+                            prompt,
+                            status: AgentStatus::NotFound,
+                        }
+                        .into(),
+                    )
+                    .await;
+                return Err(err);
+            }
+        }
     } else {
         None
     };
-
     let result = session
         .services
         .agent_control
-        .spawn_agent(
+        .spawn_agent_thread(
             config,
-            input_items,
             Some(thread_spawn_source(session.conversation_id, child_depth)),
         )
         .await
         .map_err(collab_spawn_error);
-    match (&result, worktree_lease) {
-        (Ok(thread_id), Some(lease)) => register_worktree_lease(*thread_id, lease),
-        (Err(_), Some(lease)) => {
+
+    let (agent_id, notification_source) = match result {
+        Ok((agent_id, notification_source)) => (agent_id, notification_source),
+        Err(err) => {
+            if let Some(lease) = worktree_lease {
+                let _ = remove_worktree_lease(&session, &turn, lease).await;
+            }
+            session
+                .send_event(
+                    &turn,
+                    CollabAgentSpawnEndEvent {
+                        call_id,
+                        sender_thread_id: session.conversation_id,
+                        new_thread_id: None,
+                        new_agent_nickname: None,
+                        new_agent_role: None,
+                        prompt,
+                        status: AgentStatus::NotFound,
+                    }
+                    .into(),
+                )
+                .await;
+            return Err(err);
+        }
+    };
+
+    let hook_context = dispatch_subagent_start_hook(
+        session.as_ref(),
+        turn.as_ref(),
+        agent_id,
+        role_name.unwrap_or("default"),
+    )
+    .await;
+    if !hook_context.is_empty() {
+        let injected = hook_context.join("\n\n");
+        if let Err(err) = session
+            .services
+            .agent_control
+            .inject_developer_message_without_turn(agent_id, injected)
+            .await
+        {
+            warn!("failed to inject subagent_start hook context: {err}");
+        }
+    }
+
+    if let Err(err) = session
+        .services
+        .agent_control
+        .send_spawn_input(agent_id, input_items, notification_source)
+        .await
+    {
+        if let Some(lease) = worktree_lease {
             let _ = remove_worktree_lease(&session, &turn, lease).await;
         }
-        _ => {}
+        let _ = session
+            .services
+            .agent_control
+            .shutdown_agent(agent_id)
+            .await;
+        session
+            .send_event(
+                &turn,
+                CollabAgentSpawnEndEvent {
+                    call_id,
+                    sender_thread_id: session.conversation_id,
+                    new_thread_id: None,
+                    new_agent_nickname: None,
+                    new_agent_role: None,
+                    prompt,
+                    status: AgentStatus::NotFound,
+                }
+                .into(),
+            )
+            .await;
+        return Err(collab_spawn_error(err));
     }
-    let (new_thread_id, status) = match &result {
-        Ok(thread_id) => (
-            Some(*thread_id),
-            session.services.agent_control.get_status(*thread_id).await,
-        ),
-        Err(_) => (None, AgentStatus::NotFound),
-    };
+
+    if let Some(lease) = worktree_lease {
+        register_worktree_lease(agent_id, lease);
+    }
+
+    let status = session.services.agent_control.get_status(agent_id).await;
     session
         .send_event(
             &turn,
             CollabAgentSpawnEndEvent {
                 call_id,
                 sender_thread_id: session.conversation_id,
-                new_thread_id,
+                new_thread_id: Some(agent_id),
                 new_agent_nickname: None,
                 new_agent_role: None,
                 prompt,
@@ -116,18 +203,9 @@ pub async fn handle(
             .into(),
         )
         .await;
-    let new_thread_id = result?;
-
-    dispatch_subagent_start_hook(
-        session.as_ref(),
-        turn.as_ref(),
-        new_thread_id,
-        role_name.unwrap_or("default"),
-    )
-    .await;
 
     let content = serde_json::to_string(&SpawnAgentResult {
-        agent_id: new_thread_id.to_string(),
+        agent_id: agent_id.to_string(),
     })
     .map_err(|err| {
         FunctionCallError::Fatal(format!("failed to serialize spawn_agent result: {err}"))

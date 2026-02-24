@@ -1483,6 +1483,8 @@ impl Session {
             next_internal_sub_id: AtomicU64::new(0),
         });
         sess.start_async_hook_listener(async_hook_rx);
+        sess.dispatch_session_start_hook(&session_configuration)
+            .await?;
         if let Some(network_policy_decider_session) = network_policy_decider_session {
             let mut guard = network_policy_decider_session.write().await;
             *guard = Arc::downgrade(&sess);
@@ -3457,6 +3459,54 @@ impl Session {
     pub(crate) async fn take_pending_hook_context(&self) -> Vec<String> {
         let mut guard = self.services.pending_hook_context.lock().await;
         std::mem::take(&mut *guard)
+    }
+
+    async fn dispatch_session_start_hook(
+        &self,
+        session_configuration: &SessionConfiguration,
+    ) -> CodexResult<()> {
+        let hook_outcomes = self
+            .hooks()
+            .dispatch(HookPayload {
+                session_id: self.conversation_id,
+                transcript_path: self.transcript_path().await,
+                cwd: session_configuration.cwd.clone(),
+                permission_mode: session_configuration.approval_policy.value().to_string(),
+                hook_event: HookEvent::SessionStart {
+                    source: session_configuration.session_source.to_string(),
+                    model: session_configuration.collaboration_mode.model().to_string(),
+                    agent_type: None,
+                },
+            })
+            .await;
+
+        let mut additional_context = Vec::new();
+        for hook_outcome in hook_outcomes {
+            let hook_name = hook_outcome.hook_name;
+            let result = hook_outcome.result;
+            if let Some(error) = result.error.as_deref() {
+                warn!(
+                    hook_name = %hook_name,
+                    error,
+                    "session_start hook failed; continuing"
+                );
+            }
+            if let HookResultControl::Block { reason } = result.control {
+                warn!(
+                    hook_name = %hook_name,
+                    reason,
+                    "session_start hook returned a blocking decision; ignoring"
+                );
+            }
+            additional_context.extend(result.additional_context);
+        }
+
+        if !additional_context.is_empty() {
+            let mut guard = self.services.pending_hook_context.lock().await;
+            guard.extend(additional_context);
+        }
+
+        Ok(())
     }
 
     pub(crate) async fn dispatch_user_prompt_submit_hook(

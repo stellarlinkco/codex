@@ -53,6 +53,7 @@ use tokio::process::Command;
 use tokio::sync::watch::Receiver;
 use tokio::time::Instant;
 use tokio::time::timeout_at;
+use tracing::debug;
 use tracing::warn;
 
 pub struct MultiAgentHandler;
@@ -101,8 +102,9 @@ fn team_registry() -> &'static Mutex<TeamRegistry> {
 
 #[derive(Debug, Clone)]
 struct WorktreeLease {
-    repo_root: PathBuf,
+    repo_root: Option<PathBuf>,
     worktree_path: PathBuf,
+    created_via_hook: bool,
 }
 
 type WorktreeLeaseRegistry = HashMap<ThreadId, WorktreeLease>;
@@ -1012,7 +1014,7 @@ async fn dispatch_subagent_start_hook(
     turn: &TurnContext,
     agent_id: ThreadId,
     agent_type: &str,
-) {
+) -> Vec<String> {
     let outcomes = session
         .hooks()
         .dispatch(HookPayload {
@@ -1050,8 +1052,7 @@ async fn dispatch_subagent_start_hook(
 
         additional_context.extend(result.additional_context);
     }
-
-    session.record_hook_context(turn, &additional_context).await;
+    additional_context
 }
 
 async fn dispatch_teammate_idle_hook(
@@ -1154,24 +1155,11 @@ async fn dispatch_task_completed_hook(
         .map(|(hook_name, reason)| format!("task_completed hook '{hook_name}' blocked: {reason}"))
 }
 
-async fn dispatch_worktree_hook(
+async fn dispatch_worktree_create_hook(
     session: &Session,
     turn: &TurnContext,
-    repo_path: PathBuf,
-    worktree_path: PathBuf,
-    created: bool,
-) {
-    let hook_event = if created {
-        HookEvent::WorktreeCreate {
-            repo_path,
-            worktree_path,
-        }
-    } else {
-        HookEvent::WorktreeRemove {
-            repo_path,
-            worktree_path,
-        }
-    };
+    name: String,
+) -> Result<Option<(String, PathBuf)>, FunctionCallError> {
     let outcomes = session
         .hooks()
         .dispatch(HookPayload {
@@ -1179,7 +1167,73 @@ async fn dispatch_worktree_hook(
             transcript_path: session.transcript_path().await,
             cwd: turn.cwd.clone(),
             permission_mode: approval_policy_for_hooks(turn.approval_policy).to_string(),
-            hook_event,
+            hook_event: HookEvent::WorktreeCreate { name },
+        })
+        .await;
+    if outcomes.is_empty() {
+        return Ok(None);
+    }
+
+    let mut additional_context = Vec::new();
+    let mut hook_names = Vec::new();
+    let mut worktree_paths = Vec::new();
+
+    for outcome in outcomes {
+        let hook_name = outcome.hook_name;
+        let result = outcome.result;
+        hook_names.push(hook_name.clone());
+
+        if let Some(error) = result.error.as_deref() {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "worktree_create hook '{hook_name}' failed: {error}"
+            )));
+        }
+
+        if let HookResultControl::Block { reason } = result.control {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "worktree_create hook '{hook_name}' blocked: {reason}"
+            )));
+        }
+
+        if let Some(path) = result.worktree_path {
+            worktree_paths.push((hook_name.clone(), path));
+        }
+
+        additional_context.extend(result.additional_context);
+    }
+
+    session.record_hook_context(turn, &additional_context).await;
+
+    match worktree_paths.len() {
+        0 => Err(FunctionCallError::RespondToModel(format!(
+            "worktree_create hooks ({}) did not print a worktree path on stdout",
+            hook_names.join(", ")
+        ))),
+        1 => Ok(worktree_paths.pop()),
+        _ => Err(FunctionCallError::RespondToModel(format!(
+            "worktree_create hooks ({}) printed multiple worktree paths on stdout",
+            worktree_paths
+                .iter()
+                .map(|(hook_name, _)| hook_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+async fn dispatch_worktree_remove_hook(
+    session: &Session,
+    turn: &TurnContext,
+    worktree_path: PathBuf,
+) {
+    let outcomes = session
+        .hooks()
+        .dispatch(HookPayload {
+            session_id: session.conversation_id,
+            transcript_path: session.transcript_path().await,
+            cwd: turn.cwd.clone(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy).to_string(),
+            hook_event: HookEvent::WorktreeRemove { worktree_path },
         })
         .await;
 
@@ -1189,14 +1243,14 @@ async fn dispatch_worktree_hook(
         let result = outcome.result;
 
         if let Some(error) = result.error.as_deref() {
-            warn!(hook_name = %hook_name, error, "worktree hook failed; continuing");
+            debug!(hook_name = %hook_name, error, "worktree_remove hook failed");
         }
 
         if let HookResultControl::Block { reason } = result.control {
-            warn!(
+            debug!(
                 hook_name = %hook_name,
                 reason,
-                "worktree hook returned a blocking decision; ignoring"
+                "worktree_remove hook returned a blocking decision; ignoring"
             );
         }
 
@@ -1210,6 +1264,29 @@ async fn create_agent_worktree(
     session: &Session,
     turn: &TurnContext,
 ) -> Result<WorktreeLease, FunctionCallError> {
+    let name = ThreadId::new().to_string();
+    if let Some((hook_name, worktree_path)) =
+        dispatch_worktree_create_hook(session, turn, name.clone()).await?
+    {
+        let metadata = tokio::fs::metadata(&worktree_path).await.map_err(|err| {
+            FunctionCallError::RespondToModel(format!(
+                "worktree_create hook '{hook_name}' returned non-existent path `{}`: {err}",
+                worktree_path.display()
+            ))
+        })?;
+        if !metadata.is_dir() {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "worktree_create hook '{hook_name}' returned non-directory path `{}`",
+                worktree_path.display()
+            )));
+        }
+        return Ok(WorktreeLease {
+            repo_root: None,
+            worktree_path,
+            created_via_hook: true,
+        });
+    }
+
     let Some(repo_root) = crate::git_info::resolve_root_git_project_for_trust(&turn.cwd) else {
         return Err(FunctionCallError::RespondToModel(
             "worktree=true requires running inside a git repository".to_string(),
@@ -1225,7 +1302,7 @@ async fn create_agent_worktree(
         FunctionCallError::RespondToModel(format!("failed to create worktree root: {err}"))
     })?;
 
-    let worktree_path = root.join(ThreadId::new().to_string());
+    let worktree_path = root.join(name);
     let output = Command::new("git")
         .arg("-C")
         .arg(&repo_root)
@@ -1246,17 +1323,10 @@ async fn create_agent_worktree(
         )));
     }
 
-    dispatch_worktree_hook(
-        session,
-        turn,
-        repo_root.clone(),
-        worktree_path.clone(),
-        true,
-    )
-    .await;
     Ok(WorktreeLease {
-        repo_root,
+        repo_root: Some(repo_root),
         worktree_path,
+        created_via_hook: false,
     })
 }
 
@@ -1265,9 +1335,17 @@ async fn remove_worktree_lease(
     turn: &TurnContext,
     lease: WorktreeLease,
 ) -> Result<(), String> {
+    if lease.created_via_hook {
+        dispatch_worktree_remove_hook(session, turn, lease.worktree_path).await;
+        return Ok(());
+    }
+    let repo_root = lease
+        .repo_root
+        .clone()
+        .ok_or_else(|| "missing repo_root for worktree lease".to_string())?;
     let output = Command::new("git")
         .arg("-C")
-        .arg(&lease.repo_root)
+        .arg(&repo_root)
         .args(["worktree", "remove", "--force"])
         .arg(&lease.worktree_path)
         .output()
@@ -1288,14 +1366,7 @@ async fn remove_worktree_lease(
     }
 
     let _ = remove_dir_if_exists(&lease.worktree_path).await;
-    dispatch_worktree_hook(
-        session,
-        turn,
-        lease.repo_root.clone(),
-        lease.worktree_path.clone(),
-        false,
-    )
-    .await;
+    dispatch_worktree_remove_hook(session, turn, lease.worktree_path).await;
     Ok(())
 }
 

@@ -90,7 +90,7 @@ ignore = [
 # See https://spdx.org/licenses/ for list of possible licenses
 # [possible values: any SPDX 3.11 short identifier (+ optional exception)].
 allow = [
-    # AGPL-3.0-only - https://www.gnu.org/licenses/agpl-3.0.en.html
+    # AGPL-3.0-only - https://www.gnu.org/licenses/agpl-3.0.html
     # Used by: workspace crates
     "AGPL-3.0-only",
     # Apache-2.0 - https://www.apache.org/licenses/LICENSE-2.0
