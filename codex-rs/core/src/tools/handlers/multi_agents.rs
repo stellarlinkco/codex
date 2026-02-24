@@ -368,6 +368,27 @@ fn required_non_empty<'a>(value: &'a str, field: &str) -> Result<&'a str, Functi
     Ok(trimmed)
 }
 
+fn required_path_segment<'a>(value: &'a str, field: &str) -> Result<&'a str, FunctionCallError> {
+    let trimmed = required_non_empty(value, field)?;
+    if trimmed == "." || trimmed == ".." {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "{field} must not be `.` or `..`"
+        )));
+    }
+    if trimmed.contains('/') || trimmed.contains('\\') {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "{field} must not contain path separators"
+        )));
+    }
+    let bytes = trimmed.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && bytes[0].is_ascii_alphabetic() {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "{field} must not start with a Windows drive prefix"
+        )));
+    }
+    Ok(trimmed)
+}
+
 fn find_team_member(
     team: &TeamRecord,
     team_id: &str,
@@ -440,7 +461,7 @@ async fn read_team_task(
     team_id: &str,
     task_id: &str,
 ) -> Result<PersistedTeamTask, FunctionCallError> {
-    let task_id = required_non_empty(task_id, "task_id")?;
+    let task_id = required_path_segment(task_id, "task_id")?;
     let task_path = team_task_path(codex_home, team_id, task_id);
     let raw = match tokio::fs::read_to_string(&task_path).await {
         Ok(raw) => raw,
@@ -461,7 +482,8 @@ async fn write_team_task(
     team_id: &str,
     task: &PersistedTeamTask,
 ) -> Result<(), FunctionCallError> {
-    let task_path = team_task_path(codex_home, team_id, &task.id);
+    let task_id = required_path_segment(&task.id, "task_id")?;
+    let task_path = team_task_path(codex_home, team_id, task_id);
     write_json_atomic(&task_path, task)
         .await
         .map_err(|err| team_persistence_error("write team task", team_id, err))
@@ -791,13 +813,7 @@ async fn wait_for_agents(
 }
 
 fn normalized_team_id(team_id: &str) -> Result<String, FunctionCallError> {
-    let team_id = team_id.trim();
-    if team_id.is_empty() {
-        return Err(FunctionCallError::RespondToModel(
-            "team_id must be non-empty".to_string(),
-        ));
-    }
-    Ok(team_id.to_string())
+    Ok(required_path_segment(team_id, "team_id")?.to_string())
 }
 
 fn optional_non_empty<'a>(
