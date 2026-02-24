@@ -20,7 +20,6 @@
 
 ### Install (latest GitHub Release)
 
-
 **macOS, Linux, WSL:**
 
 ```shell
