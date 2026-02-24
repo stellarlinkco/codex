@@ -93,11 +93,9 @@ pub enum HookEvent {
         custom_instructions: Option<String>,
     },
     WorktreeCreate {
-        repo_path: PathBuf,
-        worktree_path: PathBuf,
+        name: String,
     },
     WorktreeRemove {
-        repo_path: PathBuf,
         worktree_path: PathBuf,
     },
 }
@@ -159,6 +157,7 @@ pub struct HookResult {
     pub permission_decision: Option<HookPermissionDecision>,
     pub permission_decision_reason: Option<String>,
     pub updated_input: Option<Value>,
+    pub worktree_path: Option<PathBuf>,
     pub additional_context: Vec<String>,
     pub error: Option<String>,
 }
@@ -170,6 +169,7 @@ impl HookResult {
             permission_decision: None,
             permission_decision_reason: None,
             updated_input: None,
+            worktree_path: None,
             additional_context: Vec::new(),
             error: None,
         }
@@ -290,8 +290,7 @@ mod tests {
         );
         assert_eq!(
             HookEvent::WorktreeCreate {
-                repo_path: PathBuf::from("/repo"),
-                worktree_path: PathBuf::from("/repo-wt"),
+                name: "wt-1".to_string(),
             }
             .tool_name_for_matcher(),
             None
@@ -350,7 +349,6 @@ mod tests {
         );
         assert_eq!(
             HookEvent::WorktreeRemove {
-                repo_path: PathBuf::from("/repo"),
                 worktree_path: PathBuf::from("/repo-wt"),
             }
             .user_prompt_for_matcher(),
