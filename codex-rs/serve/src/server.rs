@@ -880,19 +880,21 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let rollout_path = session.rollout_path.clone().expect("rollout path");
-        for _ in 0..50 {
+        let mut effort = None;
+        for _ in 0..100 {
             if tokio::fs::try_exists(&rollout_path).await.unwrap_or(false) {
-                break;
+                if let Ok(history) =
+                    codex_core::RolloutRecorder::get_rollout_history(&rollout_path).await
+                {
+                    effort = extract_reasoning_effort_from_history(&history);
+                    if effort == Some(ReasoningEffort::High) {
+                        break;
+                    }
+                }
             }
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        let history = codex_core::RolloutRecorder::get_rollout_history(&rollout_path)
-            .await
-            .expect("load rollout history");
-        assert_eq!(
-            extract_reasoning_effort_from_history(&history),
-            Some(ReasoningEffort::High)
-        );
+        assert_eq!(effort, Some(ReasoningEffort::High));
 
         let _ = session.thread.submit(Op::Shutdown).await;
         state.sessions.write().await.remove(&session_id);
