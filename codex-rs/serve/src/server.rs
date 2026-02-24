@@ -576,7 +576,7 @@ mod tests {
     use tokio::sync::RwLock;
     use tokio::sync::broadcast;
 
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     struct EnvVarGuard {
         key: &'static str,
@@ -584,7 +584,7 @@ mod tests {
     }
 
     impl EnvVarGuard {
-        fn set(key: &'static str, value: &PathBuf) -> Self {
+        fn set(key: &'static str, value: &std::path::Path) -> Self {
             let previous = std::env::var_os(key);
             // Safety: guarded by ENV_LOCK so tests don't concurrently mutate the process env.
             unsafe { std::env::set_var(key, value.as_os_str()) };
@@ -783,11 +783,11 @@ mod tests {
 
     #[tokio::test(flavor = "current_thread")]
     async fn web_handlers_smoke_spawn_plan_resume_and_aux_endpoints() {
-        let _lock = ENV_LOCK.lock().expect("lock env");
+        let _lock = ENV_LOCK.lock().await;
         codex_core::test_support::set_thread_manager_test_mode(true);
 
         let codex_home = temp_dir("codex-home");
-        let _env = EnvVarGuard::set("CODEX_HOME", &codex_home);
+        let _env = EnvVarGuard::set("CODEX_HOME", codex_home.as_path());
 
         let base_overrides = ConfigOverrides {
             cwd: Some(codex_home.clone()),
