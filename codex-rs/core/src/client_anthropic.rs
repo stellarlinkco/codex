@@ -29,7 +29,6 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use tokio::sync::mpsc;
-use tokio::sync::mpsc::error::TryRecvError;
 
 use crate::client_common::Prompt;
 use crate::client_common::ResponseStream;
@@ -186,11 +185,8 @@ fn drain_buffered_events(
     rx_event: &mut mpsc::Receiver<Result<ResponseEvent>>,
     events: &mut Vec<ResponseEvent>,
 ) -> Result<()> {
-    loop {
-        match rx_event.try_recv() {
-            Ok(event) => events.push(event?),
-            Err(TryRecvError::Empty) | Err(TryRecvError::Disconnected) => break,
-        }
+    while let Ok(event) = rx_event.try_recv() {
+        events.push(event?);
     }
     Ok(())
 }
