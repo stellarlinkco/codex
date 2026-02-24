@@ -34,6 +34,7 @@ pub async fn handle(
     let args: TeamCleanupArgs = parse_arguments(&arguments)?;
     let team_id = normalized_team_id(&args.team_id)?;
     let team = get_team_record(session.conversation_id, &team_id)?;
+    let original_team = team.clone();
     let selected_members = team.members.clone();
     let receiver_names = team_member_names(&selected_members);
     let event_call_id = prefixed_team_call_id(TEAM_CLOSE_CALL_PREFIX, &call_id);
@@ -56,6 +57,7 @@ pub async fn handle(
 
     let mut statuses = HashMap::new();
     let mut closed = Vec::with_capacity(selected_members.len());
+    let mut members_to_remove = Vec::new();
     for member in &selected_members {
         let status_before = session
             .services
@@ -125,19 +127,41 @@ pub async fn handle(
                 error: Some(format!("{err}; {cleanup_err}")),
             }),
         }
+        if closed.last().is_some_and(|result| result.ok) {
+            members_to_remove.push(member.name.clone());
+        }
     }
 
-    let remaining = remove_members_from_team(
-        session.conversation_id,
-        &team_id,
-        &selected_members
-            .iter()
-            .map(|member| member.name.clone())
-            .collect::<Vec<_>>(),
-    )?;
-    let removed_from_registry = remaining.is_none();
-    if removed_from_registry {
-        remove_team_persistence(turn.config.codex_home.as_path(), &team_id).await?;
+    let mut removed_from_registry = false;
+    let mut removed_team_config = false;
+    let mut removed_task_dir = false;
+    let mut persistence_error = None;
+    if !members_to_remove.is_empty() {
+        let remaining_team =
+            remove_members_from_team(session.conversation_id, &team_id, &members_to_remove)?;
+        let persistence_result = if let Some(team) = remaining_team.as_ref() {
+            persist_team_state(
+                turn.config.codex_home.as_path(),
+                session.conversation_id,
+                &team_id,
+                team,
+                None,
+            )
+            .await
+        } else {
+            remove_team_persistence(turn.config.codex_home.as_path(), &team_id).await
+        };
+        match persistence_result {
+            Ok(()) => {
+                removed_from_registry = remaining_team.is_none();
+                removed_team_config = removed_from_registry;
+                removed_task_dir = removed_from_registry;
+            }
+            Err(err) => {
+                let _ = restore_team_record(session.conversation_id, &team_id, original_team);
+                persistence_error = Some(err);
+            }
+        }
     }
 
     session
@@ -154,11 +178,15 @@ pub async fn handle(
         )
         .await;
 
+    if let Some(err) = persistence_error {
+        return Err(err);
+    }
+
     let content = serde_json::to_string(&TeamCleanupResult {
         team_id: team_id.clone(),
         removed_from_registry,
-        removed_team_config: removed_from_registry,
-        removed_task_dir: removed_from_registry,
+        removed_team_config,
+        removed_task_dir,
         closed,
     })
     .map_err(|err| {

@@ -639,6 +639,7 @@ mod wait;
 struct WaitForAgentsResult {
     statuses: Vec<(ThreadId, AgentStatus)>,
     timed_out: bool,
+    triggered_id: Option<ThreadId>,
 }
 
 fn normalize_wait_timeout(timeout_ms: Option<i64>) -> Result<i64, FunctionCallError> {
@@ -702,6 +703,10 @@ async fn wait_for_agents(
     let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
     match mode {
         WaitMode::Any => {
+            let mut triggered_id = receiver_thread_ids
+                .iter()
+                .find(|id| final_statuses.contains_key(id))
+                .copied();
             if final_statuses.is_empty() {
                 let mut futures = FuturesUnordered::new();
                 for (id, rx) in status_rxs {
@@ -713,6 +718,7 @@ async fn wait_for_agents(
                 loop {
                     match timeout_at(deadline, futures.next()).await {
                         Ok(Some(Some(result))) => {
+                            triggered_id = Some(result.0);
                             results.push(result);
                             break;
                         }
@@ -740,9 +746,14 @@ async fn wait_for_agents(
                 .iter()
                 .filter_map(|id| final_statuses.get(id).cloned().map(|status| (*id, status)))
                 .collect::<Vec<_>>();
+            let timed_out = statuses.is_empty();
+            if timed_out {
+                triggered_id = None;
+            }
             Ok(WaitForAgentsResult {
-                timed_out: statuses.is_empty(),
+                timed_out,
                 statuses,
+                triggered_id,
             })
         }
         WaitMode::All => {
@@ -773,6 +784,7 @@ async fn wait_for_agents(
             Ok(WaitForAgentsResult {
                 statuses,
                 timed_out,
+                triggered_id: None,
             })
         }
     }
@@ -899,6 +911,19 @@ fn remove_team_record(sender_thread_id: ThreadId, team_id: &str) -> Result<(), F
     if teams.is_empty() {
         registry.remove(&sender_thread_id);
     }
+    Ok(())
+}
+
+fn restore_team_record(
+    sender_thread_id: ThreadId,
+    team_id: &str,
+    record: TeamRecord,
+) -> Result<(), FunctionCallError> {
+    let mut registry = team_registry()
+        .lock()
+        .map_err(|_| FunctionCallError::Fatal("team registry poisoned".to_string()))?;
+    let teams = registry.entry(sender_thread_id).or_default();
+    teams.insert(team_id.to_string(), record);
     Ok(())
 }
 

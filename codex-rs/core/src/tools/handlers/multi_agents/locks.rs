@@ -24,7 +24,7 @@ fn lock_file_exclusive_blocking(path: &Path) -> Result<FileLockGuard, io::Error>
     Ok(FileLockGuard { _file: file })
 }
 
-#[cfg(not(unix))]
+#[cfg(all(not(unix), not(windows)))]
 fn lock_file_exclusive_blocking(path: &Path) -> Result<FileLockGuard, io::Error> {
     let file = OpenOptions::new()
         .create(true)
@@ -34,6 +34,36 @@ fn lock_file_exclusive_blocking(path: &Path) -> Result<FileLockGuard, io::Error>
         .open(path)?;
 
     Ok(FileLockGuard { _file: file })
+}
+
+#[cfg(windows)]
+fn lock_file_exclusive_blocking(path: &Path) -> Result<FileLockGuard, io::Error> {
+    use std::os::windows::fs::OpenOptionsExt;
+
+    const ERROR_SHARING_VIOLATION: i32 = 32;
+    const ERROR_LOCK_VIOLATION: i32 = 33;
+
+    loop {
+        match OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .share_mode(0)
+            .open(path)
+        {
+            Ok(file) => return Ok(FileLockGuard { _file: file }),
+            Err(err)
+                if matches!(
+                    err.raw_os_error(),
+                    Some(ERROR_SHARING_VIOLATION) | Some(ERROR_LOCK_VIOLATION)
+                ) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(err) => return Err(err),
+        }
+    }
 }
 
 pub(super) async fn lock_file_exclusive(path: &Path) -> Result<FileLockGuard, io::Error> {
