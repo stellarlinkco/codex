@@ -35,7 +35,7 @@ def main() -> int:
         "--git-diff-args",
         nargs=argparse.REMAINDER,
         help=(
-            "Args passed to `git diff` (default: check both unstaged and staged diffs with -U0). "
+            "Args passed to `git diff` (when omitted: check both unstaged and staged diffs with -U0). "
             "Example: --git-diff-args origin/main...HEAD"
         ),
     )
@@ -49,9 +49,10 @@ def main() -> int:
             return 2
 
     changed_lines = parse_changed_lines(git_diff_u0(args.git_diff_args, cached=False))
-    merge_changed_lines(
-        changed_lines, parse_changed_lines(git_diff_u0(args.git_diff_args, cached=True))
-    )
+    if not args.git_diff_args:
+        merge_changed_lines(
+            changed_lines, parse_changed_lines(git_diff_u0(args.git_diff_args, cached=True))
+        )
     if not changed_lines:
         print("No changed lines found in git diff.")
         return 0
