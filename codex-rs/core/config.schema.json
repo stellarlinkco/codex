@@ -313,9 +313,6 @@
             "codex_git_commit": {
               "type": "boolean"
             },
-            "collab": {
-              "type": "boolean"
-            },
             "collaboration_modes": {
               "type": "boolean"
             },
@@ -1583,9 +1580,6 @@
           "type": "boolean"
         },
         "codex_git_commit": {
-          "type": "boolean"
-        },
-        "collab": {
           "type": "boolean"
         },
         "collaboration_modes": {

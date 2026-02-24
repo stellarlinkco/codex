@@ -1,6 +1,9 @@
+use std::collections::HashMap;
 use std::collections::HashSet;
+use std::future::Future;
 use std::io;
 use std::io::ErrorKind;
+use std::pin::Pin;
 use std::process::Output;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -11,6 +14,8 @@ use serde_json::Value;
 use tokio::io::AsyncWriteExt;
 use tokio::process::Command;
 use tokio::sync::Mutex;
+use tokio::sync::mpsc;
+use tokio::task::JoinSet;
 
 use crate::types::HookEvent;
 use crate::types::HookPayload;
@@ -24,14 +29,46 @@ pub struct HookMatcherConfig {
     pub tool_name: Option<String>,
     pub tool_name_regex: Option<String>,
     pub prompt_regex: Option<String>,
+    pub matcher: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum HookHandlerType {
+    #[default]
+    Command,
+    Prompt,
+    Agent,
+}
+
+pub trait NonCommandHookExecutor: Send + Sync {
+    fn execute_prompt(
+        self: Arc<Self>,
+        payload: HookPayload,
+        prompt: String,
+        model: Option<String>,
+        timeout: Option<Duration>,
+    ) -> Pin<Box<dyn Future<Output = HookResult> + Send>>;
+
+    fn execute_agent(
+        self: Arc<Self>,
+        payload: HookPayload,
+        prompt: String,
+        model: Option<String>,
+        timeout: Option<Duration>,
+    ) -> Pin<Box<dyn Future<Output = HookResult> + Send>>;
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct CommandHookConfig {
     pub name: Option<String>,
+    pub handler_type: HookHandlerType,
     pub command: Vec<String>,
+    pub prompt: Option<String>,
+    pub model: Option<String>,
+    pub async_: bool,
     /// Timeout in seconds.
     pub timeout: Option<u64>,
+    pub status_message: Option<String>,
     pub once: bool,
     pub matcher: HookMatcherConfig,
 }
@@ -43,9 +80,14 @@ pub struct CommandHooksConfig {
     pub user_prompt_submit: Vec<CommandHookConfig>,
     pub pre_tool_use: Vec<CommandHookConfig>,
     pub permission_request: Vec<CommandHookConfig>,
+    pub notification: Vec<CommandHookConfig>,
     pub post_tool_use: Vec<CommandHookConfig>,
     pub post_tool_use_failure: Vec<CommandHookConfig>,
     pub stop: Vec<CommandHookConfig>,
+    pub teammate_idle: Vec<CommandHookConfig>,
+    pub task_completed: Vec<CommandHookConfig>,
+    pub config_change: Vec<CommandHookConfig>,
+    pub subagent_start: Vec<CommandHookConfig>,
     pub subagent_stop: Vec<CommandHookConfig>,
     pub pre_compact: Vec<CommandHookConfig>,
     pub worktree_create: Vec<CommandHookConfig>,
@@ -58,10 +100,26 @@ pub struct HooksConfig {
 }
 
 #[derive(Clone)]
+enum HookHandler {
+    Command {
+        argv: Arc<Vec<String>>,
+        async_: bool,
+    },
+    Prompt {
+        prompt: Arc<String>,
+        model: Option<String>,
+    },
+    Agent {
+        prompt: Arc<String>,
+        model: Option<String>,
+    },
+}
+
+#[derive(Clone)]
 struct Hook {
     name: String,
-    once_key: String,
-    command: Arc<Vec<String>>,
+    handler_identity: String,
+    handler: HookHandler,
     timeout: Option<Duration>,
     matcher: CompiledMatcher,
     once: bool,
@@ -75,14 +133,67 @@ pub struct Hooks {
     user_prompt_submit: Vec<Hook>,
     pre_tool_use: Vec<Hook>,
     permission_request: Vec<Hook>,
+    notification: Vec<Hook>,
     post_tool_use: Vec<Hook>,
     post_tool_use_failure: Vec<Hook>,
     stop: Vec<Hook>,
+    teammate_idle: Vec<Hook>,
+    task_completed: Vec<Hook>,
+    config_change: Vec<Hook>,
+    subagent_start: Vec<Hook>,
     subagent_stop: Vec<Hook>,
     pre_compact: Vec<Hook>,
     worktree_create: Vec<Hook>,
     worktree_remove: Vec<Hook>,
     ran_once: Arc<Mutex<HashSet<String>>>,
+    async_results_tx: Option<mpsc::UnboundedSender<HookResponse>>,
+    non_command_executor: Option<Arc<dyn NonCommandHookExecutor>>,
+    scoped_hooks: Arc<std::sync::Mutex<HashMap<String, ScopedHooks>>>,
+}
+
+#[derive(Clone, Default)]
+struct ScopedHooks {
+    session_start: Vec<Hook>,
+    session_end: Vec<Hook>,
+    user_prompt_submit: Vec<Hook>,
+    pre_tool_use: Vec<Hook>,
+    permission_request: Vec<Hook>,
+    notification: Vec<Hook>,
+    post_tool_use: Vec<Hook>,
+    post_tool_use_failure: Vec<Hook>,
+    stop: Vec<Hook>,
+    teammate_idle: Vec<Hook>,
+    task_completed: Vec<Hook>,
+    config_change: Vec<Hook>,
+    subagent_start: Vec<Hook>,
+    subagent_stop: Vec<Hook>,
+    pre_compact: Vec<Hook>,
+    worktree_create: Vec<Hook>,
+    worktree_remove: Vec<Hook>,
+}
+
+impl ScopedHooks {
+    fn hooks_for_event(&self, hook_event: &HookEvent) -> &[Hook] {
+        match hook_event {
+            HookEvent::SessionStart { .. } => &self.session_start,
+            HookEvent::SessionEnd { .. } => &self.session_end,
+            HookEvent::UserPromptSubmit { .. } => &self.user_prompt_submit,
+            HookEvent::PreToolUse { .. } => &self.pre_tool_use,
+            HookEvent::PermissionRequest { .. } => &self.permission_request,
+            HookEvent::Notification { .. } => &self.notification,
+            HookEvent::PostToolUse { .. } => &self.post_tool_use,
+            HookEvent::PostToolUseFailure { .. } => &self.post_tool_use_failure,
+            HookEvent::Stop { .. } => &self.stop,
+            HookEvent::TeammateIdle { .. } => &self.teammate_idle,
+            HookEvent::TaskCompleted { .. } => &self.task_completed,
+            HookEvent::ConfigChange { .. } => &self.config_change,
+            HookEvent::SubagentStart { .. } => &self.subagent_start,
+            HookEvent::SubagentStop { .. } => &self.subagent_stop,
+            HookEvent::PreCompact { .. } => &self.pre_compact,
+            HookEvent::WorktreeCreate { .. } => &self.worktree_create,
+            HookEvent::WorktreeRemove { .. } => &self.worktree_remove,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -90,10 +201,12 @@ struct CompiledMatcher {
     tool_name: Option<String>,
     tool_name_regex: Option<Regex>,
     prompt_regex: Option<Regex>,
+    matcher_regex: Option<Regex>,
 }
 
 impl CompiledMatcher {
     fn compile(matcher: &HookMatcherConfig) -> Result<Self, String> {
+        let matcher_regex = compile_matcher_regex(matcher.matcher.as_deref())?;
         let tool_name_regex =
             compile_optional_regex(matcher.tool_name_regex.as_deref(), "tool_name_regex")?;
         let prompt_regex = compile_optional_regex(matcher.prompt_regex.as_deref(), "prompt_regex")?;
@@ -108,10 +221,20 @@ impl CompiledMatcher {
             tool_name,
             tool_name_regex,
             prompt_regex,
+            matcher_regex,
         })
     }
 
     fn matches(&self, event: &HookEvent) -> bool {
+        if let Some(matcher_regex) = self.matcher_regex.as_ref() {
+            let Some(matcher_text) = event.matcher_text_for_matcher() else {
+                return false;
+            };
+            if !matcher_regex.is_match(matcher_text) {
+                return false;
+            }
+        }
+
         if let Some(expected_tool_name) = self.tool_name.as_deref()
             && event.tool_name_for_matcher() != Some(expected_tool_name)
         {
@@ -153,6 +276,18 @@ fn compile_optional_regex(
         .map_err(|error| format!("invalid {field_name}: {error}"))
 }
 
+fn compile_matcher_regex(pattern: Option<&str>) -> Result<Option<Regex>, String> {
+    let Some(pattern) = pattern.map(str::trim).filter(|pattern| !pattern.is_empty()) else {
+        return Ok(None);
+    };
+    if pattern == "*" {
+        return Ok(None);
+    }
+    Regex::new(pattern)
+        .map(Some)
+        .map_err(|error| format!("invalid matcher: {error}"))
+}
+
 #[derive(Debug, Clone, Copy)]
 enum HookEventKey {
     SessionStart,
@@ -160,9 +295,14 @@ enum HookEventKey {
     UserPromptSubmit,
     PreToolUse,
     PermissionRequest,
+    Notification,
     PostToolUse,
     PostToolUseFailure,
     Stop,
+    TeammateIdle,
+    TaskCompleted,
+    ConfigChange,
+    SubagentStart,
     SubagentStop,
     PreCompact,
     WorktreeCreate,
@@ -177,9 +317,14 @@ impl HookEventKey {
             HookEventKey::UserPromptSubmit => "user_prompt_submit",
             HookEventKey::PreToolUse => "pre_tool_use",
             HookEventKey::PermissionRequest => "permission_request",
+            HookEventKey::Notification => "notification",
             HookEventKey::PostToolUse => "post_tool_use",
             HookEventKey::PostToolUseFailure => "post_tool_use_failure",
             HookEventKey::Stop => "stop",
+            HookEventKey::TeammateIdle => "teammate_idle",
+            HookEventKey::TaskCompleted => "task_completed",
+            HookEventKey::ConfigChange => "config_change",
+            HookEventKey::SubagentStart => "subagent_start",
             HookEventKey::SubagentStop => "subagent_stop",
             HookEventKey::PreCompact => "pre_compact",
             HookEventKey::WorktreeCreate => "worktree_create",
@@ -194,8 +339,10 @@ impl HookEventKey {
                 | HookEventKey::PreToolUse
                 | HookEventKey::PermissionRequest
                 | HookEventKey::Stop
+                | HookEventKey::TeammateIdle
+                | HookEventKey::TaskCompleted
+                | HookEventKey::ConfigChange
                 | HookEventKey::SubagentStop
-                | HookEventKey::PreCompact
         )
     }
 
@@ -207,7 +354,38 @@ impl HookEventKey {
                 | HookEventKey::PermissionRequest
                 | HookEventKey::Stop
                 | HookEventKey::SubagentStop
+                | HookEventKey::ConfigChange
+        )
+    }
+
+    fn supports_prompt_and_agent_hooks(self) -> bool {
+        matches!(
+            self,
+            HookEventKey::PermissionRequest
+                | HookEventKey::PostToolUse
+                | HookEventKey::PostToolUseFailure
+                | HookEventKey::PreToolUse
+                | HookEventKey::Stop
+                | HookEventKey::SubagentStop
+                | HookEventKey::TaskCompleted
+                | HookEventKey::UserPromptSubmit
+        )
+    }
+
+    fn supports_matchers(self) -> bool {
+        matches!(
+            self,
+            HookEventKey::PreToolUse
+                | HookEventKey::PostToolUse
+                | HookEventKey::PostToolUseFailure
+                | HookEventKey::PermissionRequest
+                | HookEventKey::SessionStart
+                | HookEventKey::SessionEnd
+                | HookEventKey::Notification
+                | HookEventKey::SubagentStart
                 | HookEventKey::PreCompact
+                | HookEventKey::SubagentStop
+                | HookEventKey::ConfigChange
         )
     }
 }
@@ -242,12 +420,17 @@ impl Hooks {
                 command_hooks.permission_request,
                 HookEventKey::PermissionRequest,
             ),
+            notification: build_hooks(command_hooks.notification, HookEventKey::Notification),
             post_tool_use: build_hooks(command_hooks.post_tool_use, HookEventKey::PostToolUse),
             post_tool_use_failure: build_hooks(
                 command_hooks.post_tool_use_failure,
                 HookEventKey::PostToolUseFailure,
             ),
             stop: build_hooks(command_hooks.stop, HookEventKey::Stop),
+            teammate_idle: build_hooks(command_hooks.teammate_idle, HookEventKey::TeammateIdle),
+            task_completed: build_hooks(command_hooks.task_completed, HookEventKey::TaskCompleted),
+            config_change: build_hooks(command_hooks.config_change, HookEventKey::ConfigChange),
+            subagent_start: build_hooks(command_hooks.subagent_start, HookEventKey::SubagentStart),
             subagent_stop: build_hooks(command_hooks.subagent_stop, HookEventKey::SubagentStop),
             pre_compact: build_hooks(command_hooks.pre_compact, HookEventKey::PreCompact),
             worktree_create: build_hooks(
@@ -259,7 +442,35 @@ impl Hooks {
                 HookEventKey::WorktreeRemove,
             ),
             ran_once: Arc::new(Mutex::new(HashSet::new())),
+            async_results_tx: None,
+            non_command_executor: None,
+            scoped_hooks: Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
+    }
+
+    pub fn set_async_results_tx(&mut self, tx: mpsc::UnboundedSender<HookResponse>) {
+        self.async_results_tx = Some(tx);
+    }
+
+    pub fn set_non_command_executor(&mut self, executor: Arc<dyn NonCommandHookExecutor>) {
+        self.non_command_executor = Some(executor);
+    }
+
+    pub fn insert_scoped_command_hooks(&self, scope_id: String, command_hooks: CommandHooksConfig) {
+        let scoped = build_scoped_hooks(&scope_id, command_hooks);
+        let mut guard = self
+            .scoped_hooks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.insert(scope_id, scoped);
+    }
+
+    pub fn remove_scoped_hooks(&self, scope_id: &str) {
+        let mut guard = self
+            .scoped_hooks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.remove(scope_id);
     }
 
     fn hooks_for_event(&self, hook_event: &HookEvent) -> (HookEventKey, &[Hook]) {
@@ -273,12 +484,17 @@ impl Hooks {
             HookEvent::PermissionRequest { .. } => {
                 (HookEventKey::PermissionRequest, &self.permission_request)
             }
+            HookEvent::Notification { .. } => (HookEventKey::Notification, &self.notification),
             HookEvent::PostToolUse { .. } => (HookEventKey::PostToolUse, &self.post_tool_use),
             HookEvent::PostToolUseFailure { .. } => (
                 HookEventKey::PostToolUseFailure,
                 &self.post_tool_use_failure,
             ),
             HookEvent::Stop { .. } => (HookEventKey::Stop, &self.stop),
+            HookEvent::TeammateIdle { .. } => (HookEventKey::TeammateIdle, &self.teammate_idle),
+            HookEvent::TaskCompleted { .. } => (HookEventKey::TaskCompleted, &self.task_completed),
+            HookEvent::ConfigChange { .. } => (HookEventKey::ConfigChange, &self.config_change),
+            HookEvent::SubagentStart { .. } => (HookEventKey::SubagentStart, &self.subagent_start),
             HookEvent::SubagentStop { .. } => (HookEventKey::SubagentStop, &self.subagent_stop),
             HookEvent::PreCompact { .. } => (HookEventKey::PreCompact, &self.pre_compact),
             HookEvent::WorktreeCreate { .. } => {
@@ -290,44 +506,154 @@ impl Hooks {
         }
     }
 
+    fn scoped_hooks_for_event(&self, hook_event: &HookEvent) -> Vec<Hook> {
+        let guard = self
+            .scoped_hooks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut entries = guard.iter().collect::<Vec<_>>();
+        entries.sort_by_key(|(scope_id, _)| scope_id.as_str());
+
+        entries
+            .into_iter()
+            .flat_map(|(_scope_id, scoped)| scoped.hooks_for_event(hook_event).iter().cloned())
+            .collect()
+    }
+
     pub async fn dispatch(&self, hook_payload: HookPayload) -> Vec<HookResponse> {
         let (event_key, hooks) = self.hooks_for_event(&hook_payload.hook_event);
-        let mut outcomes = Vec::with_capacity(hooks.len());
-        for hook in hooks {
+        let scoped_hooks = self.scoped_hooks_for_event(&hook_payload.hook_event);
+        let mut seen = HashSet::new();
+        let mut outcomes = Vec::with_capacity(hooks.len() + scoped_hooks.len());
+        let mut hook_names_by_outcome_index = Vec::with_capacity(hooks.len() + scoped_hooks.len());
+        let mut join_set = JoinSet::new();
+
+        for hook in hooks.iter().chain(scoped_hooks.iter()) {
             if let Some(error) = hook.config_error.as_deref() {
-                outcomes.push(HookResponse {
+                outcomes.push(Some(HookResponse {
                     hook_name: hook.name.clone(),
                     result: HookResult {
                         error: Some(error.to_string()),
                         ..HookResult::success()
                     },
-                });
+                }));
+                hook_names_by_outcome_index.push(None);
                 continue;
             }
 
-            if !hook.matcher.matches(&hook_payload.hook_event) {
+            if event_key.supports_matchers() && !hook.matcher.matches(&hook_payload.hook_event) {
+                continue;
+            }
+
+            if !seen.insert(hook.handler_identity.clone()) {
                 continue;
             }
 
             if hook.once {
                 let mut guard = self.ran_once.lock().await;
-                if !guard.insert(hook.once_key.clone()) {
+                if !guard.insert(hook.handler_identity.clone()) {
                     continue;
                 }
             }
 
-            let result = execute_command_hook(&hook_payload, hook, event_key).await;
-            let should_stop = matches!(result.control, HookResultControl::Block { .. });
-            outcomes.push(HookResponse {
-                hook_name: hook.name.clone(),
-                result,
+            let outcome_index = outcomes.len();
+            outcomes.push(None);
+            hook_names_by_outcome_index.push(Some(hook.name.clone()));
+
+            let payload = hook_payload.clone();
+            let hook_name = hook.name.clone();
+            let handler = hook.handler.clone();
+            let timeout = hook.timeout;
+            let async_results_tx = self.async_results_tx.clone();
+            let non_command_executor = self.non_command_executor.clone();
+
+            join_set.spawn(async move {
+                let result = match handler {
+                    HookHandler::Command { argv, async_ } => {
+                        if async_ {
+                            if let Some(tx) = async_results_tx {
+                                let payload = payload.clone();
+                                let hook_name = hook_name.clone();
+                                let argv = Arc::clone(&argv);
+                                tokio::spawn(async move {
+                                    let mut result =
+                                        execute_command_hook(&payload, &argv, timeout, event_key)
+                                            .await;
+                                    result.control = HookResultControl::Continue;
+                                    result.permission_decision = None;
+                                    result.permission_decision_reason = None;
+                                    let _ = tx.send(HookResponse { hook_name, result });
+                                });
+                            }
+                            HookResult::success()
+                        } else {
+                            execute_command_hook(&payload, &argv, timeout, event_key).await
+                        }
+                    }
+                    HookHandler::Prompt { prompt, model } => match non_command_executor {
+                        Some(executor) => {
+                            executor
+                                .execute_prompt(
+                                    payload.clone(),
+                                    prompt.as_ref().to_string(),
+                                    model.clone(),
+                                    timeout,
+                                )
+                                .await
+                        }
+                        None => HookResult {
+                            error: Some("prompt hooks are not configured".to_string()),
+                            ..HookResult::success()
+                        },
+                    },
+                    HookHandler::Agent { prompt, model } => match non_command_executor {
+                        Some(executor) => {
+                            executor
+                                .execute_agent(
+                                    payload.clone(),
+                                    prompt.as_ref().to_string(),
+                                    model.clone(),
+                                    timeout,
+                                )
+                                .await
+                        }
+                        None => HookResult {
+                            error: Some("agent hooks are not configured".to_string()),
+                            ..HookResult::success()
+                        },
+                    },
+                };
+
+                (outcome_index, HookResponse { hook_name, result })
             });
-            if should_stop {
-                break;
+        }
+
+        while let Some(joined) = join_set.join_next().await {
+            if let Ok((index, response)) = joined
+                && let Some(slot) = outcomes.get_mut(index)
+            {
+                *slot = Some(response);
             }
         }
 
-        outcomes
+        for (index, slot) in outcomes.iter_mut().enumerate() {
+            if slot.is_some() {
+                continue;
+            }
+            let hook_name = hook_names_by_outcome_index
+                .get(index)
+                .and_then(Option::as_deref)
+                .unwrap_or("<unknown>");
+            *slot = Some(HookResponse {
+                hook_name: hook_name.to_string(),
+                result: HookResult {
+                    error: Some("hook task failed".to_string()),
+                    ..HookResult::success()
+                },
+            });
+        }
+
+        outcomes.into_iter().flatten().collect()
     }
 }
 
@@ -335,47 +661,274 @@ fn build_hooks(configs: Vec<CommandHookConfig>, event_key: HookEventKey) -> Vec<
     configs
         .into_iter()
         .enumerate()
-        .filter_map(|(index, config)| command_hook(config, event_key, index))
+        .filter_map(|(index, config)| hook_from_config(config, event_key, index, None))
         .collect()
 }
 
-fn command_hook(config: CommandHookConfig, event_key: HookEventKey, index: usize) -> Option<Hook> {
-    if config.command.is_empty() || config.command[0].trim().is_empty() {
-        return None;
-    }
-
-    let once_key = format!("{}-{}", event_key.as_str(), index + 1);
+fn hook_from_config(
+    config: CommandHookConfig,
+    event_key: HookEventKey,
+    index: usize,
+    once_key_prefix: Option<&str>,
+) -> Option<Hook> {
+    let once = config.once;
+    let base_once_key = format!("{}-{}", event_key.as_str(), index + 1);
+    let once_key = match once_key_prefix {
+        Some(prefix) if !prefix.is_empty() => format!("{prefix}:{base_once_key}"),
+        _ => base_once_key,
+    };
     let name = config.name.unwrap_or_else(|| once_key.clone());
     let timeout = config.timeout.map(Duration::from_secs);
-    let (matcher, config_error) = match CompiledMatcher::compile(&config.matcher) {
-        Ok(matcher) => (matcher, None),
-        Err(error) => (
+    let (matcher, config_error) = if event_key.supports_matchers() {
+        match CompiledMatcher::compile(&config.matcher) {
+            Ok(matcher) => (matcher, None),
+            Err(error) => (
+                CompiledMatcher {
+                    tool_name: None,
+                    tool_name_regex: None,
+                    prompt_regex: None,
+                    matcher_regex: None,
+                },
+                Some(error),
+            ),
+        }
+    } else {
+        (
             CompiledMatcher {
                 tool_name: None,
                 tool_name_regex: None,
                 prompt_regex: None,
+                matcher_regex: None,
             },
-            Some(error),
-        ),
+            None,
+        )
     };
+
+    let (handler, handler_error) = match config.handler_type {
+        HookHandlerType::Command => {
+            if config.command.is_empty() || config.command[0].trim().is_empty() {
+                return None;
+            }
+            (
+                HookHandler::Command {
+                    argv: Arc::new(config.command),
+                    async_: config.async_,
+                },
+                None,
+            )
+        }
+        HookHandlerType::Prompt => {
+            let prompt = config
+                .prompt
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())?;
+            if !event_key.supports_prompt_and_agent_hooks() {
+                (
+                    HookHandler::Command {
+                        argv: Arc::new(Vec::new()),
+                        async_: false,
+                    },
+                    Some(format!(
+                        "prompt hooks are not supported for {}",
+                        event_key.as_str()
+                    )),
+                )
+            } else {
+                (
+                    HookHandler::Prompt {
+                        prompt: Arc::new(prompt.to_string()),
+                        model: config.model.clone(),
+                    },
+                    None,
+                )
+            }
+        }
+        HookHandlerType::Agent => {
+            let prompt = config
+                .prompt
+                .as_deref()
+                .map(str::trim)
+                .filter(|p| !p.is_empty())?;
+            if !event_key.supports_prompt_and_agent_hooks() {
+                (
+                    HookHandler::Command {
+                        argv: Arc::new(Vec::new()),
+                        async_: false,
+                    },
+                    Some(format!(
+                        "agent hooks are not supported for {}",
+                        event_key.as_str()
+                    )),
+                )
+            } else {
+                (
+                    HookHandler::Agent {
+                        prompt: Arc::new(prompt.to_string()),
+                        model: config.model.clone(),
+                    },
+                    None,
+                )
+            }
+        }
+    };
+
+    let config_error = config_error.or(handler_error);
+    let handler_identity = hook_handler_identity(event_key, &handler, timeout, once);
 
     Some(Hook {
         name,
-        once_key,
-        command: Arc::new(config.command),
+        handler_identity,
+        handler,
         timeout,
         matcher,
-        once: config.once,
+        once,
         config_error,
     })
 }
 
+fn hook_handler_identity(
+    event_key: HookEventKey,
+    handler: &HookHandler,
+    timeout: Option<Duration>,
+    once: bool,
+) -> String {
+    let timeout_secs = timeout.map(|duration| duration.as_secs());
+    let timeout_key = timeout_secs.map_or_else(|| "none".to_string(), |secs| secs.to_string());
+
+    match handler {
+        HookHandler::Command { argv, async_ } => {
+            let argv_json =
+                serde_json::to_string(argv.as_ref()).unwrap_or_else(|_| "[]".to_string());
+            format!(
+                "{}|command|async={async_}|timeout={timeout_key}|once={once}|argv={argv_json}",
+                event_key.as_str(),
+            )
+        }
+        HookHandler::Prompt { prompt, model } => {
+            let prompt_json = serde_json::to_string(prompt.as_ref()).unwrap_or_default();
+            let model_json = serde_json::to_string(model).unwrap_or_else(|_| "null".to_string());
+            format!(
+                "{}|prompt|timeout={timeout_key}|once={once}|model={model_json}|prompt={prompt_json}",
+                event_key.as_str(),
+            )
+        }
+        HookHandler::Agent { prompt, model } => {
+            let prompt_json = serde_json::to_string(prompt.as_ref()).unwrap_or_default();
+            let model_json = serde_json::to_string(model).unwrap_or_else(|_| "null".to_string());
+            format!(
+                "{}|agent|timeout={timeout_key}|once={once}|model={model_json}|prompt={prompt_json}",
+                event_key.as_str(),
+            )
+        }
+    }
+}
+
+fn build_scoped_hooks(scope_id: &str, command_hooks: CommandHooksConfig) -> ScopedHooks {
+    ScopedHooks {
+        session_start: build_hooks_with_prefix(
+            scope_id,
+            command_hooks.session_start,
+            HookEventKey::SessionStart,
+        ),
+        session_end: build_hooks_with_prefix(
+            scope_id,
+            command_hooks.session_end,
+            HookEventKey::SessionEnd,
+        ),
+        user_prompt_submit: build_hooks_with_prefix(
+            scope_id,
+            command_hooks.user_prompt_submit,
+            HookEventKey::UserPromptSubmit,
+        ),
+        pre_tool_use: build_hooks_with_prefix(
+            scope_id,
+            command_hooks.pre_tool_use,
+            HookEventKey::PreToolUse,
+        ),
+        permission_request: build_hooks_with_prefix(
+            scope_id,
+            command_hooks.permission_request,
+            HookEventKey::PermissionRequest,
+        ),
+        notification: build_hooks_with_prefix(
+            scope_id,
+            command_hooks.notification,
+            HookEventKey::Notification,
+        ),
+        post_tool_use: build_hooks_with_prefix(
+            scope_id,
+            command_hooks.post_tool_use,
+            HookEventKey::PostToolUse,
+        ),
+        post_tool_use_failure: build_hooks_with_prefix(
+            scope_id,
+            command_hooks.post_tool_use_failure,
+            HookEventKey::PostToolUseFailure,
+        ),
+        stop: build_hooks_with_prefix(scope_id, command_hooks.stop, HookEventKey::Stop),
+        teammate_idle: build_hooks_with_prefix(
+            scope_id,
+            command_hooks.teammate_idle,
+            HookEventKey::TeammateIdle,
+        ),
+        task_completed: build_hooks_with_prefix(
+            scope_id,
+            command_hooks.task_completed,
+            HookEventKey::TaskCompleted,
+        ),
+        config_change: build_hooks_with_prefix(
+            scope_id,
+            command_hooks.config_change,
+            HookEventKey::ConfigChange,
+        ),
+        subagent_start: build_hooks_with_prefix(
+            scope_id,
+            command_hooks.subagent_start,
+            HookEventKey::SubagentStart,
+        ),
+        subagent_stop: build_hooks_with_prefix(
+            scope_id,
+            command_hooks.subagent_stop,
+            HookEventKey::SubagentStop,
+        ),
+        pre_compact: build_hooks_with_prefix(
+            scope_id,
+            command_hooks.pre_compact,
+            HookEventKey::PreCompact,
+        ),
+        worktree_create: build_hooks_with_prefix(
+            scope_id,
+            command_hooks.worktree_create,
+            HookEventKey::WorktreeCreate,
+        ),
+        worktree_remove: build_hooks_with_prefix(
+            scope_id,
+            command_hooks.worktree_remove,
+            HookEventKey::WorktreeRemove,
+        ),
+    }
+}
+
+fn build_hooks_with_prefix(
+    scope_id: &str,
+    configs: Vec<CommandHookConfig>,
+    event_key: HookEventKey,
+) -> Vec<Hook> {
+    configs
+        .into_iter()
+        .enumerate()
+        .filter_map(|(index, config)| hook_from_config(config, event_key, index, Some(scope_id)))
+        .collect()
+}
+
 async fn execute_command_hook(
     payload: &HookPayload,
-    hook: &Hook,
+    argv: &Arc<Vec<String>>,
+    timeout: Option<Duration>,
     event_key: HookEventKey,
 ) -> HookResult {
-    let mut command = match command_from_argv(hook.command.as_ref()) {
+    let mut command = match command_from_argv(argv.as_ref()) {
         Some(command) => command,
         None => return HookResult::success(),
     };
@@ -404,7 +957,7 @@ async fn execute_command_hook(
         return result_with_error(error);
     }
 
-    let output = match wait_for_output(child, hook.timeout).await {
+    let output = match wait_for_output(child, timeout).await {
         Ok(output) => output,
         Err(error) => return result_with_error(error),
     };
@@ -864,7 +1417,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn blocking_hook_stops_subsequent_hooks_for_event() {
+    async fn blocking_hook_does_not_stop_other_hooks_for_event() {
         let dir = tempfile::tempdir().expect("tempdir");
         let hooks = Hooks::new(HooksConfig {
             command_hooks: CommandHooksConfig {
@@ -893,11 +1446,123 @@ mod tests {
             ))
             .await;
 
-        assert_eq!(outcomes.len(), 1);
+        assert_eq!(outcomes.len(), 2);
         assert!(matches!(
             outcomes[0].result.control,
             HookResultControl::Block { .. }
         ));
+        assert!(matches!(
+            outcomes[1].result.control,
+            HookResultControl::Continue
+        ));
+    }
+
+    #[tokio::test]
+    async fn identical_hooks_are_deduplicated() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                pre_tool_use: vec![
+                    CommandHookConfig {
+                        command: echo_command(),
+                        ..Default::default()
+                    },
+                    CommandHookConfig {
+                        command: echo_command(),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        });
+
+        let outcomes = hooks
+            .dispatch(payload(
+                dir.path(),
+                HookEvent::PreToolUse {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({"command":["echo","hi"]}),
+                    tool_use_id: "call-1".to_string(),
+                },
+            ))
+            .await;
+
+        assert_eq!(outcomes.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn matching_hooks_run_in_parallel() {
+        use std::time::Duration;
+
+        struct BarrierExecutor {
+            barrier: tokio::sync::Barrier,
+        }
+
+        impl NonCommandHookExecutor for BarrierExecutor {
+            fn execute_prompt(
+                self: Arc<Self>,
+                _payload: HookPayload,
+                _prompt: String,
+                _model: Option<String>,
+                _timeout: Option<Duration>,
+            ) -> Pin<Box<dyn Future<Output = HookResult> + Send>> {
+                Box::pin(async move {
+                    self.barrier.wait().await;
+                    HookResult::success()
+                })
+            }
+
+            fn execute_agent(
+                self: Arc<Self>,
+                _payload: HookPayload,
+                _prompt: String,
+                _model: Option<String>,
+                _timeout: Option<Duration>,
+            ) -> Pin<Box<dyn Future<Output = HookResult> + Send>> {
+                Box::pin(async move {
+                    self.barrier.wait().await;
+                    HookResult::success()
+                })
+            }
+        }
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let mut hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                pre_tool_use: vec![
+                    CommandHookConfig {
+                        handler_type: HookHandlerType::Prompt,
+                        prompt: Some("p1".to_string()),
+                        ..Default::default()
+                    },
+                    CommandHookConfig {
+                        handler_type: HookHandlerType::Prompt,
+                        prompt: Some("p2".to_string()),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        });
+        hooks.set_non_command_executor(Arc::new(BarrierExecutor {
+            barrier: tokio::sync::Barrier::new(2),
+        }));
+
+        let outcomes = tokio::time::timeout(
+            Duration::from_secs(1),
+            hooks.dispatch(payload(
+                dir.path(),
+                HookEvent::PreToolUse {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({"command":["echo","hi"]}),
+                    tool_use_id: "call-1".to_string(),
+                },
+            )),
+        )
+        .await
+        .expect("dispatch should not time out");
+
+        assert_eq!(outcomes.len(), 2);
     }
 
     #[tokio::test]
@@ -993,6 +1658,36 @@ mod tests {
             HookResultControl::Continue
         ));
         assert!(outcomes[0].result.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn exit_2_blocks_teammate_idle() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                teammate_idle: vec![CommandHookConfig {
+                    command: exit_with_stderr_command(2, "keep working"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        });
+
+        let outcomes = hooks
+            .dispatch(payload(
+                dir.path(),
+                HookEvent::TeammateIdle {
+                    teammate_name: "planner".to_string(),
+                    team_name: "my-project".to_string(),
+                },
+            ))
+            .await;
+
+        assert_eq!(outcomes.len(), 1);
+        assert!(matches!(
+            &outcomes[0].result.control,
+            HookResultControl::Block { reason } if reason == "keep working"
+        ));
     }
 
     #[tokio::test]
@@ -1148,6 +1843,98 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_hooks_can_be_installed_and_removed() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::default();
+
+        hooks.insert_scoped_command_hooks(
+            "scope-1".to_string(),
+            CommandHooksConfig {
+                pre_tool_use: vec![CommandHookConfig {
+                    command: exit_with_stderr_command(2, "blocked by scoped hook"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+
+        let blocked = hooks
+            .dispatch(payload(
+                dir.path(),
+                HookEvent::PreToolUse {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({"command":["echo","hi"]}),
+                    tool_use_id: "call-1".to_string(),
+                },
+            ))
+            .await;
+
+        assert_eq!(blocked.len(), 1);
+        assert!(matches!(
+            &blocked[0].result.control,
+            HookResultControl::Block { reason } if reason == "blocked by scoped hook"
+        ));
+
+        hooks.remove_scoped_hooks("scope-1");
+
+        let allowed = hooks
+            .dispatch(payload(
+                dir.path(),
+                HookEvent::PreToolUse {
+                    tool_name: "shell".to_string(),
+                    tool_input: json!({"command":["echo","hi"]}),
+                    tool_use_id: "call-2".to_string(),
+                },
+            ))
+            .await;
+
+        assert_eq!(allowed.len(), 0);
+    }
+
+    #[tokio::test]
+    async fn scoped_hooks_are_deduplicated_across_scopes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hooks = Hooks::default();
+
+        hooks.insert_scoped_command_hooks(
+            "scope-1".to_string(),
+            CommandHooksConfig {
+                session_start: vec![CommandHookConfig {
+                    command: echo_command(),
+                    once: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+        hooks.insert_scoped_command_hooks(
+            "scope-2".to_string(),
+            CommandHooksConfig {
+                session_start: vec![CommandHookConfig {
+                    command: echo_command(),
+                    once: true,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+
+        let hook_event = HookEvent::SessionStart {
+            source: "cli".to_string(),
+            model: "gpt-5".to_string(),
+            agent_type: None,
+        };
+
+        let first = hooks
+            .dispatch(payload(dir.path(), hook_event.clone()))
+            .await;
+        let second = hooks.dispatch(payload(dir.path(), hook_event)).await;
+
+        assert_eq!(first.len(), 1);
+        assert_eq!(second.len(), 0);
+    }
+
+    #[tokio::test]
     async fn invalid_tool_name_regex_surfaces_error() {
         let dir = tempfile::tempdir().expect("tempdir");
         let hooks = Hooks::new(HooksConfig {
@@ -1230,7 +2017,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn matcher_prompt_regex_filters_hooks() {
+    async fn user_prompt_submit_does_not_support_matchers() {
         let dir = tempfile::tempdir().expect("tempdir");
         let hooks = Hooks::new(HooksConfig {
             command_hooks: CommandHooksConfig {
@@ -1264,7 +2051,7 @@ mod tests {
             .await;
 
         assert_eq!(matches.len(), 1);
-        assert_eq!(does_not_match.len(), 0);
+        assert_eq!(does_not_match.len(), 1);
     }
 
     #[tokio::test]

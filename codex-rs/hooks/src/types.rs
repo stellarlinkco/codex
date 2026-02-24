@@ -40,6 +40,11 @@ pub enum HookEvent {
         tool_use_id: String,
         permission_suggestions: Option<Value>,
     },
+    Notification {
+        message: String,
+        title: Option<String>,
+        notification_type: String,
+    },
     PostToolUse {
         tool_name: String,
         tool_input: Value,
@@ -56,6 +61,25 @@ pub enum HookEvent {
     Stop {
         stop_hook_active: bool,
         last_assistant_message: Option<String>,
+    },
+    SubagentStart {
+        agent_id: String,
+        agent_type: String,
+    },
+    TeammateIdle {
+        teammate_name: String,
+        team_name: String,
+    },
+    TaskCompleted {
+        task_id: String,
+        task_subject: String,
+        task_description: Option<String>,
+        teammate_name: Option<String>,
+        team_name: Option<String>,
+    },
+    ConfigChange {
+        source: String,
+        file_path: Option<PathBuf>,
     },
     SubagentStop {
         stop_hook_active: bool,
@@ -79,6 +103,25 @@ pub enum HookEvent {
 }
 
 impl HookEvent {
+    pub fn matcher_text_for_matcher(&self) -> Option<&str> {
+        match self {
+            HookEvent::PreToolUse { tool_name, .. }
+            | HookEvent::PermissionRequest { tool_name, .. }
+            | HookEvent::PostToolUse { tool_name, .. }
+            | HookEvent::PostToolUseFailure { tool_name, .. } => Some(tool_name),
+            HookEvent::SessionStart { source, .. } => Some(source),
+            HookEvent::SessionEnd { reason } => Some(reason),
+            HookEvent::Notification {
+                notification_type, ..
+            } => Some(notification_type),
+            HookEvent::SubagentStart { agent_type, .. }
+            | HookEvent::SubagentStop { agent_type, .. } => Some(agent_type),
+            HookEvent::PreCompact { trigger, .. } => Some(trigger),
+            HookEvent::ConfigChange { source, .. } => Some(source),
+            _ => None,
+        }
+    }
+
     pub fn tool_name_for_matcher(&self) -> Option<&str> {
         match self {
             HookEvent::PreToolUse { tool_name, .. }
@@ -251,6 +294,58 @@ mod tests {
                 worktree_path: PathBuf::from("/repo-wt"),
             }
             .tool_name_for_matcher(),
+            None
+        );
+        assert_eq!(
+            HookEvent::TeammateIdle {
+                teammate_name: "planner".to_string(),
+                team_name: "my-project".to_string(),
+            }
+            .tool_name_for_matcher(),
+            None
+        );
+        assert_eq!(
+            HookEvent::Notification {
+                message: "Permission needed".to_string(),
+                title: Some("Permission needed".to_string()),
+                notification_type: "permission_prompt".to_string(),
+            }
+            .tool_name_for_matcher(),
+            None
+        );
+        assert_eq!(
+            HookEvent::SubagentStart {
+                agent_id: "agent-1".to_string(),
+                agent_type: "Explore".to_string(),
+            }
+            .tool_name_for_matcher(),
+            None
+        );
+        assert_eq!(
+            HookEvent::TaskCompleted {
+                task_id: "task-1".to_string(),
+                task_subject: "Ship it".to_string(),
+                task_description: None,
+                teammate_name: None,
+                team_name: None,
+            }
+            .user_prompt_for_matcher(),
+            None
+        );
+        assert_eq!(
+            HookEvent::ConfigChange {
+                source: "skills".to_string(),
+                file_path: None,
+            }
+            .user_prompt_for_matcher(),
+            None
+        );
+        assert_eq!(
+            HookEvent::TeammateIdle {
+                teammate_name: "planner".to_string(),
+                team_name: "my-project".to_string(),
+            }
+            .user_prompt_for_matcher(),
             None
         );
         assert_eq!(

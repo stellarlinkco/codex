@@ -1162,6 +1162,105 @@ fn create_team_broadcast_tool() -> ToolSpec {
     })
 }
 
+fn create_team_ask_lead_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "team_id".to_string(),
+            JsonSchema::String {
+                description: Some("Team id returned by spawn_team.".to_string()),
+            },
+        ),
+        (
+            "message".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Legacy plain-text message to send to the lead. Use either message or items."
+                        .to_string(),
+                ),
+            },
+        ),
+        ("items".to_string(), create_collab_input_items_schema()),
+        (
+            "interrupt".to_string(),
+            JsonSchema::Boolean {
+                description: Some(
+                    "When true, stop the lead's current task before sending input.".to_string(),
+                ),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "team_ask_lead".to_string(),
+        description: "Send a message to the team lead.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["team_id".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_team_inbox_pop_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "team_id".to_string(),
+            JsonSchema::String {
+                description: Some("Team id returned by spawn_team.".to_string()),
+            },
+        ),
+        (
+            "limit".to_string(),
+            JsonSchema::Number {
+                description: Some("Maximum number of messages to return (1-500).".to_string()),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "team_inbox_pop".to_string(),
+        description: "Pop messages from the caller's durable team inbox.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["team_id".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
+fn create_team_inbox_ack_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "team_id".to_string(),
+            JsonSchema::String {
+                description: Some("Team id returned by spawn_team.".to_string()),
+            },
+        ),
+        (
+            "ack_token".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Ack token returned by team_inbox_pop. Empty string is treated as no-op."
+                        .to_string(),
+                ),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: "team_inbox_ack".to_string(),
+        description: "Acknowledge previously popped inbox messages.".to_string(),
+        strict: false,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["team_id".to_string(), "ack_token".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+    })
+}
+
 fn create_team_cleanup_tool() -> ToolSpec {
     let properties = BTreeMap::from([(
         "team_id".to_string(),
@@ -2025,6 +2124,9 @@ pub(crate) fn build_specs(
         builder.push_spec_with_parallel_support(create_team_task_complete_tool(), true);
         builder.push_spec_with_parallel_support(create_team_message_tool(), true);
         builder.push_spec_with_parallel_support(create_team_broadcast_tool(), true);
+        builder.push_spec_with_parallel_support(create_team_ask_lead_tool(), true);
+        builder.push_spec_with_parallel_support(create_team_inbox_pop_tool(), true);
+        builder.push_spec_with_parallel_support(create_team_inbox_ack_tool(), true);
         builder.push_spec_with_parallel_support(create_team_cleanup_tool(), true);
         builder.register_handler("spawn_agent", multi_agent_handler.clone());
         builder.register_handler("send_input", multi_agent_handler.clone());
@@ -2040,6 +2142,9 @@ pub(crate) fn build_specs(
         builder.register_handler("team_task_complete", multi_agent_handler.clone());
         builder.register_handler("team_message", multi_agent_handler.clone());
         builder.register_handler("team_broadcast", multi_agent_handler.clone());
+        builder.register_handler("team_ask_lead", multi_agent_handler.clone());
+        builder.register_handler("team_inbox_pop", multi_agent_handler.clone());
+        builder.register_handler("team_inbox_ack", multi_agent_handler.clone());
         builder.register_handler("team_cleanup", multi_agent_handler);
     }
 
@@ -2324,6 +2429,9 @@ mod tests {
                 "team_task_complete",
                 "team_message",
                 "team_broadcast",
+                "team_ask_lead",
+                "team_inbox_pop",
+                "team_inbox_ack",
                 "team_cleanup",
             ],
         );
