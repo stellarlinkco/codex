@@ -2280,6 +2280,38 @@ mod tests {
     }
 
     #[test]
+    fn apply_stdout_json_blocks_on_abort_decision_with_reason() {
+        let result = apply_stdout_json(
+            HookEventKey::UserPromptSubmit,
+            json!({
+                "decision": "abort",
+                "reason": "no",
+            }),
+        );
+
+        assert!(matches!(
+            result.control,
+            HookResultControl::Block { reason } if reason == "no"
+        ));
+    }
+
+    #[test]
+    fn apply_stdout_json_block_reason_does_not_fallback_to_permission_decision_reason() {
+        let result = apply_stdout_json(
+            HookEventKey::UserPromptSubmit,
+            json!({
+                "decision": "block",
+                "permissionDecisionReason": "nope",
+            }),
+        );
+
+        assert!(matches!(
+            result.control,
+            HookResultControl::Block { reason } if reason == "hook blocked operation"
+        ));
+    }
+
+    #[test]
     fn apply_stdout_json_ignores_decisions_for_post_tool_use() {
         let result = apply_stdout_json(
             HookEventKey::PostToolUse,
@@ -2332,6 +2364,24 @@ mod tests {
             result.permission_decision_reason,
             Some("check with user".to_string())
         );
+        assert!(matches!(result.control, HookResultControl::Continue));
+    }
+
+    #[test]
+    fn apply_stdout_json_permission_request_accepts_continue_top_level_decision() {
+        let result = apply_stdout_json(
+            HookEventKey::PermissionRequest,
+            json!({
+                "decision": "continue",
+                "permissionDecisionReason": "ok",
+            }),
+        );
+
+        assert_eq!(
+            result.permission_decision,
+            Some(HookPermissionDecision::Allow)
+        );
+        assert_eq!(result.permission_decision_reason, Some("ok".to_string()));
         assert!(matches!(result.control, HookResultControl::Continue));
     }
 
