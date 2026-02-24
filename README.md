@@ -21,11 +21,13 @@
 ### Install (latest GitHub Release)
 
 
-****
+**macOS, Linux, WSL:**
 
 ```shell
 curl -fsSL https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/install.sh | bash
 ```
+
+**Windows PowerShell:**
 
 ```powershell
 irm https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/install.ps1 | iex
