@@ -37,6 +37,13 @@ install:
     rustup show active-toolchain
     cargo fetch
 
+# Rebuild the Web UI and sync it into the embedded `codex serve` assets.
+[no-cd]
+write-serve-web-assets:
+    cd web && npm ci && npm run build
+    rm -rf codex-rs/serve/assets/web
+    cp -R web/dist codex-rs/serve/assets/web
+
 # Run `cargo nextest` since it's faster than `cargo test`, though including
 # --no-fail-fast is important to ensure all tests are run.
 #

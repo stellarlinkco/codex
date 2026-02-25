@@ -534,6 +534,7 @@ mod tests {
     use super::MessagePostRequest;
     use super::ReasoningSummaryConfig;
     use super::SpawnRequest;
+    use super::WEB_ASSETS;
     use super::custom_prompts_to_slash_commands;
     use super::extract_reasoning_effort_from_history;
     use super::handle_machine_spawn;
@@ -669,6 +670,38 @@ mod tests {
         let req: SpawnRequest =
             serde_json::from_str(r#"{"directory":"x","reasoningEffort":"high"}"#).unwrap();
         assert_eq!(req.reasoning_effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn embedded_web_assets_include_session_ux_features() {
+        let index = WEB_ASSETS
+            .get_file("index.html")
+            .expect("embedded serve assets include index.html");
+        let index_html = std::str::from_utf8(index.contents()).expect("index.html is utf-8");
+
+        let marker = "src=\"/assets/index-";
+        let start = index_html
+            .find(marker)
+            .expect("index.html includes main JS bundle script tag");
+        let path_start = start + "src=\"/".len();
+        let path_end = index_html[path_start..]
+            .find('"')
+            .expect("index.html script src attribute is quoted");
+        let bundle_path = &index_html[path_start..path_start + path_end];
+
+        let bundle = WEB_ASSETS
+            .get_file(bundle_path)
+            .unwrap_or_else(|| panic!("embedded serve assets include {bundle_path}"));
+        let bundle_js = std::str::from_utf8(bundle.contents()).expect("main JS bundle is utf-8");
+
+        assert!(
+            bundle_js.contains("reasoningEffort"),
+            "embedded Web UI bundle missing reasoningEffort (run `just write-serve-web-assets`)"
+        );
+        assert!(
+            bundle_js.contains("spawn_team"),
+            "embedded Web UI bundle missing agent teams tool support (run `just write-serve-web-assets`)"
+        );
     }
 
     #[test]

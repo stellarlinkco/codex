@@ -395,6 +395,23 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
+      - name: Setup Node.js for Web UI
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Build embedded Web UI assets
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: |
+          set -euo pipefail
+          cd web
+          npm ci
+          npm run build
+          cd ..
+          rm -rf codex-rs/serve/assets/web
+          cp -R web/dist codex-rs/serve/assets/web
+
       - name: Install Linux bwrap build dependencies
         if: ${{ runner.os == 'Linux' }}
         shell: bash

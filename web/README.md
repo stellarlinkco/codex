@@ -124,8 +124,9 @@ React 19 + Vite + TanStack Router/Query + Tailwind + @assistant-ui/react + xterm
 From the repo root:
 
 ```bash
-bun install
-bun run dev:web
+cd web
+npm install
+npm run dev
 ```
 
 If testing in Telegram, set:
@@ -135,10 +136,17 @@ If testing in Telegram, set:
 ## Build
 
 ```bash
-bun run build:web
+cd web
+npm run build
 ```
 
-The built assets land in `web/dist` and are served by `codex serve`. The single executable can embed these assets.
+The built assets land in `web/dist`. `codex serve --dev` serves `web/dist` directly.
+
+For the default (embedded) UI, rebuild and sync the assets into `codex-rs/serve/assets/web`:
+
+```bash
+just write-serve-web-assets
+```
 
 ## Standalone hosting
 
@@ -147,7 +155,8 @@ You can host `web/dist` on a static host (GitHub Pages, Cloudflare Pages) and po
 1. Build the web app. If your static host uses a subpath, set the Vite base:
 
 ```bash
-bun run build:web -- --base /<repo>/
+cd web
+npm run build -- --base /<repo>/
 ```
 
 2. Deploy `web/dist` to your static host.
