@@ -356,11 +356,32 @@ jobs:
             zstd -T0 -19 "$dest/$base"
           done
 
-      - uses: actions/upload-artifact@v6
+      - name: Upload release artifacts (attempt 1)
+        id: upload_release_artifacts_1
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ matrix.target }}
           # Upload the per-binary .zst files as well as the new .tar.gz
           # equivalents we generated in the previous step.
+          path: |
+            codex-rs/dist/${{ matrix.target }}/*
+
+      - name: Upload release artifacts (attempt 2)
+        id: upload_release_artifacts_2
+        if: steps.upload_release_artifacts_1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            codex-rs/dist/${{ matrix.target }}/*
+
+      - name: Upload release artifacts (attempt 3)
+        if: steps.upload_release_artifacts_2.outcome == 'failure'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ matrix.target }}
           path: |
             codex-rs/dist/${{ matrix.target }}/*
 
@@ -513,7 +534,28 @@ jobs:
             fi
           done
 
-      - uses: actions/upload-artifact@v6
+      - name: Upload release artifacts (attempt 1)
+        id: upload_release_artifacts_1
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.TARGET }}
+          path: |
+            codex-rs/dist/${{ env.TARGET }}/*
+
+      - name: Upload release artifacts (attempt 2)
+        id: upload_release_artifacts_2
+        if: steps.upload_release_artifacts_1.outcome == 'failure'
+        continue-on-error: true
+        uses: actions/upload-artifact@v6
+        with:
+          name: ${{ env.TARGET }}
+          path: |
+            codex-rs/dist/${{ env.TARGET }}/*
+
+      - name: Upload release artifacts (attempt 3)
+        if: steps.upload_release_artifacts_2.outcome == 'failure'
+        uses: actions/upload-artifact@v6
         with:
           name: ${{ env.TARGET }}
           path: |
