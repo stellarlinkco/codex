@@ -389,7 +389,7 @@ jobs:
             target: aarch64-apple-darwin
           - runner: macos-latest
             target: x86_64-apple-darwin
-          - runner: ubuntu-24.04
+          - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
 
     steps:
@@ -418,7 +418,7 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -y
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev binutils
 
       - uses: dtolnay/rust-toolchain@1.93.0
         with:
@@ -428,6 +428,38 @@ jobs:
         shell: bash
         run: |
           cargo build --target "${TARGET}" --release --timings --bin codex --bin codex-responses-api-proxy
+
+      - name: Verify GLIBC requirements (Ubuntu 22.04)
+        if: ${{ runner.os == 'Linux' && env.TARGET == 'x86_64-unknown-linux-gnu' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          limit="2.35"
+
+          require_max_glibc() {
+            local bin="$1"
+            local max=""
+            max="$(
+              readelf -W --version-info "$bin" \
+                | grep -oE 'GLIBC_[0-9]+\\.[0-9]+(\\.[0-9]+)?' \
+                | sed 's/^GLIBC_//' \
+                | sort -V \
+                | tail -n 1 \
+                || true
+            )"
+            if [[ -z "${max}" ]]; then
+              echo "Failed to detect GLIBC symbol versions in ${bin}" >&2
+              exit 1
+            fi
+            echo "${bin} max GLIBC: ${max}"
+            dpkg --compare-versions "${max}" le "${limit}" \
+              || { echo "❌ ${bin} requires GLIBC_${max} > GLIBC_${limit}" >&2; exit 1; }
+          }
+
+          require_max_glibc "target/${TARGET}/release/codex"
+          require_max_glibc "target/${TARGET}/release/codex-responses-api-proxy"
+          echo "✅ GLIBC requirements <= ${limit}"
 
       - name: Upload Cargo timings
         uses: actions/upload-artifact@v6
