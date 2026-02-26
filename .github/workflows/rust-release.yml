@@ -439,6 +439,14 @@ jobs:
 
           require_max_glibc() {
             local bin="$1"
+            local dynamic_out=""
+
+            dynamic_out="$(readelf -W --dynamic "$bin" 2>&1 || true)"
+            if echo "$dynamic_out" | grep -q "There is no dynamic section"; then
+              echo "${bin} is statically linked; no GLIBC requirement to verify"
+              return 0
+            fi
+
             local max=""
             max="$(
               readelf -W --version-info "$bin" \
@@ -450,6 +458,9 @@ jobs:
             )"
             if [[ -z "${max}" ]]; then
               echo "Failed to detect GLIBC symbol versions in ${bin}" >&2
+              echo "::group::readelf --dynamic ${bin}" >&2
+              echo "$dynamic_out" >&2
+              echo "::endgroup::" >&2
               exit 1
             fi
             echo "${bin} max GLIBC: ${max}"
