@@ -462,6 +462,10 @@ jobs:
             if command -v zstd >/dev/null 2>&1; then
               zstd -T0 -19 "$dest/$base"
             fi
+            # Create .zip for Windows binaries (required by install.ps1)
+            if [[ "${{ runner.os }}" == "Windows" ]]; then
+              (cd "$dest" && 7z a "${base}.zip" "$base")
+            fi
           done
 
       - uses: actions/upload-artifact@v6
