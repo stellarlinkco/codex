@@ -4327,6 +4327,20 @@ async fn slash_exit_requests_exit() {
 }
 
 #[tokio::test]
+async fn slash_remote_control_sets_flag_and_requests_exit() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    crate::take_remote_control_request();
+    chat.dispatch_command(SlashCommand::RemoteControl);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::Exit(ExitMode::ShutdownFirst)));
+    assert!(
+        crate::take_remote_control_request(),
+        "expected /remote-control to set the remote control request flag"
+    );
+}
+
+#[tokio::test]
 async fn slash_clean_submits_background_terminal_cleanup() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
 

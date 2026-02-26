@@ -46,6 +46,7 @@ use codex_utils_oss::get_default_model_for_oss_provider;
 use cwd_prompt::CwdPromptAction;
 use cwd_prompt::CwdPromptOutcome;
 use cwd_prompt::CwdSelection;
+pub use remote_control::take_remote_control_request;
 use std::fs::OpenOptions;
 use std::path::Path;
 use std::path::PathBuf;
@@ -92,6 +93,7 @@ pub mod onboarding;
 mod oss_selection;
 mod pager_overlay;
 pub mod public_widgets;
+mod remote_control;
 mod render;
 mod resume_picker;
 mod selection_list;
@@ -131,6 +133,8 @@ pub async fn run_main(
     mut cli: Cli,
     codex_linux_sandbox_exe: Option<PathBuf>,
 ) -> std::io::Result<AppExitInfo> {
+    remote_control::take_remote_control_request();
+
     let (sandbox_mode, approval_policy) = if cli.full_auto {
         (
             Some(SandboxMode::WorkspaceWrite),

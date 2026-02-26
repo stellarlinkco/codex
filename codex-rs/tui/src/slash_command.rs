@@ -41,6 +41,8 @@ pub enum SlashCommand {
     Mcp,
     Apps,
     Logout,
+    #[strum(serialize = "remote-control", serialize = "rc")]
+    RemoteControl,
     Quit,
     Exit,
     Feedback,
@@ -69,6 +71,7 @@ impl SlashCommand {
             SlashCommand::Resume => "resume a saved chat",
             SlashCommand::Fork => "fork the current chat",
             // SlashCommand::Undo => "ask Codex to undo a turn",
+            SlashCommand::RemoteControl => "enable remote access from web/mobile",
             SlashCommand::Quit | SlashCommand::Exit => "exit Codex",
             SlashCommand::Diff => "show git diff (including untracked files)",
             SlashCommand::Mention => "mention a file",
@@ -136,6 +139,7 @@ impl SlashCommand {
             | SlashCommand::Experimental
             | SlashCommand::Review
             | SlashCommand::Plan
+            | SlashCommand::RemoteControl
             | SlashCommand::Logout
             | SlashCommand::MemoryDrop
             | SlashCommand::MemoryUpdate => false,
@@ -209,5 +213,22 @@ mod tests {
     fn agents_command_supports_inline_args_and_task_time_usage() {
         assert!(SlashCommand::Agents.supports_inline_args());
         assert!(SlashCommand::Agents.available_during_task());
+    }
+
+    #[test]
+    fn remote_control_aliases_parse_to_same_command() {
+        assert_eq!(
+            SlashCommand::from_str("remote-control").expect("remote-control should parse"),
+            SlashCommand::RemoteControl
+        );
+        assert_eq!(
+            SlashCommand::from_str("rc").expect("rc should parse as alias"),
+            SlashCommand::RemoteControl
+        );
+    }
+
+    #[test]
+    fn remote_control_command_disabled_during_task() {
+        assert!(!SlashCommand::RemoteControl.available_during_task());
     }
 }

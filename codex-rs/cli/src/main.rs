@@ -29,6 +29,7 @@ use codex_tui::update_action::UpdateAction;
 use codex_utils_cli::CliConfigOverrides;
 use owo_colors::OwoColorize;
 use std::io::IsTerminal;
+use std::net::Ipv4Addr;
 use std::path::PathBuf;
 use supports_color::Stream;
 
@@ -574,8 +575,16 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                 &mut interactive.config_overrides,
                 root_config_overrides.clone(),
             );
-            let exit_info = run_interactive_tui(interactive, codex_linux_sandbox_exe).await?;
+            let exit_info =
+                run_interactive_tui(interactive, codex_linux_sandbox_exe.clone()).await?;
+            let exit_info_for_post_exit = exit_info.clone();
             handle_app_exit(exit_info)?;
+            maybe_launch_serve_after_interactive_exit(
+                &exit_info_for_post_exit,
+                &root_config_overrides,
+                codex_linux_sandbox_exe,
+            )
+            .await?;
         }
         Some(Subcommand::Exec(mut exec_cli)) => {
             prepend_config_flags(
@@ -656,8 +665,16 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                 all,
                 config_overrides,
             );
-            let exit_info = run_interactive_tui(interactive, codex_linux_sandbox_exe).await?;
+            let exit_info =
+                run_interactive_tui(interactive, codex_linux_sandbox_exe.clone()).await?;
+            let exit_info_for_post_exit = exit_info.clone();
             handle_app_exit(exit_info)?;
+            maybe_launch_serve_after_interactive_exit(
+                &exit_info_for_post_exit,
+                &root_config_overrides,
+                codex_linux_sandbox_exe,
+            )
+            .await?;
         }
         Some(Subcommand::Fork(ForkCommand {
             session_id,
@@ -673,8 +690,16 @@ async fn cli_main(codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()
                 all,
                 config_overrides,
             );
-            let exit_info = run_interactive_tui(interactive, codex_linux_sandbox_exe).await?;
+            let exit_info =
+                run_interactive_tui(interactive, codex_linux_sandbox_exe.clone()).await?;
+            let exit_info_for_post_exit = exit_info.clone();
             handle_app_exit(exit_info)?;
+            maybe_launch_serve_after_interactive_exit(
+                &exit_info_for_post_exit,
+                &root_config_overrides,
+                codex_linux_sandbox_exe,
+            )
+            .await?;
         }
         Some(Subcommand::Login(mut login_cli)) => {
             prepend_config_flags(
@@ -929,6 +954,48 @@ async fn run_interactive_tui(
     codex_tui::run_main(interactive, codex_linux_sandbox_exe).await
 }
 
+async fn maybe_launch_serve_after_interactive_exit(
+    exit_info: &AppExitInfo,
+    root_config_overrides: &CliConfigOverrides,
+    codex_linux_sandbox_exe: Option<PathBuf>,
+) -> anyhow::Result<()> {
+    let remote_control_requested = codex_tui::take_remote_control_request();
+    let Some(serve_cli) =
+        remote_control_serve_cli(exit_info, root_config_overrides, remote_control_requested)
+    else {
+        return Ok(());
+    };
+    codex_serve::run_main(serve_cli, codex_linux_sandbox_exe).await?;
+    Ok(())
+}
+
+fn remote_control_serve_cli(
+    exit_info: &AppExitInfo,
+    root_config_overrides: &CliConfigOverrides,
+    remote_control_requested: bool,
+) -> Option<ServeCli> {
+    if !matches!(exit_info.exit_reason, ExitReason::UserRequested) {
+        return None;
+    }
+    if !remote_control_requested {
+        return None;
+    }
+
+    let mut serve_cli = ServeCli {
+        config_overrides: CliConfigOverrides::default(),
+        host: Ipv4Addr::LOCALHOST.into(),
+        port: 0,
+        no_open: false,
+        dev: false,
+        token: None,
+    };
+    prepend_config_flags(
+        &mut serve_cli.config_overrides,
+        root_config_overrides.clone(),
+    );
+    Some(serve_cli)
+}
+
 fn confirm(prompt: &str) -> std::io::Result<bool> {
     eprintln!("{prompt}");
 
@@ -1157,6 +1224,42 @@ mod tests {
         };
         let lines = format_exit_messages(exit_info, false);
         assert!(lines.is_empty());
+    }
+
+    #[test]
+    fn remote_control_serve_cli_requires_user_requested_exit() {
+        let exit_info = AppExitInfo::fatal("boom");
+        let root_overrides = CliConfigOverrides::default();
+        let cli = remote_control_serve_cli(&exit_info, &root_overrides, true);
+        assert!(cli.is_none());
+    }
+
+    #[test]
+    fn remote_control_serve_cli_requires_remote_control_flag() {
+        let exit_info = sample_exit_info(None, None);
+        let root_overrides = CliConfigOverrides::default();
+        let cli = remote_control_serve_cli(&exit_info, &root_overrides, false);
+        assert!(cli.is_none());
+    }
+
+    #[test]
+    fn remote_control_serve_cli_builds_localhost_serve_command() {
+        let exit_info = sample_exit_info(None, None);
+        let root_overrides = CliConfigOverrides {
+            raw_overrides: vec!["model=\"o3\"".to_string()],
+        };
+        let cli = remote_control_serve_cli(&exit_info, &root_overrides, true)
+            .expect("remote-control should build a serve command");
+
+        assert_eq!(cli.host, Ipv4Addr::LOCALHOST);
+        assert_eq!(cli.port, 0);
+        assert!(!cli.no_open);
+        assert!(!cli.dev);
+        assert_eq!(cli.token, None);
+        assert_eq!(
+            cli.config_overrides.raw_overrides,
+            root_overrides.raw_overrides
+        );
     }
 
     #[test]

@@ -931,9 +931,27 @@ mod tests {
         let _ = session.thread.submit(Op::Shutdown).await;
         state.sessions.write().await.remove(&session_id);
 
+        let msg = MessagePostRequest {
+            text: "inactive".to_string(),
+            local_id: None,
+            attachments: None,
+        };
+        let resp =
+            handle_post_message(State(state.clone()), Path(session_id.clone()), Json(msg)).await;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
         let resp = handle_resume_session(State(state.clone()), Path(session_id.clone())).await;
         assert_eq!(resp.status(), StatusCode::OK);
         assert!(state.sessions.read().await.contains_key(&session_id));
+
+        let msg = MessagePostRequest {
+            text: "resumed".to_string(),
+            local_id: None,
+            attachments: None,
+        };
+        let resp =
+            handle_post_message(State(state.clone()), Path(session_id.clone()), Json(msg)).await;
+        assert_eq!(resp.status(), StatusCode::OK);
 
         let _ = state.thread_manager.remove_and_close_all_threads().await;
     }

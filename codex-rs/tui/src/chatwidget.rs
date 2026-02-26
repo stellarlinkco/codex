@@ -3429,6 +3429,10 @@ impl ChatWidget {
             SlashCommand::Experimental => {
                 self.open_experimental_popup();
             }
+            SlashCommand::RemoteControl => {
+                crate::remote_control::request_remote_control();
+                self.request_quit_without_confirmation();
+            }
             SlashCommand::Quit | SlashCommand::Exit => {
                 self.request_quit_without_confirmation();
             }
