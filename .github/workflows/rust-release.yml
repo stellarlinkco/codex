@@ -216,6 +216,7 @@ jobs:
           cargo build --target ${{ matrix.target }} --release --timings --bin codex --bin codex-responses-api-proxy
 
       - name: Upload Cargo timings
+        continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
           name: cargo-timings-rust-release-${{ matrix.target }}
@@ -473,6 +474,7 @@ jobs:
           echo "✅ GLIBC requirements <= ${limit}"
 
       - name: Upload Cargo timings
+        continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
           name: cargo-timings-rust-release-${{ env.TARGET }}
