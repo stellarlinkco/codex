@@ -1378,7 +1378,64 @@ async fn cleanup_agent_worktree(
     let Some(lease) = take_worktree_lease(agent_id) else {
         return Ok(());
     };
-    remove_worktree_lease(session, turn, lease).await
+    match remove_worktree_lease(session, turn, lease.clone()).await {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            register_worktree_lease(agent_id, lease);
+            Err(err)
+        }
+    }
+}
+
+async fn reap_finished_agents_for_slots(
+    session: &Session,
+    turn: &TurnContext,
+    slots: usize,
+) -> usize {
+    if slots == 0 {
+        return 0;
+    }
+
+    let mut candidates = Vec::new();
+    for agent_id in session.services.agent_control.spawned_thread_ids() {
+        let status = session.services.agent_control.get_status(agent_id).await;
+        let priority = match &status {
+            AgentStatus::Shutdown | AgentStatus::NotFound => 0u8,
+            AgentStatus::Completed(_) => 1,
+            AgentStatus::Errored(_) => 2,
+            AgentStatus::PendingInit | AgentStatus::Running => continue,
+        };
+        candidates.push((priority, agent_id.to_string(), agent_id));
+    }
+
+    candidates.sort_by(|left, right| left.0.cmp(&right.0).then_with(|| left.1.cmp(&right.1)));
+
+    let mut reaped = 0usize;
+    for (_, _, agent_id) in candidates {
+        if reaped >= slots {
+            break;
+        }
+
+        if let Err(err) = session
+            .services
+            .agent_control
+            .shutdown_agent(agent_id)
+            .await
+        {
+            match err {
+                CodexErr::ThreadNotFound(_) | CodexErr::InternalAgentDied => {}
+                other => warn!("failed to auto-close finished agent {agent_id}: {other}"),
+            }
+        }
+
+        if let Err(err) = cleanup_agent_worktree(session, turn, agent_id).await {
+            warn!("failed to auto-clean worktree for agent {agent_id}: {err}");
+        }
+
+        reaped += 1;
+    }
+
+    reaped
 }
 
 async fn shutdown_team_members(session: &std::sync::Arc<Session>, members: &[TeamMember]) {

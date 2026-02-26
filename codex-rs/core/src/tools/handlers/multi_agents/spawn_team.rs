@@ -162,11 +162,29 @@ pub async fn handle(
             .services
             .agent_control
             .spawn_agent_thread(
-                config,
+                config.clone(),
                 Some(thread_spawn_source(session.conversation_id, child_depth)),
             )
-            .await
-            .map_err(collab_spawn_error);
+            .await;
+        let spawn_result = match spawn_result {
+            Ok(result) => Ok(result),
+            Err(err @ CodexErr::AgentLimitReached { .. }) => {
+                if reap_finished_agents_for_slots(session.as_ref(), turn.as_ref(), 1).await == 0 {
+                    Err(err)
+                } else {
+                    session
+                        .services
+                        .agent_control
+                        .spawn_agent_thread(
+                            config,
+                            Some(thread_spawn_source(session.conversation_id, child_depth)),
+                        )
+                        .await
+                }
+            }
+            Err(err) => Err(err),
+        }
+        .map_err(collab_spawn_error);
 
         let (agent_id, notification_source) = match spawn_result {
             Ok((agent_id, notification_source)) => (agent_id, notification_source),

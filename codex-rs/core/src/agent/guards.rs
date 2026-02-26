@@ -81,6 +81,14 @@ impl Guards {
         }
     }
 
+    pub(crate) fn spawned_thread_ids(&self) -> Vec<ThreadId> {
+        let active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        active_agents.threads_set.iter().cloned().collect()
+    }
+
     fn register_spawned_thread(&self, thread_id: ThreadId, agent_nickname: Option<String>) {
         let mut active_agents = self
             .active_agents

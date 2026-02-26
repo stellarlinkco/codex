@@ -101,17 +101,35 @@ async fn try_resume_closed_agent(
     receiver_thread_id: ThreadId,
     child_depth: i32,
 ) -> Result<AgentStatus, FunctionCallError> {
-    let config = build_agent_resume_config(turn.as_ref(), child_depth)?;
-    let resumed_thread_id = session
+    let resume_result = session
         .services
         .agent_control
         .resume_agent_from_rollout(
-            config,
+            build_agent_resume_config(turn.as_ref(), child_depth)?,
             receiver_thread_id,
             thread_spawn_source(session.conversation_id, child_depth),
         )
-        .await
-        .map_err(|err| collab_agent_error(receiver_thread_id, err))?;
+        .await;
+    let resumed_thread_id = match resume_result {
+        Ok(thread_id) => Ok(thread_id),
+        Err(err @ CodexErr::AgentLimitReached { .. }) => {
+            if reap_finished_agents_for_slots(session.as_ref(), turn.as_ref(), 1).await == 0 {
+                Err(err)
+            } else {
+                session
+                    .services
+                    .agent_control
+                    .resume_agent_from_rollout(
+                        build_agent_resume_config(turn.as_ref(), child_depth)?,
+                        receiver_thread_id,
+                        thread_spawn_source(session.conversation_id, child_depth),
+                    )
+                    .await
+            }
+        }
+        Err(err) => Err(err),
+    }
+    .map_err(|err| collab_agent_error(receiver_thread_id, err))?;
 
     Ok(session
         .services
