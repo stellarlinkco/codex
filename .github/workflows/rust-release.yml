@@ -450,7 +450,7 @@ jobs:
             local max=""
             max="$(
               readelf -W --version-info "$bin" \
-                | grep -oE 'GLIBC_[0-9]+\\.[0-9]+(\\.[0-9]+)?' \
+                | grep -oE 'GLIBC_[0-9]+[.][0-9]+([.][0-9]+)?' \
                 | sed 's/^GLIBC_//' \
                 | sort -V \
                 | tail -n 1 \
