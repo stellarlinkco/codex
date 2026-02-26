@@ -65,6 +65,7 @@ mod bottom_pane;
 mod chatwidget;
 mod cli;
 mod clipboard_paste;
+mod clipboard_text;
 mod collaboration_modes;
 mod color;
 pub mod custom_terminal;
@@ -80,6 +81,7 @@ mod get_git_diff;
 mod history_cell;
 pub mod insert_history;
 mod key_hint;
+mod line_truncation;
 pub mod live_wrap;
 mod markdown;
 mod markdown_render;
@@ -105,6 +107,7 @@ mod streaming;
 mod style;
 mod terminal_palette;
 mod text_formatting;
+mod theme_picker;
 mod tooltips;
 mod tui;
 mod ui_consts;
@@ -112,7 +115,98 @@ pub mod update_action;
 mod update_prompt;
 mod updates;
 mod version;
+#[cfg(all(not(target_os = "linux"), feature = "voice-input"))]
+mod voice;
+#[cfg(all(not(target_os = "linux"), not(feature = "voice-input")))]
+mod voice {
+    use crate::app_event::AppEvent;
+    use crate::app_event_sender::AppEventSender;
+    use codex_protocol::protocol::RealtimeAudioFrame;
+    use std::sync::Arc;
+    use std::sync::Mutex;
+    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::AtomicU16;
 
+    pub struct RecordedAudio {
+        pub data: Vec<i16>,
+        pub sample_rate: u32,
+        pub channels: u16,
+    }
+
+    pub struct VoiceCapture;
+
+    pub(crate) struct RecordingMeterState;
+
+    pub(crate) struct RealtimeAudioPlayer;
+
+    impl VoiceCapture {
+        pub fn start() -> Result<Self, String> {
+            Err("voice input is unavailable in this build".to_string())
+        }
+
+        pub fn start_realtime(_tx: AppEventSender) -> Result<Self, String> {
+            Err("voice input is unavailable in this build".to_string())
+        }
+
+        pub fn stop(self) -> Result<RecordedAudio, String> {
+            Err("voice input is unavailable in this build".to_string())
+        }
+
+        pub fn data_arc(&self) -> Arc<Mutex<Vec<i16>>> {
+            Arc::new(Mutex::new(Vec::new()))
+        }
+
+        pub fn stopped_flag(&self) -> Arc<AtomicBool> {
+            Arc::new(AtomicBool::new(true))
+        }
+
+        pub fn sample_rate(&self) -> u32 {
+            0
+        }
+
+        pub fn channels(&self) -> u16 {
+            0
+        }
+
+        pub fn last_peak_arc(&self) -> Arc<AtomicU16> {
+            Arc::new(AtomicU16::new(0))
+        }
+    }
+
+    impl RecordingMeterState {
+        pub(crate) fn new() -> Self {
+            Self
+        }
+
+        pub(crate) fn next_text(&mut self, _peak: u16) -> String {
+            "⠤⠤⠤⠤".to_string()
+        }
+    }
+
+    impl RealtimeAudioPlayer {
+        pub(crate) fn start() -> Result<Self, String> {
+            Err("voice output is unavailable in this build".to_string())
+        }
+
+        pub(crate) fn enqueue_frame(&self, _frame: &RealtimeAudioFrame) -> Result<(), String> {
+            Err("voice output is unavailable in this build".to_string())
+        }
+
+        pub(crate) fn clear(&self) {}
+    }
+
+    pub fn transcribe_async(
+        id: String,
+        _audio: RecordedAudio,
+        _context: Option<String>,
+        tx: AppEventSender,
+    ) {
+        tx.send(AppEvent::TranscriptionFailed {
+            id,
+            error: "voice input is unavailable in this build".to_string(),
+        });
+    }
+}
 mod wrapping;
 
 #[cfg(test)]
@@ -122,15 +216,13 @@ use crate::onboarding::onboarding_screen::OnboardingScreenArgs;
 use crate::onboarding::onboarding_screen::run_onboarding_app;
 use crate::tui::Tui;
 pub use cli::Cli;
+use codex_arg0::Arg0DispatchPaths;
 pub use markdown_render::render_markdown_text;
 pub use public_widgets::composer_input::ComposerAction;
 pub use public_widgets::composer_input::ComposerInput;
 // (tests access modules directly within the crate)
 
-pub async fn run_main(
-    mut cli: Cli,
-    codex_linux_sandbox_exe: Option<PathBuf>,
-) -> std::io::Result<AppExitInfo> {
+pub async fn run_main(mut cli: Cli, arg0_paths: Arg0DispatchPaths) -> std::io::Result<AppExitInfo> {
     let (sandbox_mode, approval_policy) = if cli.full_auto {
         (
             Some(SandboxMode::WorkspaceWrite),
@@ -279,7 +371,8 @@ pub async fn run_main(
         cwd,
         model_provider: model_provider_override.clone(),
         config_profile: cli.config_profile.clone(),
-        codex_linux_sandbox_exe,
+        codex_linux_sandbox_exe: arg0_paths.codex_linux_sandbox_exe.clone(),
+        main_execve_wrapper_exe: arg0_paths.main_execve_wrapper_exe.clone(),
         show_raw_agent_reasoning: cli.oss.then_some(true),
         additional_writable_roots: additional_dirs,
         ..Default::default()
@@ -545,6 +638,7 @@ async fn run_ratatui_app(
     } else {
         initial_config
     };
+
     let mut missing_session_exit = |id_str: &str, action: &str| {
         error!("Error finding conversation path: {id_str}");
         restore();
@@ -584,6 +678,7 @@ async fn run_ratatui_app(
                 INTERACTIVE_SESSION_SOURCES,
                 Some(provider_filter.as_slice()),
                 &config.model_provider_id,
+                None,
             )
             .await
             {
@@ -693,7 +788,7 @@ async fn run_ratatui_app(
         None => None,
     };
 
-    let config = match &session_selection {
+    let mut config = match &session_selection {
         resume_picker::SessionSelection::Resume(_) | resume_picker::SessionSelection::Fork(_) => {
             load_config_or_exit_with_fallback_cwd(
                 cli_kv_overrides.clone(),
@@ -705,6 +800,17 @@ async fn run_ratatui_app(
         }
         _ => config,
     };
+
+    // Configure syntax highlighting theme from the final config — onboarding
+    // and resume/fork can both reload config with a different tui_theme, so
+    // this must happen after the last possible reload.
+    if let Some(w) = crate::render::highlight::set_theme_override(
+        config.tui_theme.clone(),
+        find_codex_home().ok(),
+    ) {
+        config.startup_warnings.push(w);
+    }
+
     set_default_client_residency_requirement(config.enforce_residency.value());
     let active_profile = config.active_profile.clone();
     let should_show_trust_screen = should_show_trust_screen(&config);
@@ -1182,6 +1288,50 @@ trust_level = "untrusted"
         assert_eq!(
             untrusted_config.permissions.approval_policy.value(),
             AskForApproval::UnlessTrusted
+        );
+        Ok(())
+    }
+
+    /// Regression: theme must be configured from the *final* config.
+    ///
+    /// `run_ratatui_app` can reload config during onboarding and again
+    /// during session resume/fork.  The syntax theme override (stored in
+    /// a `OnceLock`) must use the final config's `tui_theme`, not the
+    /// initial one — otherwise users resuming a thread in a project with
+    /// a different theme get the wrong highlighting.
+    ///
+    /// We verify the invariant indirectly: `validate_theme_name` (the
+    /// pure validation core of `set_theme_override`) must be called with
+    /// the *final* config's theme, and its warning must land in the
+    /// final config's `startup_warnings`.
+    #[tokio::test]
+    async fn theme_warning_uses_final_config() -> std::io::Result<()> {
+        use crate::render::highlight::validate_theme_name;
+
+        let temp_dir = TempDir::new()?;
+
+        // initial_config has a valid theme — no warning.
+        let initial_config = build_config(&temp_dir).await?;
+        assert!(initial_config.tui_theme.is_none());
+
+        // Simulate resume/fork reload: the final config has an invalid theme.
+        let mut config = build_config(&temp_dir).await?;
+        config.tui_theme = Some("bogus-theme".into());
+
+        // Theme override must use the final config (not initial_config).
+        // This mirrors the real call site in run_ratatui_app.
+        if let Some(w) = validate_theme_name(config.tui_theme.as_deref(), Some(temp_dir.path())) {
+            config.startup_warnings.push(w);
+        }
+
+        assert_eq!(
+            config.startup_warnings.len(),
+            1,
+            "warning from final config's invalid theme should be present"
+        );
+        assert!(
+            config.startup_warnings[0].contains("bogus-theme"),
+            "warning should reference the final config's theme name"
         );
         Ok(())
     }

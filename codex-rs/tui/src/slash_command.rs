@@ -34,10 +34,12 @@ pub enum SlashCommand {
     Agents,
     // Undo,
     Diff,
+    Copy,
     Mention,
     Status,
     DebugConfig,
     Statusline,
+    Theme,
     Mcp,
     Apps,
     Logout,
@@ -47,7 +49,9 @@ pub enum SlashCommand {
     Rollout,
     Ps,
     Clean,
+    Clear,
     Personality,
+    Realtime,
     TestApproval,
     // Debugging commands.
     #[strum(serialize = "debug-m-drop")]
@@ -67,21 +71,25 @@ impl SlashCommand {
             SlashCommand::Review => "review my current changes and find issues",
             SlashCommand::Rename => "rename the current thread",
             SlashCommand::Resume => "resume a saved chat",
+            SlashCommand::Clear => "clear the terminal and start a new chat",
             SlashCommand::Fork => "fork the current chat",
             // SlashCommand::Undo => "ask Codex to undo a turn",
             SlashCommand::Quit | SlashCommand::Exit => "exit Codex",
             SlashCommand::Diff => "show git diff (including untracked files)",
+            SlashCommand::Copy => "copy the latest Codex output to your clipboard",
             SlashCommand::Mention => "mention a file",
             SlashCommand::Skills => "use skills to improve how Codex performs specific tasks",
             SlashCommand::Status => "show current session configuration and token usage",
             SlashCommand::DebugConfig => "show config layers and requirement sources for debugging",
             SlashCommand::Statusline => "configure which items appear in the status line",
+            SlashCommand::Theme => "choose a syntax highlighting theme",
             SlashCommand::Ps => "list background terminals",
             SlashCommand::Clean => "stop all background terminals",
             SlashCommand::MemoryDrop => "DO NOT USE",
             SlashCommand::MemoryUpdate => "DO NOT USE",
             SlashCommand::Model => "choose what model and reasoning effort to use",
             SlashCommand::Personality => "choose a communication style for Codex",
+            SlashCommand::Realtime => "toggle realtime voice mode (experimental)",
             SlashCommand::Plan => "switch to Plan mode",
             SlashCommand::Collab => "change collaboration mode (experimental)",
             SlashCommand::Agents => "manage agent threads (/agents switch|tasks)",
@@ -136,10 +144,12 @@ impl SlashCommand {
             | SlashCommand::Experimental
             | SlashCommand::Review
             | SlashCommand::Plan
+            | SlashCommand::Clear
             | SlashCommand::Logout
             | SlashCommand::MemoryDrop
             | SlashCommand::MemoryUpdate => false,
             SlashCommand::Diff
+            | SlashCommand::Copy
             | SlashCommand::Rename
             | SlashCommand::Mention
             | SlashCommand::Skills
@@ -154,15 +164,18 @@ impl SlashCommand {
             | SlashCommand::Exit => true,
             SlashCommand::Rollout => true,
             SlashCommand::TestApproval => true,
+            SlashCommand::Realtime => true,
             SlashCommand::Collab => true,
             SlashCommand::Agents => true,
             SlashCommand::Statusline => false,
+            SlashCommand::Theme => false,
         }
     }
 
     fn is_visible(self) -> bool {
         match self {
             SlashCommand::SandboxReadRoot => cfg!(target_os = "windows"),
+            SlashCommand::Copy => !cfg!(target_os = "android"),
             SlashCommand::Rollout | SlashCommand::TestApproval => cfg!(debug_assertions),
             _ => true,
         }
