@@ -34,7 +34,8 @@ if ! command -v curl >/dev/null 2>&1; then
   exit 1
 fi
 
-base_url="https://github.com/${repo}/releases/latest/download"
+base_url="${CODEX_BASE_URL:-https://github.com/${repo}/releases/latest/download}"
+base_url="${base_url%/}"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 

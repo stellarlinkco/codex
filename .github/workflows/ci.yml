@@ -5,6 +5,44 @@ on:
   push: { branches: [main] }
 
 jobs:
+  changed:
+    name: Detect installer changes
+    runs-on: ubuntu-latest
+    outputs:
+      installer: ${{ steps.detect.outputs.installer }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Detect changed paths
+        id: detect
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            base_sha='${{ github.event.pull_request.base.sha }}'
+            head_sha='${{ github.event.pull_request.head.sha }}'
+            mapfile -t files < <(git diff --name-only --no-renames "$base_sha" "$head_sha")
+          else
+            base_sha='${{ github.event.before }}'
+            head_sha='${{ github.sha }}'
+            if [[ -z "$base_sha" || "$base_sha" == "0000000000000000000000000000000000000000" ]]; then
+              files=("scripts/install.ps1" "scripts/install.sh" "README.md")
+            else
+              mapfile -t files < <(git diff --name-only --no-renames "$base_sha" "$head_sha")
+            fi
+          fi
+
+          installer=false
+          for f in "${files[@]}"; do
+            case "$f" in
+              .github/workflows/ci.yml|README.md|scripts/install.ps1|scripts/install.sh) installer=true ;;
+            esac
+          done
+
+          echo "installer=$installer" >> "$GITHUB_OUTPUT"
+
   build-test:
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -67,3 +105,98 @@ jobs:
 
       - name: Prettier (run `pnpm run format:fix` to fix)
         run: pnpm run format
+
+  installer-smoke:
+    name: installer-smoke (${{ matrix.os }})
+    needs: changed
+    if: ${{ needs.changed.outputs.installer == 'true' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Smoke test install.sh (local server)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tmp="$(mktemp -d)"
+          install_dir="${tmp}/bin"
+          server_root="${tmp}/server"
+          mkdir -p "$server_root"
+          cp scripts/install.sh "${server_root}/install.sh"
+
+          printf '#!/usr/bin/env bash\necho dummy\n' > "${server_root}/codex-x86_64-unknown-linux-gnu"
+          chmod +x "${server_root}/codex-x86_64-unknown-linux-gnu"
+
+          port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+          python3 -m http.server "$port" --bind 127.0.0.1 --directory "$server_root" >/dev/null 2>&1 &
+          pid=$!
+          trap 'kill "$pid" || true' EXIT
+
+          for _ in {1..50}; do
+            if curl -fsS "http://127.0.0.1:$port/" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.1
+          done
+
+          CODEX_BASE_URL="http://127.0.0.1:$port" INSTALL_DIR="$install_dir" bash -c "curl -fsSL http://127.0.0.1:$port/install.sh | bash"
+          test -x "${install_dir}/codex"
+
+      - name: Smoke test install.ps1 (local server)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $target = 'x86_64-pc-windows-msvc'
+          $tempRoot = Join-Path $env:RUNNER_TEMP ("codex-installer-" + [System.Guid]::NewGuid().ToString())
+          $assetsDir = Join-Path $tempRoot 'assets'
+          $installDir = Join-Path $tempRoot 'install'
+
+          New-Item -ItemType Directory -Path $assetsDir -Force | Out-Null
+          New-Item -ItemType Directory -Path $installDir -Force | Out-Null
+
+          Set-Content -Path (Join-Path $assetsDir "codex-$target.exe") -Value "dummy" -NoNewline
+          Set-Content -Path (Join-Path $assetsDir "codex-command-runner.exe") -Value "dummy" -NoNewline
+          Set-Content -Path (Join-Path $assetsDir "codex-windows-sandbox-setup.exe") -Value "dummy" -NoNewline
+          Copy-Item scripts/install.ps1 (Join-Path $assetsDir "install.ps1") -Force
+
+          $zipPath = Join-Path $assetsDir "codex-$target.exe.zip"
+          if (Test-Path $zipPath) { Remove-Item -Force $zipPath }
+          Push-Location $assetsDir
+          Compress-Archive -Path @("codex-$target.exe", "codex-command-runner.exe", "codex-windows-sandbox-setup.exe") -DestinationPath $zipPath -Force
+          Pop-Location
+
+          $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+          $listener.Start()
+          $port = $listener.LocalEndpoint.Port
+          $listener.Stop()
+          $server = Start-Process -FilePath python -ArgumentList @("-m", "http.server", "$port", "--bind", "127.0.0.1", "--directory", "$assetsDir") -PassThru -NoNewWindow
+          try {
+            for ($i = 0; $i -lt 50; $i++) {
+              try {
+                Invoke-WebRequest -Uri "http://127.0.0.1:$port/" -UseBasicParsing | Out-Null
+                break
+              } catch {
+                Start-Sleep -Milliseconds 100
+              }
+            }
+
+            $env:CODEX_BASE_URL = "http://127.0.0.1:$port"
+            $env:INSTALL_DIR = $installDir
+            irm "http://127.0.0.1:$port/install.ps1" | iex
+
+            if (!(Test-Path (Join-Path $installDir "codex.exe"))) { throw "codex.exe not installed" }
+            if (!(Test-Path (Join-Path $installDir "codex-command-runner.exe"))) { throw "codex-command-runner.exe not installed" }
+            if (!(Test-Path (Join-Path $installDir "codex-windows-sandbox-setup.exe"))) { throw "codex-windows-sandbox-setup.exe not installed" }
+          } finally {
+            try { if ($server -and -not $server.HasExited) { $server.Kill() } } catch {}
+            if (Test-Path $tempRoot) { Remove-Item -Recurse -Force $tempRoot }
+          }
