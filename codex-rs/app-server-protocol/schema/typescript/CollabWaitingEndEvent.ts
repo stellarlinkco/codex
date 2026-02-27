@@ -19,10 +19,6 @@ call_id: string,
  */
 agent_statuses?: Array<CollabAgentStatusEntry>, 
 /**
- * Optional display name for receiver agents keyed by thread ID.
- */
-receiver_names?: { [key in ThreadId]?: string }, 
-/**
  * Last known status of the receiver agents reported to the sender agent.
  */
 statuses: { [key in ThreadId]?: AgentStatus }, };

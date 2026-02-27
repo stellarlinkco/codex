@@ -319,6 +319,9 @@
             "codex_git_commit": {
               "type": "boolean"
             },
+            "collab": {
+              "type": "boolean"
+            },
             "collaboration_modes": {
               "type": "boolean"
             },
@@ -1489,13 +1492,6 @@
             "responses"
           ],
           "type": "string"
-        },
-        {
-          "description": "The Messages API exposed by Anthropic at `/v1/messages`.",
-          "enum": [
-            "anthropic"
-          ],
-          "type": "string"
         }
       ]
     }
@@ -1614,6 +1610,9 @@
           "type": "boolean"
         },
         "codex_git_commit": {
+          "type": "boolean"
+        },
+        "collab": {
           "type": "boolean"
         },
         "collaboration_modes": {

@@ -51,16 +51,13 @@ impl AgentControl {
         }
     }
 
-    pub(crate) fn spawned_thread_ids(&self) -> Vec<ThreadId> {
-        self.state.spawned_thread_ids()
-    }
-
-    /// Spawn a new agent thread without submitting any input.
-    pub(crate) async fn spawn_agent_thread(
+    /// Spawn a new agent thread and submit the initial prompt.
+    pub(crate) async fn spawn_agent(
         &self,
         config: crate::config::Config,
+        items: Vec<UserInput>,
         session_source: Option<SessionSource>,
-    ) -> CodexResult<(ThreadId, Option<SessionSource>)> {
+    ) -> CodexResult<ThreadId> {
         let state = self.upgrade()?;
         let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
         let session_source = match session_source {
@@ -86,7 +83,7 @@ impl AgentControl {
         let new_thread = match session_source {
             Some(session_source) => {
                 state
-                    .spawn_new_thread_with_source(config, self.clone(), session_source, false)
+                    .spawn_new_thread_with_source(config, self.clone(), session_source, false, None)
                     .await?
             }
             None => state.spawn_new_thread(config, self.clone()).await?,
@@ -98,32 +95,10 @@ impl AgentControl {
         // TODO(jif) add helper for drain
         state.notify_thread_created(new_thread.thread_id);
 
-        Ok((new_thread.thread_id, notification_source))
-    }
+        self.send_input(new_thread.thread_id, items).await?;
+        self.maybe_start_completion_watcher(new_thread.thread_id, notification_source);
 
-    pub(crate) async fn send_spawn_input(
-        &self,
-        agent_id: ThreadId,
-        items: Vec<UserInput>,
-        notification_source: Option<SessionSource>,
-    ) -> CodexResult<()> {
-        self.send_input(agent_id, items).await?;
-        self.maybe_start_completion_watcher(agent_id, notification_source);
-        Ok(())
-    }
-
-    /// Spawn a new agent thread and submit the initial prompt.
-    pub(crate) async fn spawn_agent(
-        &self,
-        config: crate::config::Config,
-        items: Vec<UserInput>,
-        session_source: Option<SessionSource>,
-    ) -> CodexResult<ThreadId> {
-        let (agent_id, notification_source) =
-            self.spawn_agent_thread(config, session_source).await?;
-        self.send_spawn_input(agent_id, items, notification_source)
-            .await?;
-        Ok(agent_id)
+        Ok(new_thread.thread_id)
     }
 
     /// Resume an existing agent thread from a recorded rollout file.
@@ -216,17 +191,6 @@ impl AgentControl {
         result
     }
 
-    pub(crate) async fn inject_developer_message_without_turn(
-        &self,
-        agent_id: ThreadId,
-        message: String,
-    ) -> CodexResult<()> {
-        let state = self.upgrade()?;
-        let thread = state.get_thread(agent_id).await?;
-        thread.inject_developer_message_without_turn(message).await;
-        Ok(())
-    }
-
     /// Interrupt the current task for an existing agent thread.
     pub(crate) async fn interrupt_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
         let state = self.upgrade()?;
@@ -252,6 +216,23 @@ impl AgentControl {
             return AgentStatus::NotFound;
         };
         thread.agent_status().await
+    }
+
+    pub(crate) async fn get_agent_nickname_and_role(
+        &self,
+        agent_id: ThreadId,
+    ) -> Option<(Option<String>, Option<String>)> {
+        let Ok(state) = self.upgrade() else {
+            return None;
+        };
+        let Ok(thread) = state.get_thread(agent_id).await else {
+            return None;
+        };
+        let session_source = thread.config_snapshot().await.session_source;
+        Some((
+            session_source.get_nickname(),
+            session_source.get_agent_role(),
+        ))
     }
 
     /// Subscribe to status updates for `agent_id`, yielding the latest value and changes.
@@ -338,8 +319,8 @@ mod tests {
     use crate::config::Config;
     use crate::config::ConfigBuilder;
     use crate::config_loader::LoaderOverrides;
+    use crate::contextual_user_message::SUBAGENT_NOTIFICATION_OPEN_TAG;
     use crate::features::Feature;
-    use crate::session_prefix::SUBAGENT_NOTIFICATION_OPEN_TAG;
     use assert_matches::assert_matches;
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::models::ContentItem;

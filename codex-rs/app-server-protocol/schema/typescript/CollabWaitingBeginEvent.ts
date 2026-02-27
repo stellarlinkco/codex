@@ -18,10 +18,6 @@ receiver_thread_ids: Array<ThreadId>,
  */
 receiver_agents?: Array<CollabAgentRef>, 
 /**
- * Optional display name for receiver agents keyed by thread ID.
- */
-receiver_names?: { [key in ThreadId]?: string }, 
-/**
  * ID of the waiting call.
  */
 call_id: string, };

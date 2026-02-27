@@ -281,31 +281,8 @@ pub fn format_with_current_shell_display_non_login(command: &str) -> String {
         .expect("serialize current shell command without login")
 }
 
-fn cargo_bin_with_fallback(binary: &str, package: &str) -> Result<PathBuf, CargoBinError> {
-    if let Ok(path) = codex_utils_cargo_bin::cargo_bin(binary) {
-        return Ok(path);
-    }
-
-    if !codex_utils_cargo_bin::runfiles_available()
-        && let Ok(repo_root) = codex_utils_cargo_bin::repo_root()
-    {
-        let _ = std::process::Command::new("cargo")
-            .arg("build")
-            .args(["-p", package, "--bin", binary])
-            .current_dir(repo_root.join("codex-rs"))
-            .status();
-    }
-
-    codex_utils_cargo_bin::cargo_bin(binary)
-}
-
-pub fn codex_bin() -> Result<PathBuf, CargoBinError> {
-    cargo_bin_with_fallback("codex", "codex-cli")
-}
-
 pub fn stdio_server_bin() -> Result<String, CargoBinError> {
-    cargo_bin_with_fallback("test_stdio_server", "codex-rmcp-client")
-        .map(|p| p.to_string_lossy().to_string())
+    codex_utils_cargo_bin::cargo_bin("test_stdio_server").map(|p| p.to_string_lossy().to_string())
 }
 
 pub mod fs_wait {

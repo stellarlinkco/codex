@@ -30,7 +30,6 @@ struct ActiveAgents {
     used_agent_nicknames: HashSet<String>,
     nickname_reset_count: usize,
 }
-
 fn session_depth(session_source: &SessionSource) -> i32 {
     match session_source {
         SessionSource::SubAgent(SubAgentSource::ThreadSpawn { depth, .. }) => *depth,
@@ -81,14 +80,6 @@ impl Guards {
         }
     }
 
-    pub(crate) fn spawned_thread_ids(&self) -> Vec<ThreadId> {
-        let active_agents = self
-            .active_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        active_agents.threads_set.iter().cloned().collect()
-    }
-
     fn register_spawned_thread(&self, thread_id: ThreadId, agent_nickname: Option<String>) {
         let mut active_agents = self
             .active_agents
@@ -126,6 +117,9 @@ impl Guards {
             } else {
                 active_agents.used_agent_nicknames.clear();
                 active_agents.nickname_reset_count += 1;
+                if let Some(metrics) = codex_otel::metrics::global() {
+                    let _ = metrics.counter("codex.multi_agent.nickname_pool_reset", 1, &[]);
+                }
                 names.choose(&mut rand::rng())?.to_string()
             }
         };

@@ -120,12 +120,16 @@ impl ShellSnapshot {
             ShellType::PowerShell => "ps1",
             _ => "sh",
         };
-        let snapshot_nonce = SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos());
         let path = codex_home
             .join(SNAPSHOT_DIR)
-            .join(format!("{session_id}__{snapshot_nonce}.{extension}"));
+            .join(format!("{session_id}.{extension}"));
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|duration| duration.as_nanos())
+            .unwrap_or(0);
+        let temp_path = codex_home
+            .join(SNAPSHOT_DIR)
+            .join(format!("{session_id}.tmp-{nonce}"));
 
         // Clean the (unlikely) leaked snapshot files.
         let codex_home = codex_home.to_path_buf();
@@ -137,31 +141,42 @@ impl ShellSnapshot {
         });
 
         // Make the new snapshot.
-        let path = match write_shell_snapshot(shell.shell_type.clone(), &path, session_cwd).await {
-            Ok(path) => {
-                tracing::info!("Shell snapshot successfully created: {}", path.display());
-                path
-            }
-            Err(err) => {
-                tracing::warn!(
-                    "Failed to create shell snapshot for {}: {err:?}",
-                    shell.name()
-                );
-                return Err("write_failed");
-            }
-        };
+        let temp_path =
+            match write_shell_snapshot(shell.shell_type.clone(), &temp_path, session_cwd).await {
+                Ok(path) => {
+                    tracing::info!("Shell snapshot successfully created: {}", path.display());
+                    path
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "Failed to create shell snapshot for {}: {err:?}",
+                        shell.name()
+                    );
+                    return Err("write_failed");
+                }
+            };
 
-        let snapshot = Self {
-            path,
+        let temp_snapshot = Self {
+            path: temp_path.clone(),
             cwd: session_cwd.to_path_buf(),
         };
 
-        if let Err(err) = validate_snapshot(shell, &snapshot.path, session_cwd).await {
+        if let Err(err) = validate_snapshot(shell, &temp_snapshot.path, session_cwd).await {
             tracing::error!("Shell snapshot validation failed: {err:?}");
+            remove_snapshot_file(&temp_snapshot.path).await;
             return Err("validation_failed");
         }
 
-        Ok(snapshot)
+        if let Err(err) = fs::rename(&temp_snapshot.path, &path).await {
+            tracing::warn!("Failed to finalize shell snapshot: {err:?}");
+            remove_snapshot_file(&temp_snapshot.path).await;
+            return Err("write_failed");
+        }
+
+        Ok(Self {
+            path,
+            cwd: session_cwd.to_path_buf(),
+        })
     }
 }
 
@@ -484,14 +499,13 @@ pub async fn cleanup_stale_snapshots(codex_home: &Path, active_session_id: Threa
 
         let file_name = entry.file_name();
         let file_name = file_name.to_string_lossy();
-        let (stem, _) = match file_name.rsplit_once('.') {
+        let (session_id, _) = match file_name.rsplit_once('.') {
             Some((stem, ext)) => (stem, ext),
             None => {
                 remove_snapshot_file(&path).await;
                 continue;
             }
         };
-        let session_id = stem.split_once("__").map_or(stem, |(id, _)| id);
         if session_id == active_session_id {
             continue;
         }

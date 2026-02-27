@@ -1,358 +1,286 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
+use chrono::DateTime;
+use chrono::SecondsFormat;
+use chrono::Utc;
 use codex_protocol::ThreadId;
+use codex_protocol::models::SandboxPermissions;
+use futures::future::BoxFuture;
 use serde::Serialize;
-use serde_json::Value;
+use serde::Serializer;
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub struct HookPayload {
-    pub session_id: ThreadId,
-    pub transcript_path: Option<PathBuf>,
-    pub cwd: PathBuf,
-    pub permission_mode: String,
-    #[serde(flatten)]
-    pub hook_event: HookEvent,
-}
+pub type HookFn = Arc<dyn for<'a> Fn(&'a HookPayload) -> BoxFuture<'a, HookResult> + Send + Sync>;
 
-#[derive(Debug, Clone, Serialize, PartialEq)]
-#[serde(tag = "hook_event_name", rename_all = "PascalCase")]
-pub enum HookEvent {
-    SessionStart {
-        source: String,
-        model: String,
-        agent_type: Option<String>,
-    },
-    SessionEnd {
-        reason: String,
-    },
-    UserPromptSubmit {
-        prompt: String,
-    },
-    PreToolUse {
-        tool_name: String,
-        tool_input: Value,
-        tool_use_id: String,
-    },
-    PermissionRequest {
-        tool_name: String,
-        tool_input: Value,
-        tool_use_id: String,
-        permission_suggestions: Option<Value>,
-    },
-    Notification {
-        message: String,
-        title: Option<String>,
-        notification_type: String,
-    },
-    PostToolUse {
-        tool_name: String,
-        tool_input: Value,
-        tool_response: Value,
-        tool_use_id: String,
-    },
-    PostToolUseFailure {
-        tool_name: String,
-        tool_input: Value,
-        tool_use_id: String,
-        error: String,
-        is_interrupt: Option<bool>,
-    },
-    Stop {
-        stop_hook_active: bool,
-        last_assistant_message: Option<String>,
-    },
-    SubagentStart {
-        agent_id: String,
-        agent_type: String,
-    },
-    TeammateIdle {
-        teammate_name: String,
-        team_name: String,
-    },
-    TaskCompleted {
-        task_id: String,
-        task_subject: String,
-        task_description: Option<String>,
-        teammate_name: Option<String>,
-        team_name: Option<String>,
-    },
-    ConfigChange {
-        source: String,
-        file_path: Option<PathBuf>,
-    },
-    SubagentStop {
-        stop_hook_active: bool,
-        agent_id: String,
-        agent_type: String,
-        agent_transcript_path: Option<PathBuf>,
-        last_assistant_message: Option<String>,
-    },
-    PreCompact {
-        trigger: String,
-        custom_instructions: Option<String>,
-    },
-    WorktreeCreate {
-        name: String,
-    },
-    WorktreeRemove {
-        worktree_path: PathBuf,
-    },
-}
-
-impl HookEvent {
-    pub fn matcher_text_for_matcher(&self) -> Option<&str> {
-        match self {
-            HookEvent::PreToolUse { tool_name, .. }
-            | HookEvent::PermissionRequest { tool_name, .. }
-            | HookEvent::PostToolUse { tool_name, .. }
-            | HookEvent::PostToolUseFailure { tool_name, .. } => Some(tool_name),
-            HookEvent::SessionStart { source, .. } => Some(source),
-            HookEvent::SessionEnd { reason } => Some(reason),
-            HookEvent::Notification {
-                notification_type, ..
-            } => Some(notification_type),
-            HookEvent::SubagentStart { agent_type, .. }
-            | HookEvent::SubagentStop { agent_type, .. } => Some(agent_type),
-            HookEvent::PreCompact { trigger, .. } => Some(trigger),
-            HookEvent::ConfigChange { source, .. } => Some(source),
-            _ => None,
-        }
-    }
-
-    pub fn tool_name_for_matcher(&self) -> Option<&str> {
-        match self {
-            HookEvent::PreToolUse { tool_name, .. }
-            | HookEvent::PermissionRequest { tool_name, .. }
-            | HookEvent::PostToolUse { tool_name, .. }
-            | HookEvent::PostToolUseFailure { tool_name, .. } => Some(tool_name),
-            _ => None,
-        }
-    }
-
-    pub fn user_prompt_for_matcher(&self) -> Option<&str> {
-        match self {
-            HookEvent::UserPromptSubmit { prompt } => Some(prompt),
-            _ => None,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HookPermissionDecision {
-    Allow,
-    Deny,
-    Ask,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum HookResultControl {
-    Continue,
-    Block { reason: String },
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct HookResult {
-    pub control: HookResultControl,
-    pub permission_decision: Option<HookPermissionDecision>,
-    pub permission_decision_reason: Option<String>,
-    pub updated_input: Option<Value>,
-    pub worktree_path: Option<PathBuf>,
-    pub additional_context: Vec<String>,
-    pub error: Option<String>,
+#[derive(Debug)]
+pub enum HookResult {
+    /// Success: hook completed successfully.
+    Success,
+    /// FailedContinue: hook failed, but other subsequent hooks should still execute and the
+    /// operation should continue.
+    FailedContinue(Box<dyn std::error::Error + Send + Sync + 'static>),
+    /// FailedAbort: hook failed, other subsequent hooks should not execute, and the operation
+    /// should be aborted.
+    FailedAbort(Box<dyn std::error::Error + Send + Sync + 'static>),
 }
 
 impl HookResult {
-    pub fn success() -> Self {
+    pub fn should_abort_operation(&self) -> bool {
+        matches!(self, Self::FailedAbort(_))
+    }
+}
+
+#[derive(Debug)]
+pub struct HookResponse {
+    pub hook_name: String,
+    pub result: HookResult,
+}
+
+#[derive(Clone)]
+pub struct Hook {
+    pub name: String,
+    pub func: HookFn,
+}
+
+impl Default for Hook {
+    fn default() -> Self {
         Self {
-            control: HookResultControl::Continue,
-            permission_decision: None,
-            permission_decision_reason: None,
-            updated_input: None,
-            worktree_path: None,
-            additional_context: Vec::new(),
-            error: None,
+            name: "default".to_string(),
+            func: Arc::new(|_| Box::pin(async { HookResult::Success })),
         }
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
-pub struct HookResponse {
-    pub hook_name: String,
-    pub result: HookResult,
+impl Hook {
+    pub async fn execute(&self, payload: &HookPayload) -> HookResponse {
+        HookResponse {
+            hook_name: self.name.clone(),
+            result: (self.func)(payload).await,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Clone)]
+#[serde(rename_all = "snake_case")]
+pub struct HookPayload {
+    pub session_id: ThreadId,
+    pub cwd: PathBuf,
+    #[serde(serialize_with = "serialize_triggered_at")]
+    pub triggered_at: DateTime<Utc>,
+    pub hook_event: HookEvent,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub struct HookEventAfterAgent {
+    pub thread_id: ThreadId,
+    pub turn_id: String,
+    pub input_messages: Vec<String>,
+    pub last_assistant_message: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HookToolKind {
+    Function,
+    Custom,
+    LocalShell,
+    Mcp,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct HookToolInputLocalShell {
+    pub command: Vec<String>,
+    pub workdir: Option<String>,
+    pub timeout_ms: Option<u64>,
+    pub sandbox_permissions: Option<SandboxPermissions>,
+    pub prefix_rule: Option<Vec<String>>,
+    pub justification: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(tag = "input_type", rename_all = "snake_case")]
+pub enum HookToolInput {
+    Function {
+        arguments: String,
+    },
+    Custom {
+        input: String,
+    },
+    LocalShell {
+        params: HookToolInputLocalShell,
+    },
+    Mcp {
+        server: String,
+        tool: String,
+        arguments: String,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq)]
+#[serde(rename_all = "snake_case")]
+pub struct HookEventAfterToolUse {
+    pub turn_id: String,
+    pub call_id: String,
+    pub tool_name: String,
+    pub tool_kind: HookToolKind,
+    pub tool_input: HookToolInput,
+    pub executed: bool,
+    pub success: bool,
+    pub duration_ms: u64,
+    pub mutating: bool,
+    pub sandbox: String,
+    pub sandbox_policy: String,
+    pub output_preview: String,
+}
+
+fn serialize_triggered_at<S>(value: &DateTime<Utc>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.serialize_str(&value.to_rfc3339_opts(SecondsFormat::Secs, true))
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(tag = "event_type", rename_all = "snake_case")]
+pub enum HookEvent {
+    AfterAgent {
+        #[serde(flatten)]
+        event: HookEventAfterAgent,
+    },
+    AfterToolUse {
+        #[serde(flatten)]
+        event: HookEventAfterToolUse,
+    },
 }
 
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
+    use chrono::TimeZone;
+    use chrono::Utc;
     use codex_protocol::ThreadId;
+    use codex_protocol::models::SandboxPermissions;
     use pretty_assertions::assert_eq;
     use serde_json::json;
 
     use super::HookEvent;
+    use super::HookEventAfterAgent;
+    use super::HookEventAfterToolUse;
     use super::HookPayload;
+    use super::HookToolInput;
+    use super::HookToolInputLocalShell;
+    use super::HookToolKind;
 
     #[test]
-    fn hook_payload_serializes_flat_event_fields() {
-        let session_id =
-            ThreadId::from_string("b5f6c1c2-1111-2222-3333-444455556666").expect("valid thread id");
+    fn hook_payload_serializes_stable_wire_shape() {
+        let session_id = ThreadId::new();
+        let thread_id = ThreadId::new();
         let payload = HookPayload {
             session_id,
-            transcript_path: Some(PathBuf::from("/tmp/transcript.jsonl")),
-            cwd: PathBuf::from("/tmp/project"),
-            permission_mode: "never".to_string(),
-            hook_event: HookEvent::SessionStart {
-                source: "cli".to_string(),
-                model: "gpt-5".to_string(),
-                agent_type: None,
+            cwd: PathBuf::from("tmp"),
+            triggered_at: Utc
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+            hook_event: HookEvent::AfterAgent {
+                event: HookEventAfterAgent {
+                    thread_id,
+                    turn_id: "turn-1".to_string(),
+                    input_messages: vec!["hello".to_string()],
+                    last_assistant_message: Some("hi".to_string()),
+                },
             },
         };
 
         let actual = serde_json::to_value(payload).expect("serialize hook payload");
         let expected = json!({
-            "session_id": "b5f6c1c2-1111-2222-3333-444455556666",
-            "transcript_path": "/tmp/transcript.jsonl",
-            "cwd": "/tmp/project",
-            "permission_mode": "never",
-            "hook_event_name": "SessionStart",
-            "source": "cli",
-            "model": "gpt-5",
-            "agent_type": null,
+            "session_id": session_id.to_string(),
+            "cwd": "tmp",
+            "triggered_at": "2025-01-01T00:00:00Z",
+            "hook_event": {
+                "event_type": "after_agent",
+                "thread_id": thread_id.to_string(),
+                "turn_id": "turn-1",
+                "input_messages": ["hello"],
+                "last_assistant_message": "hi",
+            },
         });
+
         assert_eq!(actual, expected);
     }
 
     #[test]
-    fn event_matcher_accessors_cover_variants() {
-        assert_eq!(
-            HookEvent::SessionStart {
-                source: "cli".to_string(),
-                model: "gpt-5".to_string(),
-                agent_type: None
-            }
-            .tool_name_for_matcher(),
-            None
-        );
-        assert_eq!(
-            HookEvent::UserPromptSubmit {
-                prompt: "ship it".to_string()
-            }
-            .user_prompt_for_matcher(),
-            Some("ship it")
-        );
-        assert_eq!(
-            HookEvent::PreToolUse {
-                tool_name: "shell".to_string(),
-                tool_input: json!({"command": ["echo", "hi"]}),
-                tool_use_id: "call-1".to_string(),
-            }
-            .tool_name_for_matcher(),
-            Some("shell")
-        );
-        assert_eq!(
-            HookEvent::PermissionRequest {
-                tool_name: "exec_command".to_string(),
-                tool_input: json!({"cmd": "pwd"}),
-                tool_use_id: "call-2".to_string(),
-                permission_suggestions: None,
-            }
-            .tool_name_for_matcher(),
-            Some("exec_command")
-        );
-        assert_eq!(
-            HookEvent::PostToolUse {
-                tool_name: "parallel".to_string(),
-                tool_input: json!({"tool_uses": []}),
-                tool_response: json!({"ok": true}),
-                tool_use_id: "call-3".to_string(),
-            }
-            .tool_name_for_matcher(),
-            Some("parallel")
-        );
-        assert_eq!(
-            HookEvent::PostToolUseFailure {
-                tool_name: "spawn_team".to_string(),
-                tool_input: json!({"members": []}),
-                tool_use_id: "call-4".to_string(),
-                error: "boom".to_string(),
-                is_interrupt: Some(false),
-            }
-            .tool_name_for_matcher(),
-            Some("spawn_team")
-        );
-        assert_eq!(
-            HookEvent::SessionEnd {
-                reason: "done".to_string()
-            }
-            .user_prompt_for_matcher(),
-            None
-        );
-        assert_eq!(
-            HookEvent::WorktreeCreate {
-                name: "wt-1".to_string(),
-            }
-            .tool_name_for_matcher(),
-            None
-        );
-        assert_eq!(
-            HookEvent::TeammateIdle {
-                teammate_name: "planner".to_string(),
-                team_name: "my-project".to_string(),
-            }
-            .tool_name_for_matcher(),
-            None
-        );
-        assert_eq!(
-            HookEvent::Notification {
-                message: "Permission needed".to_string(),
-                title: Some("Permission needed".to_string()),
-                notification_type: "permission_prompt".to_string(),
-            }
-            .tool_name_for_matcher(),
-            None
-        );
-        assert_eq!(
-            HookEvent::SubagentStart {
-                agent_id: "agent-1".to_string(),
-                agent_type: "Explore".to_string(),
-            }
-            .tool_name_for_matcher(),
-            None
-        );
-        assert_eq!(
-            HookEvent::TaskCompleted {
-                task_id: "task-1".to_string(),
-                task_subject: "Ship it".to_string(),
-                task_description: None,
-                teammate_name: None,
-                team_name: None,
-            }
-            .user_prompt_for_matcher(),
-            None
-        );
-        assert_eq!(
-            HookEvent::ConfigChange {
-                source: "skills".to_string(),
-                file_path: None,
-            }
-            .user_prompt_for_matcher(),
-            None
-        );
-        assert_eq!(
-            HookEvent::TeammateIdle {
-                teammate_name: "planner".to_string(),
-                team_name: "my-project".to_string(),
-            }
-            .user_prompt_for_matcher(),
-            None
-        );
-        assert_eq!(
-            HookEvent::WorktreeRemove {
-                worktree_path: PathBuf::from("/repo-wt"),
-            }
-            .user_prompt_for_matcher(),
-            None
-        );
+    fn after_tool_use_payload_serializes_stable_wire_shape() {
+        let session_id = ThreadId::new();
+        let payload = HookPayload {
+            session_id,
+            cwd: PathBuf::from("tmp"),
+            triggered_at: Utc
+                .with_ymd_and_hms(2025, 1, 1, 0, 0, 0)
+                .single()
+                .expect("valid timestamp"),
+            hook_event: HookEvent::AfterToolUse {
+                event: HookEventAfterToolUse {
+                    turn_id: "turn-2".to_string(),
+                    call_id: "call-1".to_string(),
+                    tool_name: "local_shell".to_string(),
+                    tool_kind: HookToolKind::LocalShell,
+                    tool_input: HookToolInput::LocalShell {
+                        params: HookToolInputLocalShell {
+                            command: vec!["cargo".to_string(), "fmt".to_string()],
+                            workdir: Some("codex-rs".to_string()),
+                            timeout_ms: Some(60_000),
+                            sandbox_permissions: Some(SandboxPermissions::UseDefault),
+                            justification: None,
+                            prefix_rule: None,
+                        },
+                    },
+                    executed: true,
+                    success: true,
+                    duration_ms: 42,
+                    mutating: true,
+                    sandbox: "none".to_string(),
+                    sandbox_policy: "danger-full-access".to_string(),
+                    output_preview: "ok".to_string(),
+                },
+            },
+        };
+
+        let actual = serde_json::to_value(payload).expect("serialize hook payload");
+        let expected = json!({
+            "session_id": session_id.to_string(),
+            "cwd": "tmp",
+            "triggered_at": "2025-01-01T00:00:00Z",
+            "hook_event": {
+                "event_type": "after_tool_use",
+                "turn_id": "turn-2",
+                "call_id": "call-1",
+                "tool_name": "local_shell",
+                "tool_kind": "local_shell",
+                "tool_input": {
+                    "input_type": "local_shell",
+                    "params": {
+                        "command": ["cargo", "fmt"],
+                        "workdir": "codex-rs",
+                        "timeout_ms": 60000,
+                        "sandbox_permissions": "use_default",
+                        "justification": null,
+                        "prefix_rule": null,
+                    },
+                },
+                "executed": true,
+                "success": true,
+                "duration_ms": 42,
+                "mutating": true,
+                "sandbox": "none",
+                "sandbox_policy": "danger-full-access",
+                "output_preview": "ok",
+            },
+        });
+
+        assert_eq!(actual, expected);
     }
 }
