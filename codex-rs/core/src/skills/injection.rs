@@ -3,7 +3,6 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::analytics_client::AnalyticsEventsClient;
-use crate::analytics_client::InvocationType;
 use crate::analytics_client::SkillInvocation;
 use crate::analytics_client::TrackEventsContext;
 use crate::instructions::SkillInstructions;
@@ -50,14 +49,13 @@ pub(crate) async fn build_skill_injections(
     let mut invocations = Vec::new();
 
     for skill in mentioned_skills {
-        match fs::read_to_string(&skill.path_to_skills_md).await {
+        match fs::read_to_string(&skill.path).await {
             Ok(contents) => {
                 emit_skill_injected_metric(otel, skill, "ok");
                 invocations.push(SkillInvocation {
                     skill_name: skill.name.clone(),
                     skill_scope: skill.scope,
-                    skill_path: skill.path_to_skills_md.clone(),
-                    invocation_type: InvocationType::Explicit,
+                    skill_path: skill.path.clone(),
                 });
                 if let Some(hooks) =
                     parse_skill_scoped_hooks(skill, &contents, &mut result.warnings)
@@ -69,7 +67,7 @@ pub(crate) async fn build_skill_injections(
                 }
                 result.items.push(ResponseItem::from(SkillInstructions {
                     name: skill.name.clone(),
-                    path: skill.path_to_skills_md.to_string_lossy().into_owned(),
+                    path: skill.path.to_string_lossy().into_owned(),
                     contents,
                 }));
             }
@@ -78,7 +76,7 @@ pub(crate) async fn build_skill_injections(
                 let message = format!(
                     "Failed to load skill {name} at {path}: {err:#}",
                     name = skill.name,
-                    path = skill.path_to_skills_md.display()
+                    path = skill.path.display()
                 );
                 result.warnings.push(message);
             }
@@ -371,9 +369,9 @@ pub(crate) fn collect_explicit_skill_mentions(
             if let Some(skill) = selection_context
                 .skills
                 .iter()
-                .find(|skill| skill.path_to_skills_md.as_path() == path.as_path())
+                .find(|skill| skill.path.as_path() == path.as_path())
             {
-                seen_paths.insert(skill.path_to_skills_md.clone());
+                seen_paths.insert(skill.path.clone());
                 seen_names.insert(skill.name.clone());
                 selected.push(skill.clone());
             }
@@ -554,27 +552,23 @@ fn select_skills_from_mentions(
         .collect();
 
     for skill in selection_context.skills {
-        if selection_context
-            .disabled_paths
-            .contains(&skill.path_to_skills_md)
-            || seen_paths.contains(&skill.path_to_skills_md)
+        if selection_context.disabled_paths.contains(&skill.path)
+            || seen_paths.contains(&skill.path)
         {
             continue;
         }
 
-        let path_str = skill.path_to_skills_md.to_string_lossy();
+        let path_str = skill.path.to_string_lossy();
         if mention_skill_paths.contains(path_str.as_ref()) {
-            seen_paths.insert(skill.path_to_skills_md.clone());
+            seen_paths.insert(skill.path.clone());
             seen_names.insert(skill.name.clone());
             selected.push(skill.clone());
         }
     }
 
     for skill in selection_context.skills {
-        if selection_context
-            .disabled_paths
-            .contains(&skill.path_to_skills_md)
-            || seen_paths.contains(&skill.path_to_skills_md)
+        if selection_context.disabled_paths.contains(&skill.path)
+            || seen_paths.contains(&skill.path)
         {
             continue;
         }
@@ -601,7 +595,7 @@ fn select_skills_from_mentions(
         }
 
         if seen_names.insert(skill.name.clone()) {
-            seen_paths.insert(skill.path_to_skills_md.clone());
+            seen_paths.insert(skill.path.clone());
             selected.push(skill.clone());
         }
     }
@@ -732,9 +726,8 @@ mod tests {
             interface: None,
             dependencies: None,
             policy: None,
-            permission_profile: None,
             permissions: None,
-            path_to_skills_md: PathBuf::from(path),
+            path: PathBuf::from(path),
             scope: codex_protocol::protocol::SkillScope::User,
         }
     }

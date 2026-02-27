@@ -1,10 +1,7 @@
-use std::collections::HashMap;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 
 use crate::config::Permissions;
-use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::SkillScope;
 
 #[derive(Debug, Clone, PartialEq)]
@@ -15,11 +12,9 @@ pub struct SkillMetadata {
     pub interface: Option<SkillInterface>,
     pub dependencies: Option<SkillDependencies>,
     pub policy: Option<SkillPolicy>,
-    pub permission_profile: Option<PermissionProfile>,
     // This is an experimental field.
     pub permissions: Option<Permissions>,
-    /// Path to the SKILLS.md file that declares this skill.
-    pub path_to_skills_md: PathBuf,
+    pub path: PathBuf,
     pub scope: SkillScope,
 }
 
@@ -73,13 +68,11 @@ pub struct SkillLoadOutcome {
     pub skills: Vec<SkillMetadata>,
     pub errors: Vec<SkillError>,
     pub disabled_paths: HashSet<PathBuf>,
-    pub(crate) implicit_skills_by_scripts_dir: Arc<HashMap<PathBuf, SkillMetadata>>,
-    pub(crate) implicit_skills_by_doc_path: Arc<HashMap<PathBuf, SkillMetadata>>,
 }
 
 impl SkillLoadOutcome {
     pub fn is_skill_enabled(&self, skill: &SkillMetadata) -> bool {
-        !self.disabled_paths.contains(&skill.path_to_skills_md)
+        !self.disabled_paths.contains(&skill.path)
     }
 
     pub fn is_skill_allowed_for_implicit_invocation(&self, skill: &SkillMetadata) -> bool {

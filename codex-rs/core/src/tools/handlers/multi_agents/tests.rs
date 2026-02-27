@@ -1578,21 +1578,9 @@ async fn close_agent_releases_slot_for_already_shutdown_agent() {
     .await
     .expect("agent should reach shutdown");
 
-    let blocked_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "spawn_agent",
-        function_payload(json!({"message": "blocked"})),
-    );
-    let Err(err) = MultiAgentHandler.handle(blocked_invocation).await else {
-        panic!("spawn_agent should fail when max threads already reached");
-    };
-    assert_eq!(
-        err,
-        FunctionCallError::RespondToModel(
-            "collab spawn failed: agent thread limit reached (max 1)".to_string()
-        )
-    );
+    let spawned_threads = session.services.agent_control.spawned_thread_ids();
+    assert_eq!(spawned_threads.len(), 1);
+    assert_eq!(spawned_threads.contains(&agent_thread_id), true);
 
     let close_invocation = invocation(
         session.clone(),
@@ -1604,6 +1592,9 @@ async fn close_agent_releases_slot_for_already_shutdown_agent() {
         .handle(close_invocation)
         .await
         .expect("close_agent should succeed");
+
+    let spawned_threads = session.services.agent_control.spawned_thread_ids();
+    assert_eq!(spawned_threads.contains(&agent_thread_id), false);
 
     let unblocked_invocation = invocation(
         session.clone(),
@@ -1630,6 +1621,288 @@ async fn close_agent_releases_slot_for_already_shutdown_agent() {
     let _ = manager
         .agent_control()
         .shutdown_agent(unblocked_thread_id)
+        .await;
+}
+
+#[tokio::test]
+async fn spawn_agent_reaps_shutdown_agent_on_thread_limit() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let mut config = (*turn.config).clone();
+    config.agent_max_threads = Some(1);
+    turn.config = Arc::new(config);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let spawn_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_agent",
+        function_payload(json!({"message": "hello"})),
+    );
+    let spawn_output = MultiAgentHandler
+        .handle(spawn_invocation)
+        .await
+        .expect("spawn_agent should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(spawn_content),
+        success: spawn_success,
+        ..
+    } = spawn_output
+    else {
+        panic!("expected function output");
+    };
+    assert_eq!(spawn_success, Some(true));
+    let spawn_result: SpawnAgentResult =
+        serde_json::from_str(&spawn_content).expect("spawn_agent result should be json");
+    let first_thread_id = agent_id(&spawn_result.agent_id).expect("valid agent id");
+
+    let thread = manager
+        .get_thread(first_thread_id)
+        .await
+        .expect("spawned agent should exist");
+    let _ = thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                manager.agent_control().get_status(first_thread_id).await,
+                AgentStatus::Shutdown
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("agent should reach shutdown");
+
+    let spawned_threads = session.services.agent_control.spawned_thread_ids();
+    assert_eq!(spawned_threads.len(), 1);
+    assert_eq!(spawned_threads.contains(&first_thread_id), true);
+
+    let spawn_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_agent",
+        function_payload(json!({"message": "unblocked"})),
+    );
+    let spawn_output = MultiAgentHandler
+        .handle(spawn_invocation)
+        .await
+        .expect("spawn_agent should succeed by reaping shutdown agent");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(spawn_content),
+        success: spawn_success,
+        ..
+    } = spawn_output
+    else {
+        panic!("expected function output");
+    };
+    assert_eq!(spawn_success, Some(true));
+    let spawn_result: SpawnAgentResult =
+        serde_json::from_str(&spawn_content).expect("spawn_agent result should be json");
+    let second_thread_id = agent_id(&spawn_result.agent_id).expect("valid agent id");
+    assert_eq!(second_thread_id == first_thread_id, false);
+
+    let spawned_threads = session.services.agent_control.spawned_thread_ids();
+    assert_eq!(spawned_threads.len(), 1);
+    assert_eq!(spawned_threads.contains(&first_thread_id), false);
+    assert_eq!(spawned_threads.contains(&second_thread_id), true);
+
+    let _ = manager
+        .agent_control()
+        .shutdown_agent(second_thread_id)
+        .await;
+}
+
+#[tokio::test]
+async fn spawn_team_reaps_shutdown_agent_on_thread_limit() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let mut config = (*turn.config).clone();
+    config.agent_max_threads = Some(1);
+    turn.config = Arc::new(config);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let spawn_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_agent",
+        function_payload(json!({"message": "hello"})),
+    );
+    let spawn_output = MultiAgentHandler
+        .handle(spawn_invocation)
+        .await
+        .expect("spawn_agent should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(spawn_content),
+        success: spawn_success,
+        ..
+    } = spawn_output
+    else {
+        panic!("expected function output");
+    };
+    assert_eq!(spawn_success, Some(true));
+    let spawn_result: SpawnAgentResult =
+        serde_json::from_str(&spawn_content).expect("spawn_agent result should be json");
+    let first_thread_id = agent_id(&spawn_result.agent_id).expect("valid agent id");
+
+    let thread = manager
+        .get_thread(first_thread_id)
+        .await
+        .expect("spawned agent should exist");
+    let _ = thread
+        .submit(Op::Shutdown {})
+        .await
+        .expect("shutdown should submit");
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if matches!(
+                manager.agent_control().get_status(first_thread_id).await,
+                AgentStatus::Shutdown
+            ) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("agent should reach shutdown");
+
+    let spawned_threads = session.services.agent_control.spawned_thread_ids();
+    assert_eq!(spawned_threads.len(), 1);
+    assert_eq!(spawned_threads.contains(&first_thread_id), true);
+
+    let spawn_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_team",
+        function_payload(json!({
+            "members": [
+                {"name": "worker", "task": "work"}
+            ]
+        })),
+    );
+    let spawn_output = MultiAgentHandler
+        .handle(spawn_invocation)
+        .await
+        .expect("spawn_team should succeed by reaping shutdown agent");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(spawn_content),
+        success: spawn_success,
+        ..
+    } = spawn_output
+    else {
+        panic!("expected function output");
+    };
+    assert_eq!(spawn_success, Some(true));
+    let spawn_result: SpawnTeamResult =
+        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
+    assert_eq!(spawn_result.members.len(), 1);
+    let member_thread_id = agent_id(&spawn_result.members[0].agent_id).expect("valid agent id");
+
+    let spawned_threads = session.services.agent_control.spawned_thread_ids();
+    assert_eq!(spawned_threads.len(), 1);
+    assert_eq!(spawned_threads.contains(&first_thread_id), false);
+    assert_eq!(spawned_threads.contains(&member_thread_id), true);
+
+    let _ = manager
+        .agent_control()
+        .shutdown_agent(member_thread_id)
+        .await;
+}
+
+#[tokio::test]
+async fn spawn_agent_fails_when_limit_reached_without_reclaimable_threads() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let mut config = (*turn.config).clone();
+    config.agent_max_threads = Some(1);
+    turn.config = Arc::new(config);
+
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let spawn_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_agent",
+        function_payload(json!({"message": "hello"})),
+    );
+    let spawn_output = MultiAgentHandler
+        .handle(spawn_invocation)
+        .await
+        .expect("spawn_agent should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(spawn_content),
+        success: spawn_success,
+        ..
+    } = spawn_output
+    else {
+        panic!("expected function output");
+    };
+    assert_eq!(spawn_success, Some(true));
+    let spawn_result: SpawnAgentResult =
+        serde_json::from_str(&spawn_content).expect("spawn_agent result should be json");
+    let first_thread_id = agent_id(&spawn_result.agent_id).expect("valid agent id");
+
+    let status = session
+        .services
+        .agent_control
+        .get_status(first_thread_id)
+        .await;
+    assert_eq!(
+        matches!(status, AgentStatus::PendingInit | AgentStatus::Running),
+        true
+    );
+
+    let blocked_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_agent",
+        function_payload(json!({"message": "blocked"})),
+    );
+    let Err(err) = MultiAgentHandler.handle(blocked_invocation).await else {
+        panic!("spawn_agent should fail when max threads already reached");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(
+            "collab spawn failed: agent thread limit reached (max 1)".to_string()
+        )
+    );
+
+    let spawned_threads = session.services.agent_control.spawned_thread_ids();
+    assert_eq!(spawned_threads.len(), 1);
+    assert_eq!(spawned_threads.contains(&first_thread_id), true);
+
+    let _ = manager
+        .agent_control()
+        .shutdown_agent(first_thread_id)
         .await;
 }
 
@@ -1879,21 +2152,9 @@ async fn close_team_releases_slot_for_already_shutdown_member() {
     .await
     .expect("member should reach shutdown");
 
-    let blocked_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "spawn_agent",
-        function_payload(json!({"message": "blocked"})),
-    );
-    let Err(err) = MultiAgentHandler.handle(blocked_invocation).await else {
-        panic!("spawn_agent should fail when max threads already reached");
-    };
-    assert_eq!(
-        err,
-        FunctionCallError::RespondToModel(
-            "collab spawn failed: agent thread limit reached (max 1)".to_string()
-        )
-    );
+    let spawned_threads = session.services.agent_control.spawned_thread_ids();
+    assert_eq!(spawned_threads.len(), 1);
+    assert_eq!(spawned_threads.contains(&member_thread_id), true);
 
     let close_invocation = invocation(
         session.clone(),
@@ -1907,6 +2168,9 @@ async fn close_team_releases_slot_for_already_shutdown_member() {
         .handle(close_invocation)
         .await
         .expect("close_team should succeed");
+
+    let spawned_threads = session.services.agent_control.spawned_thread_ids();
+    assert_eq!(spawned_threads.contains(&member_thread_id), false);
 
     let unblocked_invocation = invocation(
         session.clone(),
@@ -2003,21 +2267,9 @@ async fn team_cleanup_releases_slot_for_already_shutdown_member() {
     .await
     .expect("member should reach shutdown");
 
-    let blocked_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "spawn_agent",
-        function_payload(json!({"message": "blocked"})),
-    );
-    let Err(err) = MultiAgentHandler.handle(blocked_invocation).await else {
-        panic!("spawn_agent should fail when max threads already reached");
-    };
-    assert_eq!(
-        err,
-        FunctionCallError::RespondToModel(
-            "collab spawn failed: agent thread limit reached (max 1)".to_string()
-        )
-    );
+    let spawned_threads = session.services.agent_control.spawned_thread_ids();
+    assert_eq!(spawned_threads.len(), 1);
+    assert_eq!(spawned_threads.contains(&member_thread_id), true);
 
     let cleanup_invocation = invocation(
         session.clone(),
@@ -2031,6 +2283,9 @@ async fn team_cleanup_releases_slot_for_already_shutdown_member() {
         .handle(cleanup_invocation)
         .await
         .expect("team_cleanup should succeed");
+
+    let spawned_threads = session.services.agent_control.spawned_thread_ids();
+    assert_eq!(spawned_threads.contains(&member_thread_id), false);
 
     let unblocked_invocation = invocation(
         session.clone(),

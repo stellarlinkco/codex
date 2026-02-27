@@ -4,7 +4,6 @@ use std::time::Instant;
 use tracing::error;
 
 use crate::analytics_client::AppInvocation;
-use crate::analytics_client::InvocationType;
 use crate::analytics_client::build_track_events_context;
 use crate::codex::Session;
 use crate::codex::TurnContext;
@@ -277,15 +276,15 @@ async fn maybe_track_codex_app_used(
     let (connector_id, app_name) = metadata
         .map(|metadata| (metadata.connector_id, metadata.app_name))
         .unwrap_or((None, None));
-    let invocation_type = if let Some(connector_id) = connector_id.as_deref() {
+    let invoke_type = if let Some(connector_id) = connector_id.as_deref() {
         let mentioned_connector_ids = sess.get_connector_selection().await;
         if mentioned_connector_ids.contains(connector_id) {
-            InvocationType::Explicit
+            "explicit"
         } else {
-            InvocationType::Implicit
+            "implicit"
         }
     } else {
-        InvocationType::Implicit
+        "implicit"
     };
 
     let tracking = build_track_events_context(
@@ -298,7 +297,7 @@ async fn maybe_track_codex_app_used(
         AppInvocation {
             connector_id,
             app_name,
-            invocation_type: Some(invocation_type),
+            invoke_type: Some(invoke_type.to_string()),
         },
     );
 }
@@ -402,9 +401,9 @@ async fn maybe_request_mcp_tool_approval(
 }
 
 fn is_full_access_mode(turn_context: &TurnContext) -> bool {
-    matches!(turn_context.approval_policy.value(), AskForApproval::Never)
+    matches!(turn_context.approval_policy, AskForApproval::Never)
         && matches!(
-            turn_context.sandbox_policy.get(),
+            turn_context.sandbox_policy,
             SandboxPolicy::DangerFullAccess | SandboxPolicy::ExternalSandbox { .. }
         )
 }

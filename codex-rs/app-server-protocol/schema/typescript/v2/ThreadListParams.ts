@@ -36,8 +36,4 @@ archived?: boolean | null,
  * Optional cwd filter; when set, only threads whose session cwd exactly
  * matches this path are returned.
  */
-cwd?: string | null, 
-/**
- * Optional substring filter for the extracted thread title.
- */
-searchTerm?: string | null, };
+cwd?: string | null, };

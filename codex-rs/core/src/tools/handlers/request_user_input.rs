@@ -12,15 +12,10 @@ use codex_protocol::config_types::ModeKind;
 use codex_protocol::config_types::TUI_VISIBLE_COLLABORATION_MODES;
 use codex_protocol::request_user_input::RequestUserInputArgs;
 
-fn request_user_input_is_available(mode: ModeKind, default_mode_request_user_input: bool) -> bool {
-    mode.allows_request_user_input()
-        || (default_mode_request_user_input && mode == ModeKind::Default)
-}
-
-fn format_allowed_modes(default_mode_request_user_input: bool) -> String {
+fn format_allowed_modes() -> String {
     let mode_names: Vec<&str> = TUI_VISIBLE_COLLABORATION_MODES
         .into_iter()
-        .filter(|mode| request_user_input_is_available(*mode, default_mode_request_user_input))
+        .filter(|mode| mode.allows_request_user_input())
         .map(ModeKind::display_name)
         .collect();
 
@@ -32,11 +27,8 @@ fn format_allowed_modes(default_mode_request_user_input: bool) -> String {
     }
 }
 
-pub(crate) fn request_user_input_unavailable_message(
-    mode: ModeKind,
-    default_mode_request_user_input: bool,
-) -> Option<String> {
-    if request_user_input_is_available(mode, default_mode_request_user_input) {
+pub(crate) fn request_user_input_unavailable_message(mode: ModeKind) -> Option<String> {
+    if mode.allows_request_user_input() {
         None
     } else {
         let mode_name = mode.display_name();
@@ -46,16 +38,14 @@ pub(crate) fn request_user_input_unavailable_message(
     }
 }
 
-pub(crate) fn request_user_input_tool_description(default_mode_request_user_input: bool) -> String {
-    let allowed_modes = format_allowed_modes(default_mode_request_user_input);
+pub(crate) fn request_user_input_tool_description() -> String {
+    let allowed_modes = format_allowed_modes();
     format!(
         "Request user input for one to three short questions and wait for the response. This tool is only available in {allowed_modes}."
     )
 }
 
-pub struct RequestUserInputHandler {
-    pub default_mode_request_user_input: bool,
-}
+pub struct RequestUserInputHandler;
 
 #[async_trait]
 impl ToolHandler for RequestUserInputHandler {
@@ -82,9 +72,7 @@ impl ToolHandler for RequestUserInputHandler {
         };
 
         let mode = session.collaboration_mode().await.mode;
-        if let Some(message) =
-            request_user_input_unavailable_message(mode, self.default_mode_request_user_input)
-        {
+        if let Some(message) = request_user_input_unavailable_message(mode) {
             return Err(FunctionCallError::RespondToModel(message));
         }
 
@@ -129,7 +117,7 @@ mod tests {
     use pretty_assertions::assert_eq;
 
     #[test]
-    fn request_user_input_mode_availability_defaults_to_plan_only() {
+    fn request_user_input_mode_availability_is_plan_only() {
         assert!(ModeKind::Plan.allows_request_user_input());
         assert!(!ModeKind::Default.allows_request_user_input());
         assert!(!ModeKind::Execute.allows_request_user_input());
@@ -137,38 +125,27 @@ mod tests {
     }
 
     #[test]
-    fn request_user_input_unavailable_messages_respect_default_mode_feature_flag() {
+    fn request_user_input_unavailable_messages_use_default_name_for_default_modes() {
+        assert_eq!(request_user_input_unavailable_message(ModeKind::Plan), None);
         assert_eq!(
-            request_user_input_unavailable_message(ModeKind::Plan, false),
-            None
-        );
-        assert_eq!(
-            request_user_input_unavailable_message(ModeKind::Default, false),
+            request_user_input_unavailable_message(ModeKind::Default),
             Some("request_user_input is unavailable in Default mode".to_string())
         );
         assert_eq!(
-            request_user_input_unavailable_message(ModeKind::Default, true),
-            None
-        );
-        assert_eq!(
-            request_user_input_unavailable_message(ModeKind::Execute, false),
+            request_user_input_unavailable_message(ModeKind::Execute),
             Some("request_user_input is unavailable in Execute mode".to_string())
         );
         assert_eq!(
-            request_user_input_unavailable_message(ModeKind::PairProgramming, false),
+            request_user_input_unavailable_message(ModeKind::PairProgramming),
             Some("request_user_input is unavailable in Pair Programming mode".to_string())
         );
     }
 
     #[test]
-    fn request_user_input_tool_description_mentions_available_modes() {
+    fn request_user_input_tool_description_mentions_plan_only() {
         assert_eq!(
-            request_user_input_tool_description(false),
+            request_user_input_tool_description(),
             "Request user input for one to three short questions and wait for the response. This tool is only available in Plan mode.".to_string()
-        );
-        assert_eq!(
-            request_user_input_tool_description(true),
-            "Request user input for one to three short questions and wait for the response. This tool is only available in Default or Plan mode.".to_string()
         );
     }
 }

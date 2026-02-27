@@ -13,7 +13,8 @@ use std::path::Path;
 use std::sync::LazyLock;
 use toml::Value as TomlValue;
 
-pub const DEFAULT_ROLE_NAME: &str = "default";
+const BUILT_IN_EXPLORER_CONFIG: &str = include_str!("builtins/explorer.toml");
+const DEFAULT_ROLE_NAME: &str = "default";
 const AGENT_TYPE_UNAVAILABLE_ERROR: &str = "agent type is currently not available";
 
 /// Applies a role config layer to a mutable config and preserves unspecified keys.
@@ -87,7 +88,6 @@ pub(crate) async fn apply_role_to_config(
         ConfigOverrides {
             cwd: Some(config.cwd.clone()),
             codex_linux_sandbox_exe: config.codex_linux_sandbox_exe.clone(),
-            main_execve_wrapper_exe: config.main_execve_wrapper_exe.clone(),
             js_repl_node_path: config.js_repl_node_path.clone(),
             ..Default::default()
         },
@@ -186,21 +186,6 @@ Rules:
 - Always tell workers they are **not alone in the codebase**, and they should ignore edits made by others without touching them."#.to_string()),
                         config_file: None,
                     }
-                ),
-                (
-                    "awaiter".to_string(),
-                    AgentRoleConfig {
-                        description: Some(r#"Use an `awaiter` agent EVERY TIME you must run a command that might take some very long time.
-This includes, but not only:
-* testing
-* monitoring of a long running process
-* explicit ask to wait for something
-
-When YOU wait for the `awaiter` agent to be done, use the largest possible timeout.
-Be patient with the `awaiter`.
-Close the awaiter when you're done with it."#.to_string()),
-                        config_file: Some("awaiter.toml".to_string().parse().unwrap_or_default()),
-                    }
                 )
             ])
         });
@@ -209,11 +194,8 @@ Close the awaiter when you're done with it."#.to_string()),
 
     /// Resolves a built-in role `config_file` path to embedded content.
     pub(super) fn config_file_contents(path: &Path) -> Option<&'static str> {
-        const EXPLORER: &str = include_str!("builtins/explorer.toml");
-        const AWAITER: &str = include_str!("builtins/awaiter.toml");
         match path.to_str()? {
-            "explorer.toml" => Some(EXPLORER),
-            "awaiter.toml" => Some(AWAITER),
+            "explorer.toml" => Some(BUILT_IN_EXPLORER_CONFIG),
             _ => None,
         }
     }
@@ -343,8 +325,6 @@ mod tests {
             TomlValue::String("base-model".to_string()),
         )])
         .await;
-        config.codex_linux_sandbox_exe = Some(PathBuf::from("/tmp/codex-linux-sandbox"));
-        config.main_execve_wrapper_exe = Some(PathBuf::from("/tmp/codex-execve-wrapper"));
         let role_path = write_role_config(
             &home,
             "effort-only.toml",
@@ -365,14 +345,6 @@ mod tests {
 
         assert_eq!(config.model.as_deref(), Some("base-model"));
         assert_eq!(config.model_reasoning_effort, Some(ReasoningEffort::High));
-        assert_eq!(
-            config.codex_linux_sandbox_exe,
-            Some(PathBuf::from("/tmp/codex-linux-sandbox"))
-        );
-        assert_eq!(
-            config.main_execve_wrapper_exe,
-            Some(PathBuf::from("/tmp/codex-execve-wrapper"))
-        );
     }
 
     #[tokio::test]
@@ -509,6 +481,10 @@ writable_roots = ["./sandbox-root"]
 
     #[test]
     fn built_in_config_file_contents_resolves_explorer_only() {
+        assert_eq!(
+            built_in::config_file_contents(Path::new("explorer.toml")),
+            Some(BUILT_IN_EXPLORER_CONFIG)
+        );
         assert_eq!(
             built_in::config_file_contents(Path::new("missing.toml")),
             None

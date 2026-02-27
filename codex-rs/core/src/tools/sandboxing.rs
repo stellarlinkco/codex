@@ -10,7 +10,6 @@ use crate::error::CodexErr;
 use crate::protocol::SandboxPolicy;
 use crate::sandboxing::CommandSpec;
 use crate::sandboxing::SandboxManager;
-use crate::sandboxing::SandboxPermissions;
 use crate::sandboxing::SandboxTransformError;
 use crate::state::SessionServices;
 use crate::tools::network_approval::NetworkApprovalSpec;
@@ -19,14 +18,14 @@ use codex_protocol::approvals::ExecPolicyAmendment;
 use codex_protocol::approvals::NetworkApprovalContext;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewDecision;
-use futures::Future;
-use futures::future::BoxFuture;
-use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::path::Path;
-use std::sync::Arc;
+
+use futures::Future;
+use futures::future::BoxFuture;
+use serde::Serialize;
 
 #[derive(Clone, Default, Debug)]
 pub(crate) struct ApprovalStore {
@@ -201,27 +200,6 @@ pub(crate) enum SandboxOverride {
     BypassSandboxFirstAttempt,
 }
 
-pub(crate) fn sandbox_override_for_first_attempt(
-    sandbox_permissions: SandboxPermissions,
-    exec_approval_requirement: &ExecApprovalRequirement,
-) -> SandboxOverride {
-    // ExecPolicy `Allow` can intentionally imply full trust (Skip + bypass_sandbox=true),
-    // which supersedes `with_additional_permissions` sandboxed execution hints.
-    if sandbox_permissions.requires_escalated_permissions()
-        || matches!(
-            exec_approval_requirement,
-            ExecApprovalRequirement::Skip {
-                bypass_sandbox: true,
-                ..
-            }
-        )
-    {
-        SandboxOverride::BypassSandboxFirstAttempt
-    } else {
-        SandboxOverride::NoOverride
-    }
-}
-
 pub(crate) trait Approvable<Req> {
     type ApprovalKey: Hash + Eq + Clone + Debug + Serialize;
 
@@ -289,9 +267,9 @@ pub(crate) trait Sandboxable {
     }
 }
 
-pub(crate) struct ToolCtx {
-    pub session: Arc<Session>,
-    pub turn: Arc<TurnContext>,
+pub(crate) struct ToolCtx<'a> {
+    pub session: &'a Session,
+    pub turn: &'a TurnContext,
     pub call_id: String,
     pub tool_name: String,
 }
@@ -303,7 +281,7 @@ pub(crate) enum ToolError {
 }
 
 pub(crate) trait ToolRuntime<Req, Out>: Approvable<Req> + Sandboxable {
-    fn network_approval_spec(&self, _req: &Req, _ctx: &ToolCtx) -> Option<NetworkApprovalSpec> {
+    fn network_approval_spec(&self, _req: &Req, _ctx: &ToolCtx<'_>) -> Option<NetworkApprovalSpec> {
         None
     }
 
@@ -350,7 +328,6 @@ impl<'a> SandboxAttempt<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sandboxing::SandboxPermissions;
     use codex_protocol::protocol::NetworkAccess;
     use codex_protocol::protocol::RejectConfig;
     use pretty_assertions::assert_eq;
@@ -421,20 +398,6 @@ mod tests {
                 reason: None,
                 proposed_execpolicy_amendment: None,
             }
-        );
-    }
-
-    #[test]
-    fn additional_permissions_allow_bypass_sandbox_first_attempt_when_execpolicy_skips() {
-        assert_eq!(
-            sandbox_override_for_first_attempt(
-                SandboxPermissions::WithAdditionalPermissions,
-                &ExecApprovalRequirement::Skip {
-                    bypass_sandbox: true,
-                    proposed_execpolicy_amendment: None,
-                },
-            ),
-            SandboxOverride::BypassSandboxFirstAttempt
         );
     }
 }

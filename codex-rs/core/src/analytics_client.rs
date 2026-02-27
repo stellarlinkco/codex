@@ -34,25 +34,16 @@ pub(crate) fn build_track_events_context(
     }
 }
 
-#[derive(Clone, Debug)]
 pub(crate) struct SkillInvocation {
     pub(crate) skill_name: String,
     pub(crate) skill_scope: SkillScope,
     pub(crate) skill_path: PathBuf,
-    pub(crate) invocation_type: InvocationType,
-}
-
-#[derive(Clone, Copy, Debug, Serialize)]
-#[serde(rename_all = "lowercase")]
-pub(crate) enum InvocationType {
-    Explicit,
-    Implicit,
 }
 
 pub(crate) struct AppInvocation {
     pub(crate) connector_id: Option<String>,
     pub(crate) app_name: Option<String>,
-    pub(crate) invocation_type: Option<InvocationType>,
+    pub(crate) invoke_type: Option<String>,
 }
 
 #[derive(Clone)]
@@ -206,7 +197,7 @@ struct SkillInvocationEventParams {
     skill_scope: Option<String>,
     repo_url: Option<String>,
     thread_id: Option<String>,
-    invoke_type: Option<InvocationType>,
+    invoke_type: Option<String>,
     model_slug: Option<String>,
 }
 
@@ -217,7 +208,7 @@ struct CodexAppMetadata {
     turn_id: Option<String>,
     app_name: Option<String>,
     product_client_id: Option<String>,
-    invoke_type: Option<InvocationType>,
+    invoke_type: Option<String>,
     model_slug: Option<String>,
 }
 
@@ -337,7 +328,7 @@ async fn send_track_skill_invocations(auth_manager: &AuthManager, job: TrackSkil
                 skill_name: invocation.skill_name.clone(),
                 event_params: SkillInvocationEventParams {
                     thread_id: Some(tracking.thread_id.clone()),
-                    invoke_type: Some(invocation.invocation_type),
+                    invoke_type: Some("explicit".to_string()),
                     model_slug: Some(tracking.model_slug.clone()),
                     product_client_id: Some(crate::default_client::originator().value),
                     repo_url,
@@ -392,7 +383,7 @@ fn codex_app_metadata(tracking: &TrackEventsContext, app: AppInvocation) -> Code
         turn_id: Some(tracking.turn_id.clone()),
         app_name: app.app_name,
         product_client_id: Some(crate::default_client::originator().value),
-        invoke_type: app.invocation_type,
+        invoke_type: app.invoke_type,
         model_slug: Some(tracking.model_slug.clone()),
     }
 }
@@ -446,7 +437,7 @@ async fn send_track_events(
     }
 }
 
-pub(crate) fn skill_id_for_local_skill(
+fn skill_id_for_local_skill(
     repo_url: Option<&str>,
     repo_root: Option<&Path>,
     skill_path: &Path,
@@ -494,7 +485,6 @@ mod tests {
     use super::AppInvocation;
     use super::CodexAppMentionedEventRequest;
     use super::CodexAppUsedEventRequest;
-    use super::InvocationType;
     use super::TrackEventRequest;
     use super::TrackEventsContext;
     use super::codex_app_metadata;
@@ -577,7 +567,7 @@ mod tests {
                 AppInvocation {
                     connector_id: Some("calendar".to_string()),
                     app_name: Some("Calendar".to_string()),
-                    invocation_type: Some(InvocationType::Explicit),
+                    invoke_type: Some("explicit".to_string()),
                 },
             ),
         });
@@ -615,7 +605,7 @@ mod tests {
                 AppInvocation {
                     connector_id: Some("drive".to_string()),
                     app_name: Some("Google Drive".to_string()),
-                    invocation_type: Some(InvocationType::Implicit),
+                    invoke_type: Some("implicit".to_string()),
                 },
             ),
         });
@@ -649,7 +639,7 @@ mod tests {
         let app = AppInvocation {
             connector_id: Some("calendar".to_string()),
             app_name: Some("Calendar".to_string()),
-            invocation_type: Some(InvocationType::Implicit),
+            invoke_type: Some("implicit".to_string()),
         };
 
         let turn_1 = TrackEventsContext {

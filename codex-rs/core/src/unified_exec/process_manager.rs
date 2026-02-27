@@ -576,8 +576,8 @@ impl UnifiedExecProcessManager {
             .exec_policy
             .create_exec_approval_requirement_for_command(ExecApprovalRequest {
                 command: &request.command,
-                approval_policy: context.turn.approval_policy.value(),
-                sandbox_policy: context.turn.sandbox_policy.get(),
+                approval_policy: context.turn.approval_policy,
+                sandbox_policy: &context.turn.sandbox_policy,
                 sandbox_permissions: request.sandbox_permissions,
                 prefix_rule: request.prefix_rule.clone(),
             })
@@ -590,13 +590,12 @@ impl UnifiedExecProcessManager {
             network: request.network.clone(),
             tty: request.tty,
             sandbox_permissions: request.sandbox_permissions,
-            additional_permissions: request.additional_permissions.clone(),
             justification: request.justification.clone(),
             exec_approval_requirement,
         };
         let tool_ctx = ToolCtx {
-            session: context.session.clone(),
-            turn: context.turn.clone(),
+            session: context.session.as_ref(),
+            turn: context.turn.as_ref(),
             call_id: context.call_id.clone(),
             tool_name: "exec_command".to_string(),
         };
@@ -605,8 +604,8 @@ impl UnifiedExecProcessManager {
                 &mut runtime,
                 &req,
                 &tool_ctx,
-                &context.turn,
-                context.turn.approval_policy.value(),
+                context.turn.as_ref(),
+                context.turn.approval_policy,
             )
             .await
             .map(|result| (result.output, result.deferred_network_approval))

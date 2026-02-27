@@ -10,8 +10,6 @@ use std::sync::Arc;
 use codex_protocol::config_types::CollaborationModeMask;
 use codex_protocol::openai_models::ModelInfo;
 use codex_protocol::openai_models::ModelPreset;
-use codex_protocol::openai_models::ModelsResponse;
-use once_cell::sync::Lazy;
 
 use crate::AuthManager;
 use crate::CodexAuth;
@@ -20,18 +18,9 @@ use crate::ThreadManager;
 use crate::config::Config;
 use crate::models_manager::collaboration_mode_presets;
 use crate::models_manager::manager::ModelsManager;
+use crate::models_manager::model_presets;
 use crate::thread_manager;
 use crate::unified_exec;
-
-static TEST_MODEL_PRESETS: Lazy<Vec<ModelPreset>> = Lazy::new(|| {
-    let file_contents = include_str!("../models.json");
-    let mut response: ModelsResponse = serde_json::from_str(file_contents)
-        .unwrap_or_else(|err| panic!("bundled models.json should parse: {err}"));
-    response.models.sort_by(|a, b| a.priority.cmp(&b.priority));
-    let mut presets: Vec<ModelPreset> = response.models.into_iter().map(Into::into).collect();
-    ModelPreset::mark_default_by_picker_visibility(&mut presets);
-    presets
-});
 
 pub fn set_thread_manager_test_mode(enabled: bool) {
     thread_manager::set_thread_manager_test_mode_for_tests(enabled);
@@ -81,11 +70,9 @@ pub fn construct_model_info_offline(model: &str, config: &Config) -> ModelInfo {
 }
 
 pub fn all_model_presets() -> &'static Vec<ModelPreset> {
-    &TEST_MODEL_PRESETS
+    &model_presets::PRESETS
 }
 
 pub fn builtin_collaboration_mode_presets() -> Vec<CollaborationModeMask> {
-    collaboration_mode_presets::builtin_collaboration_mode_presets(
-        collaboration_mode_presets::CollaborationModesConfig::default(),
-    )
+    collaboration_mode_presets::builtin_collaboration_mode_presets()
 }

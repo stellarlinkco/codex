@@ -51,6 +51,10 @@ impl AgentControl {
         }
     }
 
+    pub(crate) fn spawned_thread_ids(&self) -> Vec<ThreadId> {
+        self.state.spawned_thread_ids()
+    }
+
     /// Spawn a new agent thread without submitting any input.
     pub(crate) async fn spawn_agent_thread(
         &self,
@@ -82,7 +86,7 @@ impl AgentControl {
         let new_thread = match session_source {
             Some(session_source) => {
                 state
-                    .spawn_new_thread_with_source(config, self.clone(), session_source, false, None)
+                    .spawn_new_thread_with_source(config, self.clone(), session_source, false)
                     .await?
             }
             None => state.spawn_new_thread(config, self.clone()).await?,
@@ -334,8 +338,8 @@ mod tests {
     use crate::config::Config;
     use crate::config::ConfigBuilder;
     use crate::config_loader::LoaderOverrides;
-    use crate::contextual_user_message::SUBAGENT_NOTIFICATION_OPEN_TAG;
     use crate::features::Feature;
+    use crate::session_prefix::SUBAGENT_NOTIFICATION_OPEN_TAG;
     use assert_matches::assert_matches;
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::models::ContentItem;
