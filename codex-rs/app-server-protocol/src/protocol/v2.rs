@@ -3326,6 +3326,9 @@ pub enum CollabAgentTool {
     ResumeAgent,
     Wait,
     CloseAgent,
+    SpawnTeam,
+    WaitTeam,
+    CloseTeam,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]

@@ -6882,7 +6882,6 @@ impl ChatWidget {
         }
         let previous_mode = self.active_mode_kind();
         let previous_model = self.current_model().to_string();
-        let previous_effort = self.effective_reasoning_effort();
         if mask.mode == Some(ModeKind::Plan)
             && let Some(effort) = self.config.plan_mode_reasoning_effort
         {
@@ -6894,9 +6893,7 @@ impl ChatWidget {
         let next_mode = self.active_mode_kind();
         let next_model = self.current_model();
         let next_effort = self.effective_reasoning_effort();
-        if previous_mode != next_mode
-            && (previous_model != next_model || previous_effort != next_effort)
-        {
+        if previous_mode != next_mode && previous_model != next_model {
             let mut message = format!("Model changed to {next_model}");
             if !next_model.starts_with("codex-auto-") {
                 let reasoning_label = match next_effort {

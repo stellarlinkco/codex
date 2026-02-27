@@ -528,6 +528,7 @@ pub(crate) mod wait {
                     sender_thread_id: session.conversation_id,
                     receiver_thread_ids: receiver_thread_ids.clone(),
                     receiver_agents: receiver_agents.clone(),
+                    receiver_names: HashMap::new(),
                     call_id: call_id.clone(),
                 }
                 .into(),
@@ -561,6 +562,7 @@ pub(crate) mod wait {
                                     &statuses,
                                     &receiver_agents,
                                 ),
+                                receiver_names: HashMap::new(),
                                 statuses,
                             }
                             .into(),
@@ -621,6 +623,7 @@ pub(crate) mod wait {
                     sender_thread_id: session.conversation_id,
                     call_id,
                     agent_statuses,
+                    receiver_names: HashMap::new(),
                     statuses: statuses_map,
                 }
                 .into(),
