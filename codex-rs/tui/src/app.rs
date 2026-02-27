@@ -1663,6 +1663,7 @@ impl App {
                         self.backtrack_render_pending = false;
                         self.render_transcript_once(tui);
                     }
+                    self.chat_widget.pre_draw_tick();
                     self.chat_widget.maybe_post_pending_notification(tui);
                     if self
                         .chat_widget
@@ -1736,6 +1737,7 @@ impl App {
                 self.start_new_session(tui).await;
             }
             AppEvent::ClearUi => {
+                tui.clear_pending_history_lines();
                 self.reset_for_thread_switch(tui)?;
                 self.start_new_session(tui).await;
             }
@@ -2919,9 +2921,6 @@ impl App {
             AppEvent::StatusLineSetupCancelled => {
                 self.chat_widget.cancel_status_line_setup();
             }
-            AppEvent::RefreshPendingThreadApprovals => {
-                tui.frame_requester().schedule_frame();
-            }
             AppEvent::SyntaxThemeSelected { name } => {
                 let edit = codex_core::config::edit::syntax_theme_edit(&name);
                 let apply_result = ConfigEditsBuilder::new(&self.config.codex_home)
@@ -3224,6 +3223,16 @@ impl App {
                     && self.chat_widget.external_editor_state() == ExternalEditorState::Closed
                 {
                     self.request_external_editor_launch(tui);
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Char('l'),
+                modifiers: crossterm::event::KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                ..
+            } => {
+                if self.chat_widget.can_run_ctrl_l_clear_now() {
+                    self.app_event_tx.send(AppEvent::ClearUi);
                 }
             }
             // Esc primes/advances backtracking only in normal (not working) mode

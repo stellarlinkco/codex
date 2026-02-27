@@ -4685,10 +4685,6 @@ impl ChatWidget {
         self.bottom_pane.set_queued_user_messages(messages);
     }
 
-    pub(crate) fn set_pending_thread_approvals(&mut self, threads: Vec<String>) {
-        self.bottom_pane.set_pending_thread_approvals(threads);
-    }
-
     pub(crate) fn add_diff_in_progress(&mut self) {
         self.request_redraw();
     }
@@ -6743,6 +6739,7 @@ impl ChatWidget {
         &self.current_collaboration_mode
     }
 
+    #[cfg(test)]
     pub(crate) fn current_reasoning_effort(&self) -> Option<ReasoningEffortConfig> {
         self.effective_reasoning_effort()
     }
@@ -7365,11 +7362,6 @@ impl ChatWidget {
     #[cfg(test)]
     pub(crate) fn remote_image_urls(&self) -> Vec<String> {
         self.bottom_pane.remote_image_urls()
-    }
-
-    #[cfg(test)]
-    pub(crate) fn pending_thread_approvals(&self) -> &[String] {
-        self.bottom_pane.pending_thread_approvals()
     }
 
     pub(crate) fn show_esc_backtrack_hint(&mut self) {

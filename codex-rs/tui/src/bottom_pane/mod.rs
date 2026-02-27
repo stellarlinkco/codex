@@ -760,18 +760,6 @@ impl BottomPane {
         self.request_redraw();
     }
 
-    /// Update the inactive-thread approval list shown above the composer.
-    pub(crate) fn set_pending_thread_approvals(&mut self, threads: Vec<String>) {
-        if self.pending_thread_approvals.set_threads(threads) {
-            self.request_redraw();
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn pending_thread_approvals(&self) -> &[String] {
-        self.pending_thread_approvals.threads()
-    }
-
     /// Update the unified-exec process set and refresh whichever summary surface is active.
     ///
     /// The summary may be displayed inline in the status row or as a dedicated

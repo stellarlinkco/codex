@@ -554,6 +554,7 @@ mod tests {
     use codex_core::ThreadManager;
     use codex_core::config::Config;
     use codex_core::config::ConfigOverrides;
+    use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
     use codex_core::skills::SkillLoadOutcome;
     use codex_core::skills::SkillMetadata;
     use codex_protocol::config_types::CollaborationMode;
@@ -755,8 +756,9 @@ mod tests {
             interface: None,
             dependencies: None,
             policy: None,
+            permission_profile: None,
             permissions: None,
-            path: PathBuf::from("/tmp/a/SKILL.md"),
+            path_to_skills_md: PathBuf::from("/tmp/a/SKILL.md"),
             scope: SkillScope::User,
         };
         let disabled_skill = SkillMetadata {
@@ -766,17 +768,16 @@ mod tests {
             interface: None,
             dependencies: None,
             policy: None,
+            permission_profile: None,
             permissions: None,
-            path: PathBuf::from("/tmp/b/SKILL.md"),
+            path_to_skills_md: PathBuf::from("/tmp/b/SKILL.md"),
             scope: SkillScope::User,
         };
         let mut disabled_paths = HashSet::new();
-        disabled_paths.insert(disabled_skill.path.clone());
-        let outcome = SkillLoadOutcome {
-            skills: vec![enabled_skill.clone(), disabled_skill],
-            errors: Vec::new(),
-            disabled_paths,
-        };
+        disabled_paths.insert(disabled_skill.path_to_skills_md.clone());
+        let mut outcome = SkillLoadOutcome::default();
+        outcome.skills = vec![enabled_skill.clone(), disabled_skill];
+        outcome.disabled_paths = disabled_paths;
 
         let skills = skills_outcome_to_summaries(outcome);
         assert_eq!(skills.len(), 1);
@@ -844,6 +845,7 @@ mod tests {
             auth_manager.clone(),
             SessionSource::Cli,
             config.model_catalog.clone(),
+            CollaborationModesConfig::default(),
         ));
         let (events_tx, _) = broadcast::channel(64);
 
