@@ -10,7 +10,7 @@
 <table>
 <tr>
 <td width="180"><a href="https://www.packyapi.com/register?aff=wZPe"><img src="assets/partners/logos/packycode.png" alt="PackyCode" width="150"></a></td>
-<td>Thanks to PackyCode for sponsoring this project! PackyCode is a reliable and efficient API relay service provider, offering relay services for Claude Code, Codex, Gemini, and more.</td>
+<td>Thanks to PackyCode for sponsoring this project! PackyCode is a reliable and efficient API relay service provider, offering relay services for Claude Code, Codex, Gemini, and more. PackyCode provides special discounts for our software users: register using <a href="https://www.packyapi.com/register?aff=wZPe">this link</a> and enter the "houcode" promo code during first recharge to get 10% off.</td>
 </tr>
 </table>
 
