@@ -3,36 +3,17 @@ use crate::memories::phase_one;
 use crate::memories::storage::rollout_summary_file_stem_from_parts;
 use crate::truncate::TruncationPolicy;
 use crate::truncate::truncate_text;
-use askama::Template;
 use codex_protocol::openai_models::ModelInfo;
 use codex_state::Phase2InputSelection;
 use codex_state::Stage1Output;
 use codex_state::Stage1OutputRef;
 use std::path::Path;
 use tokio::fs;
-use tracing::warn;
 
-#[derive(Template)]
-#[template(path = "memories/consolidation.md", escape = "none")]
-struct ConsolidationPromptTemplate<'a> {
-    memory_root: &'a str,
-    phase2_input_selection: &'a str,
-}
-
-#[derive(Template)]
-#[template(path = "memories/stage_one_input.md", escape = "none")]
-struct StageOneInputTemplate<'a> {
-    rollout_path: &'a str,
-    rollout_cwd: &'a str,
-    rollout_contents: &'a str,
-}
-
-#[derive(Template)]
-#[template(path = "memories/read_path.md", escape = "none")]
-struct MemoryToolDeveloperInstructionsTemplate<'a> {
-    base_path: &'a str,
-    memory_summary: &'a str,
-}
+const CONSOLIDATION_PROMPT_TEMPLATE: &str =
+    include_str!("../../templates/memories/consolidation.md");
+const STAGE_ONE_INPUT_TEMPLATE: &str = include_str!("../../templates/memories/stage_one_input.md");
+const READ_PATH_TEMPLATE: &str = include_str!("../../templates/memories/read_path.md");
 
 /// Builds the consolidation subagent prompt for a specific memory root.
 pub(super) fn build_consolidation_prompt(
@@ -41,16 +22,9 @@ pub(super) fn build_consolidation_prompt(
 ) -> String {
     let memory_root = memory_root.display().to_string();
     let phase2_input_selection = render_phase2_input_selection(selection);
-    let template = ConsolidationPromptTemplate {
-        memory_root: &memory_root,
-        phase2_input_selection: &phase2_input_selection,
-    };
-    template.render().unwrap_or_else(|err| {
-        warn!("failed to render memories consolidation prompt template: {err}");
-        format!(
-            "## Memory Phase 2 (Consolidation)\nConsolidate Codex memories in: {memory_root}\n\n{phase2_input_selection}"
-        )
-    })
+    CONSOLIDATION_PROMPT_TEMPLATE
+        .replace("{{ memory_root }}", &memory_root)
+        .replace("{{ phase2_input_selection }}", &phase2_input_selection)
 }
 
 fn render_phase2_input_selection(selection: &Phase2InputSelection) -> String {
@@ -144,12 +118,10 @@ pub(super) fn build_stage_one_input_message(
 
     let rollout_path = rollout_path.display().to_string();
     let rollout_cwd = rollout_cwd.display().to_string();
-    Ok(StageOneInputTemplate {
-        rollout_path: &rollout_path,
-        rollout_cwd: &rollout_cwd,
-        rollout_contents: &truncated_rollout_contents,
-    }
-    .render()?)
+    Ok(STAGE_ONE_INPUT_TEMPLATE
+        .replace("{{ rollout_path }}", &rollout_path)
+        .replace("{{ rollout_cwd }}", &rollout_cwd)
+        .replace("{{ rollout_contents }}", &truncated_rollout_contents))
 }
 
 /// Build prompt used for read path. This prompt must be added to the developer instructions. In
@@ -171,11 +143,11 @@ pub(crate) async fn build_memory_tool_developer_instructions(codex_home: &Path) 
         return None;
     }
     let base_path = base_path.display().to_string();
-    let template = MemoryToolDeveloperInstructionsTemplate {
-        base_path: &base_path,
-        memory_summary: &memory_summary,
-    };
-    template.render().ok()
+    Some(
+        READ_PATH_TEMPLATE
+            .replace("{{ base_path }}", &base_path)
+            .replace("{{ memory_summary }}", &memory_summary),
+    )
 }
 
 #[cfg(test)]
