@@ -42,7 +42,7 @@
           "type": "integer"
         },
         "max_threads": {
-          "description": "Maximum number of agent threads that can be open concurrently. When unset, no limit is enforced.",
+          "description": "Maximum number of agent threads that can be open concurrently. When unset, falls back to `DEFAULT_AGENT_MAX_THREADS`.",
           "format": "uint",
           "minimum": 1.0,
           "type": "integer"

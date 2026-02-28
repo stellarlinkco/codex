@@ -109,7 +109,7 @@ pub async fn handle(
         let model_provider = optional_non_empty(&member.model_provider, "model_provider")?;
         let model = optional_non_empty(&member.model, "model")?;
         let use_worktree = member.worktree;
-        let _background = member.background;
+        let background = member.background;
 
         let mut config = build_agent_spawn_config(
             &session.get_base_instructions().await,
@@ -214,6 +214,9 @@ pub async fn handle(
 
         if let Some(lease) = worktree_lease {
             register_worktree_lease(agent_id, lease);
+        }
+        if background {
+            maybe_start_background_agent_cleanup(session.clone(), turn.clone(), agent_id);
         }
 
         let status = session.services.agent_control.get_status(agent_id).await;

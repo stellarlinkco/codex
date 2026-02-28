@@ -38,7 +38,7 @@ pub async fn handle(
     let model_provider = optional_non_empty(&args.model_provider, "model_provider")?;
     let model = optional_non_empty(&args.model, "model")?;
     let use_worktree = args.worktree;
-    let _background = args.background;
+    let background = args.background;
     let input_items = parse_collab_input(args.message, args.items)?;
     let prompt = input_preview(&input_items);
     let session_source = turn.session_source.clone();
@@ -154,6 +154,9 @@ pub async fn handle(
 
     if let Some(lease) = worktree_lease {
         register_worktree_lease(agent_id, lease);
+    }
+    if background {
+        maybe_start_background_agent_cleanup(session.clone(), turn.clone(), agent_id);
     }
 
     let (new_agent_nickname, new_agent_role) = session

@@ -659,7 +659,7 @@ fn create_spawn_agent_tool(config: &ToolsConfig) -> ToolSpec {
             "background".to_string(),
             JsonSchema::Boolean {
                 description: Some(
-                    "When true, mark this agent as background work (informational).".to_string(),
+                    "When true, mark this agent as background work (informational) and auto-close it once it reaches a final status.".to_string(),
                 ),
             },
         ),
@@ -1059,7 +1059,7 @@ fn create_spawn_team_tool(config: &ToolsConfig) -> ToolSpec {
             "background".to_string(),
             JsonSchema::Boolean {
                 description: Some(
-                    "When true, mark this member as background work (informational).".to_string(),
+                    "When true, mark this member as background work (informational) and auto-close it once it reaches a final status.".to_string(),
                 ),
             },
         ),

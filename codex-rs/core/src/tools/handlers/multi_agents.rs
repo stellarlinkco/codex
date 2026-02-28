@@ -1341,6 +1341,63 @@ async fn cleanup_agent_worktree(
     }
 }
 
+fn maybe_start_background_agent_cleanup(
+    session: std::sync::Arc<Session>,
+    turn: std::sync::Arc<TurnContext>,
+    agent_id: ThreadId,
+) {
+    tokio::spawn(async move {
+        let status_rx = match session
+            .services
+            .agent_control
+            .subscribe_status(agent_id)
+            .await
+        {
+            Ok(rx) => rx,
+            Err(CodexErr::ThreadNotFound(_)) => {
+                let _ = session
+                    .services
+                    .agent_control
+                    .shutdown_agent(agent_id)
+                    .await;
+                if let Err(err) =
+                    cleanup_agent_worktree(session.as_ref(), turn.as_ref(), agent_id).await
+                {
+                    warn!("failed to auto-clean worktree for background agent {agent_id}: {err}");
+                }
+                return;
+            }
+            Err(err) => {
+                warn!("failed to subscribe status for background agent {agent_id}: {err}");
+                return;
+            }
+        };
+
+        if wait_for_final_status(session.clone(), agent_id, status_rx)
+            .await
+            .is_none()
+        {
+            return;
+        }
+
+        if let Err(err) = session
+            .services
+            .agent_control
+            .shutdown_agent(agent_id)
+            .await
+        {
+            match err {
+                CodexErr::ThreadNotFound(_) | CodexErr::InternalAgentDied => {}
+                other => warn!("failed to auto-close background agent {agent_id}: {other}"),
+            }
+        }
+
+        if let Err(err) = cleanup_agent_worktree(session.as_ref(), turn.as_ref(), agent_id).await {
+            warn!("failed to auto-clean worktree for background agent {agent_id}: {err}");
+        }
+    });
+}
+
 async fn reap_finished_agents_for_slots(
     session: &Session,
     turn: &TurnContext,

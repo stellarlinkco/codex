@@ -2468,6 +2468,96 @@ async fn spawn_team_accepts_background_field() {
 }
 
 #[tokio::test]
+async fn spawn_team_background_member_auto_closes_after_shutdown() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let spawn_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_team",
+        function_payload(json!({
+            "members": [
+                {"name": "worker", "task": "work", "background": true}
+            ]
+        })),
+    );
+    let spawn_output = MultiAgentHandler
+        .handle(spawn_invocation)
+        .await
+        .expect("spawn_team should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(spawn_content),
+        success: spawn_success,
+        ..
+    } = spawn_output
+    else {
+        panic!("expected function output");
+    };
+    assert_eq!(spawn_success, Some(true));
+    let spawn_result: SpawnTeamResult =
+        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
+    assert_eq!(spawn_result.members.len(), 1);
+    let member_thread_id = agent_id(&spawn_result.members[0].agent_id).expect("valid agent id");
+
+    if let Ok(thread) = manager.get_thread(member_thread_id).await {
+        let _ = thread
+            .submit(Op::Shutdown {})
+            .await
+            .expect("shutdown should submit");
+        timeout(Duration::from_secs(5), async {
+            loop {
+                if matches!(
+                    session
+                        .services
+                        .agent_control
+                        .get_status(member_thread_id)
+                        .await,
+                    AgentStatus::Shutdown | AgentStatus::NotFound
+                ) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("background member should reach shutdown");
+    }
+
+    timeout(Duration::from_secs(5), async {
+        loop {
+            if !session
+                .services
+                .agent_control
+                .spawned_thread_ids()
+                .contains(&member_thread_id)
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("background member should be auto-closed");
+
+    let cleanup_invocation = invocation(
+        session,
+        turn,
+        "team_cleanup",
+        function_payload(json!({
+            "team_id": spawn_result.team_id
+        })),
+    );
+    MultiAgentHandler
+        .handle(cleanup_invocation)
+        .await
+        .expect("team_cleanup should succeed");
+}
+
+#[tokio::test]
 async fn spawn_team_worktree_failure_cleans_already_spawned_members() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
