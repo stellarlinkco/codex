@@ -55,13 +55,12 @@ impl AgentControl {
         self.state.spawned_thread_ids()
     }
 
-    /// Spawn a new agent thread and submit the initial prompt.
-    pub(crate) async fn spawn_agent(
+    /// Spawn a new agent thread without submitting any input.
+    pub(crate) async fn spawn_agent_thread(
         &self,
         config: crate::config::Config,
-        items: Vec<UserInput>,
         session_source: Option<SessionSource>,
-    ) -> CodexResult<ThreadId> {
+    ) -> CodexResult<(ThreadId, Option<SessionSource>)> {
         let state = self.upgrade()?;
         let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
         let session_source = match session_source {
@@ -99,10 +98,32 @@ impl AgentControl {
         // TODO(jif) add helper for drain
         state.notify_thread_created(new_thread.thread_id);
 
-        self.send_input(new_thread.thread_id, items).await?;
-        self.maybe_start_completion_watcher(new_thread.thread_id, notification_source);
+        Ok((new_thread.thread_id, notification_source))
+    }
 
-        Ok(new_thread.thread_id)
+    pub(crate) async fn send_spawn_input(
+        &self,
+        agent_id: ThreadId,
+        items: Vec<UserInput>,
+        notification_source: Option<SessionSource>,
+    ) -> CodexResult<()> {
+        self.send_input(agent_id, items).await?;
+        self.maybe_start_completion_watcher(agent_id, notification_source);
+        Ok(())
+    }
+
+    /// Spawn a new agent thread and submit the initial prompt.
+    pub(crate) async fn spawn_agent(
+        &self,
+        config: crate::config::Config,
+        items: Vec<UserInput>,
+        session_source: Option<SessionSource>,
+    ) -> CodexResult<ThreadId> {
+        let (agent_id, notification_source) =
+            self.spawn_agent_thread(config, session_source).await?;
+        self.send_spawn_input(agent_id, items, notification_source)
+            .await?;
+        Ok(agent_id)
     }
 
     /// Resume an existing agent thread from a recorded rollout file.
@@ -193,6 +214,17 @@ impl AgentControl {
             self.state.release_spawned_thread(agent_id);
         }
         result
+    }
+
+    pub(crate) async fn inject_developer_message_without_turn(
+        &self,
+        agent_id: ThreadId,
+        message: String,
+    ) -> CodexResult<()> {
+        let state = self.upgrade()?;
+        let thread = state.get_thread(agent_id).await?;
+        thread.inject_developer_message_without_turn(message).await;
+        Ok(())
     }
 
     /// Interrupt the current task for an existing agent thread.

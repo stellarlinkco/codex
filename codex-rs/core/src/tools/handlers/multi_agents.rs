@@ -1009,6 +1009,52 @@ fn git_error_text(output: &Output) -> String {
     format!("git exited with status {}", output.status)
 }
 
+async fn dispatch_subagent_start_hook(
+    session: &Session,
+    turn: &TurnContext,
+    agent_id: ThreadId,
+    agent_type: &str,
+) -> Vec<String> {
+    let outcomes = session
+        .hooks()
+        .dispatch(HookPayload {
+            session_id: session.conversation_id,
+            transcript_path: session.transcript_path().await,
+            cwd: turn.cwd.clone(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
+            hook_event: HookEvent::SubagentStart {
+                agent_id: agent_id.to_string(),
+                agent_type: agent_type.to_string(),
+            },
+        })
+        .await;
+
+    let mut additional_context = Vec::new();
+    for outcome in outcomes {
+        let hook_name = outcome.hook_name;
+        let result = outcome.result;
+
+        if let Some(error) = result.error.as_deref() {
+            warn!(
+                hook_name = %hook_name,
+                error,
+                "subagent_start hook failed; continuing"
+            );
+        }
+
+        if let HookResultControl::Block { reason } = result.control {
+            warn!(
+                hook_name = %hook_name,
+                reason,
+                "subagent_start hook returned a blocking decision; ignoring"
+            );
+        }
+
+        additional_context.extend(result.additional_context);
+    }
+    additional_context
+}
+
 async fn dispatch_teammate_idle_hook(
     session: &Session,
     turn: &TurnContext,

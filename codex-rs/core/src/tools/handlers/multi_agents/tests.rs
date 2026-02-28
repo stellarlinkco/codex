@@ -12,6 +12,10 @@ use crate::protocol::SandboxPolicy;
 use crate::protocol::SessionSource;
 use crate::protocol::SubAgentSource;
 use crate::turn_diff_tracker::TurnDiffTracker;
+use codex_hooks::CommandHookConfig;
+use codex_hooks::CommandHooksConfig;
+use codex_hooks::Hooks;
+use codex_hooks::HooksConfig;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -413,6 +417,107 @@ async fn spawn_agent_accepts_background_field() {
     let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
     let status = manager.agent_control().get_status(agent_id).await;
     assert_ne!(status, AgentStatus::NotFound);
+
+    let _ = manager
+        .agent_control()
+        .shutdown_agent(agent_id)
+        .await
+        .expect("shutdown spawned agent");
+}
+
+#[tokio::test]
+async fn spawn_agent_dispatches_subagent_start_hook() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, mut turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let cwd = tempfile::tempdir().expect("temp dir");
+    turn.cwd = cwd.path().to_path_buf();
+
+    std::fs::create_dir_all(&turn.config.codex_home).expect("create codex_home");
+
+    let marker_path = turn.config.codex_home.join("subagent_start.log");
+    let injected_context = "subagent_start injected context";
+    let script = r#"import sys, json; data=json.load(sys.stdin); open(sys.argv[1], "a").write(data["hook_event_name"] + "\n"); print(json.dumps({"additionalContext": "subagent_start injected context"}))"#;
+    session.services.hooks = Hooks::new(HooksConfig {
+        command_hooks: CommandHooksConfig {
+            subagent_start: vec![CommandHookConfig {
+                command: vec![
+                    "python3".to_string(),
+                    "-c".to_string(),
+                    script.to_string(),
+                    marker_path.to_string_lossy().into_owned(),
+                ],
+                ..Default::default()
+            }],
+            ..Default::default()
+        },
+    });
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "inspect this repo"
+        })),
+    );
+    let output = MultiAgentHandler
+        .handle(invocation)
+        .await
+        .expect("spawn_agent should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(content),
+        ..
+    } = output
+    else {
+        panic!("expected function output");
+    };
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
+
+    let hook_events = tokio::fs::read_to_string(&marker_path)
+        .await
+        .expect("subagent_start hook should write marker");
+    assert_eq!(hook_events.trim(), "SubagentStart");
+
+    let thread = manager
+        .get_thread(agent_id)
+        .await
+        .expect("spawned agent should exist");
+
+    let mut injected_index = None;
+    let mut prompt_index = None;
+    for _ in 0..50 {
+        injected_index = None;
+        prompt_index = None;
+        let history = thread.codex.session.clone_history().await;
+        let items = history.raw_items();
+        for (index, item) in items.iter().enumerate() {
+            let text = serde_json::to_string(item).expect("response item should serialize");
+            if injected_index.is_none() && text.contains(injected_context) {
+                injected_index = Some(index);
+            }
+            if prompt_index.is_none() && text.contains("inspect this repo") {
+                prompt_index = Some(index);
+            }
+            if injected_index.is_some() && prompt_index.is_some() {
+                break;
+            }
+        }
+        if injected_index.is_some() && prompt_index.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+    let injected_index = injected_index.expect("subagent_start context should be injected");
+    let prompt_index = prompt_index.expect("prompt should be recorded");
+    assert!(injected_index < prompt_index);
 
     let _ = manager
         .agent_control()
