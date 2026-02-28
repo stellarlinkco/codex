@@ -21,11 +21,13 @@ pub async fn handle(
 ) -> Result<ToolOutput, FunctionCallError> {
     let args: TeamTaskListArgs = parse_arguments(&arguments)?;
     let team_id = normalized_team_id(&args.team_id)?;
-    let team = get_team_record(session.conversation_id, &team_id)?;
-    let valid_member_agent_ids = team
+    let config =
+        super::read_persisted_team_config(turn.config.codex_home.as_path(), &team_id).await?;
+    super::assert_team_member_or_lead(&team_id, &config, session.conversation_id)?;
+    let valid_member_agent_ids = config
         .members
         .iter()
-        .map(|member| member.agent_id.to_string())
+        .map(|member| member.agent_id.clone())
         .collect::<HashSet<_>>();
 
     let tasks = read_team_tasks(turn.config.codex_home.as_path(), &team_id)

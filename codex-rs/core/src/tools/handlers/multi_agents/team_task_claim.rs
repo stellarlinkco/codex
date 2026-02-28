@@ -23,11 +23,15 @@ pub async fn handle(
 ) -> Result<ToolOutput, FunctionCallError> {
     let args: TeamTaskClaimArgs = parse_arguments(&arguments)?;
     let team_id = normalized_team_id(&args.team_id)?;
-    let team = get_team_record(session.conversation_id, &team_id)?;
-    let valid_member_agent_ids = team
+    let config =
+        super::read_persisted_team_config(turn.config.codex_home.as_path(), &team_id).await?;
+    super::assert_team_member_or_lead(&team_id, &config, session.conversation_id)?;
+    let caller_thread_id = session.conversation_id.to_string();
+    let is_lead = caller_thread_id == config.lead_thread_id;
+    let valid_member_agent_ids = config
         .members
         .iter()
-        .map(|member| member.agent_id.to_string())
+        .map(|member| member.agent_id.clone())
         .collect::<HashSet<_>>();
     let _lock = lock_team_tasks(turn.config.codex_home.as_path(), &team_id).await?;
     let mut task =
@@ -35,6 +39,12 @@ pub async fn handle(
     if !valid_member_agent_ids.contains(&task.assignee.agent_id) {
         return Err(FunctionCallError::RespondToModel(format!(
             "task `{}` is assigned to a removed team member",
+            task.id
+        )));
+    }
+    if !is_lead && task.assignee.agent_id != caller_thread_id {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "task `{}` is assigned to another teammate",
             task.id
         )));
     }
