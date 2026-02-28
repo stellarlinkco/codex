@@ -4621,6 +4621,18 @@ mod handlers {
             .await;
         sess.services.zsh_exec_bridge.shutdown().await;
         info!("Shutting down Codex instance");
+        let transcript_path = sess.transcript_path().await;
+        let (cwd, permission_mode) = {
+            let state = sess.state.lock().await;
+            (
+                state.session_configuration.cwd.clone(),
+                state
+                    .session_configuration
+                    .approval_policy
+                    .value()
+                    .to_string(),
+            )
+        };
         let history = sess.clone_history().await;
         let turn_count = history
             .raw_items()
@@ -4651,6 +4663,30 @@ mod handlers {
                 }),
             };
             sess.send_event_raw(event).await;
+        }
+
+        let hook_outcomes = sess
+            .hooks()
+            .dispatch(super::HookPayload {
+                session_id: sess.conversation_id,
+                transcript_path,
+                cwd,
+                permission_mode,
+                hook_event: super::HookEvent::SessionEnd {
+                    reason: "shutdown".to_string(),
+                },
+            })
+            .await;
+        for hook_outcome in hook_outcomes {
+            let hook_name = hook_outcome.hook_name;
+            let result = hook_outcome.result;
+            if let Some(error) = result.error.as_deref() {
+                warn!(
+                    hook_name = %hook_name,
+                    error,
+                    "session_end hook failed; continuing shutdown"
+                );
+            }
         }
 
         let event = Event {
@@ -8668,15 +8704,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn request_command_approval_dispatches_permission_request_hook() {
+    async fn request_command_approval_dispatches_permission_and_notification_hooks() {
         let (mut sess, tc, rx) = make_session_and_context_with_rx().await;
         let temp_dir = tempfile::tempdir().expect("create temp dir");
-        let marker_path = temp_dir.path().join("permission_request.log");
+        let permission_marker_path = temp_dir.path().join("permission_request.log");
+        let notification_marker_path = temp_dir.path().join("notification.log");
         set_command_hooks_for_session(
             &mut sess,
             CommandHooksConfig {
                 permission_request: vec![CommandHookConfig {
-                    command: append_marker_command(&marker_path, "permission_request"),
+                    command: append_marker_command(&permission_marker_path, "permission_request"),
+                    ..Default::default()
+                }],
+                notification: vec![CommandHookConfig {
+                    command: append_marker_command(&notification_marker_path, "notification"),
                     ..Default::default()
                 }],
                 ..Default::default()
@@ -8736,8 +8777,12 @@ mod tests {
         assert_eq!(decision, ReviewDecision::Approved);
 
         sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
-        let marker = std::fs::read_to_string(&marker_path).expect("read hook marker");
-        assert!(marker.contains("permission_request"));
+        let permission_marker =
+            std::fs::read_to_string(&permission_marker_path).expect("read hook marker");
+        assert!(permission_marker.contains("permission_request"));
+        let notification_marker =
+            std::fs::read_to_string(&notification_marker_path).expect("read hook marker");
+        assert!(notification_marker.contains("notification"));
     }
 
     #[tokio::test]
@@ -8789,6 +8834,41 @@ mod tests {
         }
 
         sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_dispatches_session_end_hook() {
+        let (mut sess, _tc, rx) = make_session_and_context_with_rx().await;
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let marker_path = temp_dir.path().join("session_end.log");
+        set_command_hooks_for_session(
+            &mut sess,
+            CommandHooksConfig {
+                session_end: vec![CommandHookConfig {
+                    command: append_marker_command(&marker_path, "session_end"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+
+        assert!(handlers::shutdown(&sess, "hook-shutdown".to_string()).await);
+
+        let deadline = StdDuration::from_secs(2);
+        let start = std::time::Instant::now();
+        loop {
+            let remaining = deadline.saturating_sub(start.elapsed());
+            let evt = tokio::time::timeout(remaining, rx.recv())
+                .await
+                .expect("timeout waiting for event")
+                .expect("event");
+            if matches!(evt.msg, EventMsg::ShutdownComplete) {
+                break;
+            }
+        }
+
+        let marker = std::fs::read_to_string(&marker_path).expect("read hook marker");
+        assert!(marker.contains("session_end"));
     }
 
     #[tokio::test]
