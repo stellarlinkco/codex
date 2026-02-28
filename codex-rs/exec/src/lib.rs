@@ -89,7 +89,9 @@ struct ThreadEventEnvelope {
     event: Event,
 }
 
-fn approval_policy_override_for_exec<T>(cli_kv_overrides: &[(String, T)]) -> Option<AskForApproval> {
+fn approval_policy_override_for_exec<T>(
+    cli_kv_overrides: &[(String, T)],
+) -> Option<AskForApproval> {
     if cli_kv_overrides
         .iter()
         .any(|(key, _value)| key == "approval_policy")
