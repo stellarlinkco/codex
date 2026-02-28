@@ -53,10 +53,11 @@ use crate::util::error_or_panic;
 use crate::ws_version_from_features;
 use async_channel::Receiver;
 use async_channel::Sender;
+use codex_hooks::CommandHookConfig;
+use codex_hooks::CommandHooksConfig;
 use codex_hooks::HookEvent;
-use codex_hooks::HookEventAfterAgent;
 use codex_hooks::HookPayload;
-use codex_hooks::HookResult;
+use codex_hooks::HookResultControl;
 use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
 use codex_network_proxy::NetworkProxy;
@@ -129,6 +130,39 @@ use tracing::trace;
 use tracing::trace_span;
 use tracing::warn;
 use uuid::Uuid;
+
+fn legacy_notify_command_hooks(notify: Option<Vec<String>>) -> CommandHooksConfig {
+    let mut hooks = CommandHooksConfig::default();
+    let Some(command) = notify.filter(|argv| !argv.is_empty()) else {
+        return hooks;
+    };
+
+    let hook = CommandHookConfig {
+        name: Some("legacy-notify".to_string()),
+        command,
+        ..Default::default()
+    };
+    hooks.stop.push(hook.clone());
+    hooks.subagent_stop.push(hook);
+    hooks
+}
+
+fn command_hooks_for_config(config: &crate::config::Config) -> CommandHooksConfig {
+    let mut command_hooks =
+        match crate::config::hooks::command_hooks_from_layer_stack(&config.config_layer_stack) {
+            Ok(command_hooks) => command_hooks,
+            Err(error) => {
+                warn!(%error, "failed to parse config.toml [hooks]; ignoring");
+                CommandHooksConfig::default()
+            }
+        };
+    let legacy_notify_hooks = legacy_notify_command_hooks(config.notify.clone());
+    command_hooks.stop.extend(legacy_notify_hooks.stop);
+    command_hooks
+        .subagent_stop
+        .extend(legacy_notify_hooks.subagent_stop);
+    command_hooks
+}
 
 use crate::ModelProviderInfo;
 use crate::client::ModelClient;
@@ -1390,8 +1424,9 @@ impl Session {
                 Arc::clone(&auth_manager),
             ),
             hooks: Hooks::new(HooksConfig {
-                legacy_notify_argv: config.notify.clone(),
+                command_hooks: command_hooks_for_config(config.as_ref()),
             }),
+            pending_hook_context: Mutex::new(Vec::new()),
             rollout: Mutex::new(rollout_recorder),
             user_shell: Arc::new(default_shell),
             shell_snapshot_tx,
@@ -3506,6 +3541,22 @@ impl Session {
         }
     }
 
+    pub(crate) async fn transcript_path(&self) -> Option<PathBuf> {
+        None
+    }
+
+    pub(crate) async fn record_hook_context(
+        &self,
+        _turn_context: &TurnContext,
+        additional_context: &[String],
+    ) {
+        if additional_context.is_empty() {
+            return;
+        }
+        let mut guard = self.services.pending_hook_context.lock().await;
+        guard.extend(additional_context.iter().cloned());
+    }
+
     pub(crate) fn hooks(&self) -> &Hooks {
         &self.services.hooks
     }
@@ -4981,14 +5032,6 @@ pub(crate) async fn run_turn(
                 .for_prompt(&turn_context.model_info.input_modalities)
         };
 
-        let sampling_request_input_messages = sampling_request_input
-            .iter()
-            .filter_map(|item| match parse_turn_item(item) {
-                Some(TurnItem::UserMessage(user_message)) => Some(user_message),
-                _ => None,
-            })
-            .map(|user_message| user_message.message())
-            .collect::<Vec<String>>();
         let turn_metadata_header = turn_context.turn_metadata_state.current_header_value();
         match run_sampling_request(
             Arc::clone(&sess),
@@ -5043,63 +5086,58 @@ pub(crate) async fn run_turn(
 
                 if !needs_follow_up {
                     last_agent_message = sampling_request_last_agent_message;
+                    let is_subagent_stop =
+                        matches!(turn_context.session_source, SessionSource::SubAgent(_));
+                    let transcript_path = sess.transcript_path().await;
                     let hook_outcomes = sess
                         .hooks()
                         .dispatch(HookPayload {
                             session_id: sess.conversation_id,
+                            transcript_path: transcript_path.clone(),
                             cwd: turn_context.cwd.clone(),
-                            triggered_at: chrono::Utc::now(),
-                            hook_event: HookEvent::AfterAgent {
-                                event: HookEventAfterAgent {
-                                    thread_id: sess.conversation_id,
-                                    turn_id: turn_context.sub_id.clone(),
-                                    input_messages: sampling_request_input_messages,
+                            permission_mode: turn_context.approval_policy.value().to_string(),
+                            hook_event: if is_subagent_stop {
+                                HookEvent::SubagentStop {
+                                    stop_hook_active: false,
+                                    agent_id: sess.conversation_id.to_string(),
+                                    agent_type: turn_context.session_source.to_string(),
+                                    agent_transcript_path: transcript_path,
                                     last_assistant_message: last_agent_message.clone(),
-                                },
+                                }
+                            } else {
+                                HookEvent::Stop {
+                                    stop_hook_active: false,
+                                    last_assistant_message: last_agent_message.clone(),
+                                }
                             },
                         })
                         .await;
 
-                    let mut abort_message = None;
+                    let mut additional_context = Vec::new();
                     for hook_outcome in hook_outcomes {
                         let hook_name = hook_outcome.hook_name;
-                        match hook_outcome.result {
-                            HookResult::Success => {}
-                            HookResult::FailedContinue(error) => {
-                                warn!(
-                                    turn_id = %turn_context.sub_id,
-                                    hook_name = %hook_name,
-                                    error = %error,
-                                    "after_agent hook failed; continuing"
-                                );
-                            }
-                            HookResult::FailedAbort(error) => {
-                                let message = format!(
-                                    "after_agent hook '{hook_name}' failed and aborted turn completion: {error}"
-                                );
-                                warn!(
-                                    turn_id = %turn_context.sub_id,
-                                    hook_name = %hook_name,
-                                    error = %error,
-                                    "after_agent hook failed; aborting operation"
-                                );
-                                if abort_message.is_none() {
-                                    abort_message = Some(message);
-                                }
-                            }
+                        let result = hook_outcome.result;
+                        if let Some(error) = result.error.as_deref() {
+                            warn!(
+                                turn_id = %turn_context.sub_id,
+                                hook_name = %hook_name,
+                                error,
+                                "stop hook failed; continuing"
+                            );
                         }
+                        if let HookResultControl::Block { reason } = result.control {
+                            warn!(
+                                turn_id = %turn_context.sub_id,
+                                hook_name = %hook_name,
+                                reason,
+                                "stop hook returned a blocking decision; ignoring"
+                            );
+                        }
+                        additional_context.extend(result.additional_context);
                     }
-                    if let Some(message) = abort_message {
-                        sess.send_event(
-                            &turn_context,
-                            EventMsg::Error(ErrorEvent {
-                                message,
-                                codex_error_info: None,
-                            }),
-                        )
+
+                    sess.record_hook_context(&turn_context, &additional_context)
                         .await;
-                        return None;
-                    }
                     break;
                 }
                 continue;
@@ -8423,8 +8461,9 @@ mod tests {
                 Arc::clone(&auth_manager),
             ),
             hooks: Hooks::new(HooksConfig {
-                legacy_notify_argv: config.notify.clone(),
+                command_hooks: command_hooks_for_config(config.as_ref()),
             }),
+            pending_hook_context: Mutex::new(Vec::new()),
             rollout: Mutex::new(None),
             user_shell: Arc::new(default_user_shell()),
             shell_snapshot_tx: watch::channel(None).0,
@@ -8582,8 +8621,9 @@ mod tests {
                 Arc::clone(&auth_manager),
             ),
             hooks: Hooks::new(HooksConfig {
-                legacy_notify_argv: config.notify.clone(),
+                command_hooks: command_hooks_for_config(config.as_ref()),
             }),
+            pending_hook_context: Mutex::new(Vec::new()),
             rollout: Mutex::new(None),
             user_shell: Arc::new(default_user_shell()),
             shell_snapshot_tx: watch::channel(None).0,

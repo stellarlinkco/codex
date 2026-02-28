@@ -1937,11 +1937,9 @@ dependencies = [
 name = "codex-hooks"
 version = "1.2.1"
 dependencies = [
- "anyhow",
- "chrono",
  "codex-protocol",
- "futures",
  "pretty_assertions",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",

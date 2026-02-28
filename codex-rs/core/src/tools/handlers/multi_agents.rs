@@ -14,6 +14,9 @@ use crate::tools::handlers::parse_arguments;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 use async_trait::async_trait;
+use codex_hooks::HookEvent;
+use codex_hooks::HookPayload;
+use codex_hooks::HookResultControl;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
 use codex_protocol::models::FunctionCallOutputBody;
@@ -50,6 +53,7 @@ use tokio::process::Command;
 use tokio::sync::watch::Receiver;
 use tokio::time::Instant;
 use tokio::time::timeout_at;
+use tracing::debug;
 use tracing::warn;
 
 pub struct MultiAgentHandler;
@@ -983,6 +987,16 @@ fn take_worktree_lease(agent_id: ThreadId) -> Option<WorktreeLease> {
     registry.remove(&agent_id)
 }
 
+fn approval_policy_for_hooks(policy: AskForApproval) -> &'static str {
+    match policy {
+        AskForApproval::UnlessTrusted => "untrusted",
+        AskForApproval::OnFailure => "on-failure",
+        AskForApproval::OnRequest => "on-request",
+        AskForApproval::Reject(_) => "reject",
+        AskForApproval::Never => "never",
+    }
+}
+
 fn git_error_text(output: &Output) -> String {
     let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
     if !stderr.is_empty() {
@@ -995,39 +1009,255 @@ fn git_error_text(output: &Output) -> String {
     format!("git exited with status {}", output.status)
 }
 
+async fn dispatch_subagent_start_hook(
+    session: &Session,
+    turn: &TurnContext,
+    agent_id: ThreadId,
+    agent_type: &str,
+) -> Vec<String> {
+    let outcomes = session
+        .hooks()
+        .dispatch(HookPayload {
+            session_id: session.conversation_id,
+            transcript_path: session.transcript_path().await,
+            cwd: turn.cwd.clone(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
+            hook_event: HookEvent::SubagentStart {
+                agent_id: agent_id.to_string(),
+                agent_type: agent_type.to_string(),
+            },
+        })
+        .await;
+
+    let mut additional_context = Vec::new();
+    for outcome in outcomes {
+        let hook_name = outcome.hook_name;
+        let result = outcome.result;
+
+        if let Some(error) = result.error.as_deref() {
+            warn!(
+                hook_name = %hook_name,
+                error,
+                "subagent_start hook failed; continuing"
+            );
+        }
+
+        if let HookResultControl::Block { reason } = result.control {
+            warn!(
+                hook_name = %hook_name,
+                reason,
+                "subagent_start hook returned a blocking decision; ignoring"
+            );
+        }
+
+        additional_context.extend(result.additional_context);
+    }
+    additional_context
+}
+
 async fn dispatch_teammate_idle_hook(
-    _session: &Session,
-    _turn: &TurnContext,
-    _team_id: &str,
-    _teammate_name: &str,
+    session: &Session,
+    turn: &TurnContext,
+    team_id: &str,
+    teammate_name: &str,
 ) -> Option<String> {
-    None
+    let outcomes = session
+        .hooks()
+        .dispatch(HookPayload {
+            session_id: session.conversation_id,
+            transcript_path: session.transcript_path().await,
+            cwd: turn.cwd.clone(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
+            hook_event: HookEvent::TeammateIdle {
+                teammate_name: teammate_name.to_string(),
+                team_name: team_id.to_string(),
+            },
+        })
+        .await;
+
+    let mut additional_context = Vec::new();
+    let mut blocked = None;
+    for outcome in outcomes {
+        let hook_name = outcome.hook_name;
+        let result = outcome.result;
+
+        if let Some(error) = result.error.as_deref() {
+            warn!(
+                hook_name = %hook_name,
+                error,
+                "teammate_idle hook failed; continuing"
+            );
+        }
+
+        if blocked.is_none()
+            && let HookResultControl::Block { reason } = result.control
+        {
+            blocked = Some((hook_name, reason));
+        }
+
+        additional_context.extend(result.additional_context);
+    }
+
+    session.record_hook_context(turn, &additional_context).await;
+    blocked.map(|(hook_name, reason)| format!("teammate_idle hook '{hook_name}' blocked: {reason}"))
 }
 
 async fn dispatch_task_completed_hook(
-    _session: &Session,
-    _turn: &TurnContext,
-    _team_id: &str,
-    _task_id: &str,
-    _task_subject: &str,
-    _teammate_name: Option<&str>,
+    session: &Session,
+    turn: &TurnContext,
+    team_id: &str,
+    task_id: &str,
+    task_subject: &str,
+    teammate_name: Option<&str>,
 ) -> Option<String> {
-    None
+    let outcomes = session
+        .hooks()
+        .dispatch(HookPayload {
+            session_id: session.conversation_id,
+            transcript_path: session.transcript_path().await,
+            cwd: turn.cwd.clone(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
+            hook_event: HookEvent::TaskCompleted {
+                task_id: task_id.to_string(),
+                task_subject: task_subject.to_string(),
+                task_description: None,
+                teammate_name: teammate_name.map(std::string::ToString::to_string),
+                team_name: Some(team_id.to_string()),
+            },
+        })
+        .await;
+
+    let mut additional_context = Vec::new();
+    let mut blocked = None;
+    for outcome in outcomes {
+        let hook_name = outcome.hook_name;
+        let result = outcome.result;
+
+        if let Some(error) = result.error.as_deref() {
+            warn!(
+                hook_name = %hook_name,
+                error,
+                "task_completed hook failed; continuing"
+            );
+        }
+
+        if blocked.is_none()
+            && let HookResultControl::Block { reason } = result.control
+        {
+            blocked = Some((hook_name, reason));
+        }
+
+        additional_context.extend(result.additional_context);
+    }
+
+    session.record_hook_context(turn, &additional_context).await;
+    blocked
+        .map(|(hook_name, reason)| format!("task_completed hook '{hook_name}' blocked: {reason}"))
 }
 
 async fn dispatch_worktree_create_hook(
-    _session: &Session,
-    _turn: &TurnContext,
-    _name: String,
+    session: &Session,
+    turn: &TurnContext,
+    name: String,
 ) -> Result<Option<(String, PathBuf)>, FunctionCallError> {
-    Ok(None)
+    let outcomes = session
+        .hooks()
+        .dispatch(HookPayload {
+            session_id: session.conversation_id,
+            transcript_path: session.transcript_path().await,
+            cwd: turn.cwd.clone(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
+            hook_event: HookEvent::WorktreeCreate { name },
+        })
+        .await;
+    if outcomes.is_empty() {
+        return Ok(None);
+    }
+
+    let mut additional_context = Vec::new();
+    let mut hook_names = Vec::new();
+    let mut worktree_paths = Vec::new();
+
+    for outcome in outcomes {
+        let hook_name = outcome.hook_name;
+        let result = outcome.result;
+        hook_names.push(hook_name.clone());
+
+        if let Some(error) = result.error.as_deref() {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "worktree_create hook '{hook_name}' failed: {error}"
+            )));
+        }
+
+        if let HookResultControl::Block { reason } = result.control {
+            return Err(FunctionCallError::RespondToModel(format!(
+                "worktree_create hook '{hook_name}' blocked: {reason}"
+            )));
+        }
+
+        if let Some(path) = result.worktree_path {
+            worktree_paths.push((hook_name.clone(), path));
+        }
+
+        additional_context.extend(result.additional_context);
+    }
+
+    session.record_hook_context(turn, &additional_context).await;
+
+    match worktree_paths.len() {
+        0 => Err(FunctionCallError::RespondToModel(format!(
+            "worktree_create hooks ({}) did not print a worktree path on stdout",
+            hook_names.join(", ")
+        ))),
+        1 => Ok(worktree_paths.pop()),
+        _ => Err(FunctionCallError::RespondToModel(format!(
+            "worktree_create hooks ({}) printed multiple worktree paths on stdout",
+            worktree_paths
+                .iter()
+                .map(|(hook_name, _)| hook_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
 }
 
 async fn dispatch_worktree_remove_hook(
-    _session: &Session,
-    _turn: &TurnContext,
-    _worktree_path: PathBuf,
+    session: &Session,
+    turn: &TurnContext,
+    worktree_path: PathBuf,
 ) {
+    let outcomes = session
+        .hooks()
+        .dispatch(HookPayload {
+            session_id: session.conversation_id,
+            transcript_path: session.transcript_path().await,
+            cwd: turn.cwd.clone(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
+            hook_event: HookEvent::WorktreeRemove { worktree_path },
+        })
+        .await;
+
+    let mut additional_context = Vec::new();
+    for outcome in outcomes {
+        let hook_name = outcome.hook_name;
+        let result = outcome.result;
+
+        if let Some(error) = result.error.as_deref() {
+            debug!(hook_name = %hook_name, error, "worktree_remove hook failed");
+        }
+
+        if let HookResultControl::Block { reason } = result.control {
+            debug!(
+                hook_name = %hook_name,
+                reason,
+                "worktree_remove hook returned a blocking decision; ignoring"
+            );
+        }
+
+        additional_context.extend(result.additional_context);
+    }
+
+    session.record_hook_context(turn, &additional_context).await;
 }
 
 async fn create_agent_worktree(

@@ -91,6 +91,7 @@ use toml::Value as TomlValue;
 use toml_edit::DocumentMut;
 
 pub mod edit;
+pub(crate) mod hooks;
 mod network_proxy_spec;
 mod permissions;
 pub mod profile;
