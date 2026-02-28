@@ -4596,6 +4596,18 @@ mod handlers {
             .terminate_all_processes()
             .await;
         info!("Shutting down Codex instance");
+        let transcript_path = sess.transcript_path().await;
+        let (cwd, permission_mode) = {
+            let state = sess.state.lock().await;
+            (
+                state.session_configuration.cwd.clone(),
+                state
+                    .session_configuration
+                    .approval_policy
+                    .value()
+                    .to_string(),
+            )
+        };
         let history = sess.clone_history().await;
         let turn_count = history
             .raw_items()
@@ -4626,6 +4638,30 @@ mod handlers {
                 }),
             };
             sess.send_event_raw(event).await;
+        }
+
+        let hook_outcomes = sess
+            .hooks()
+            .dispatch(super::HookPayload {
+                session_id: sess.conversation_id,
+                transcript_path,
+                cwd,
+                permission_mode,
+                hook_event: super::HookEvent::SessionEnd {
+                    reason: "shutdown".to_string(),
+                },
+            })
+            .await;
+        for hook_outcome in hook_outcomes {
+            let hook_name = hook_outcome.hook_name;
+            let result = hook_outcome.result;
+            if let Some(error) = result.error.as_deref() {
+                warn!(
+                    hook_name = %hook_name,
+                    error,
+                    "session_end hook failed; continuing shutdown"
+                );
+            }
         }
 
         let event = Event {
@@ -8738,6 +8774,348 @@ mod tests {
         async_channel::Receiver<Event>,
     ) {
         make_session_and_context_with_dynamic_tools_and_rx(Vec::new()).await
+    }
+
+    fn set_command_hooks_for_session(session: &mut Arc<Session>, command_hooks: CommandHooksConfig) {
+        let hooks = Hooks::new(HooksConfig { command_hooks });
+        Arc::get_mut(session)
+            .expect("session should be uniquely owned")
+            .services
+            .hooks = hooks;
+    }
+
+    #[cfg(windows)]
+    fn append_marker_command(path: &Path, marker: &str) -> Vec<String> {
+        vec![
+            "cmd".to_string(),
+            "/C".to_string(),
+            format!("echo {marker}>>\"{}\"", path.display()),
+        ]
+    }
+
+    #[cfg(not(windows))]
+    fn append_marker_command(path: &Path, marker: &str) -> Vec<String> {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("echo {marker} >> \"{}\"", path.display()),
+        ]
+    }
+
+    #[cfg(windows)]
+    fn exit_with_stderr_command(code: i32, stderr: &str) -> Vec<String> {
+        vec![
+            "cmd".to_string(),
+            "/C".to_string(),
+            format!("echo {stderr} 1>&2 & exit /B {code}"),
+        ]
+    }
+
+    #[cfg(not(windows))]
+    fn exit_with_stderr_command(code: i32, stderr: &str) -> Vec<String> {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("echo {stderr} 1>&2; exit {code}"),
+        ]
+    }
+
+    #[cfg(windows)]
+    fn echo_stdout_command(stdout: &str) -> Vec<String> {
+        vec![
+            "cmd".to_string(),
+            "/C".to_string(),
+            format!("echo {stdout}"),
+        ]
+    }
+
+    #[cfg(not(windows))]
+    fn echo_stdout_command(stdout: &str) -> Vec<String> {
+        vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("echo '{stdout}'"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn user_input_or_turn_dispatches_user_prompt_submit_hook() {
+        let (mut sess, _tc, _rx) = make_session_and_context_with_rx().await;
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let marker_path = temp_dir.path().join("user_prompt_submit.log");
+        set_command_hooks_for_session(
+            &mut sess,
+            CommandHooksConfig {
+                user_prompt_submit: vec![CommandHookConfig {
+                    command: append_marker_command(&marker_path, "user_prompt_submit"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+
+        handlers::user_input_or_turn(
+            &sess,
+            "hook-user-input".to_string(),
+            Op::UserInput {
+                items: vec![UserInput::Text {
+                    text: "hello hooks".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                final_output_json_schema: None,
+            },
+        )
+        .await;
+
+        let deadline = StdDuration::from_secs(2);
+        let start = std::time::Instant::now();
+        let marker = loop {
+            if let Ok(marker) = std::fs::read_to_string(&marker_path) {
+                break marker;
+            }
+            if start.elapsed() >= deadline {
+                panic!("timeout waiting for user_prompt_submit hook marker");
+            }
+            sleep(StdDuration::from_millis(10)).await;
+        };
+
+        sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+        assert!(marker.contains("user_prompt_submit"));
+    }
+
+    #[tokio::test]
+    async fn user_prompt_submit_hook_can_block_user_input() {
+        let (mut sess, _tc, rx) = make_session_and_context_with_rx().await;
+        set_command_hooks_for_session(
+            &mut sess,
+            CommandHooksConfig {
+                user_prompt_submit: vec![CommandHookConfig {
+                    command: exit_with_stderr_command(2, "blocked"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+
+        handlers::user_input_or_turn(
+            &sess,
+            "hook-user-input-block".to_string(),
+            Op::UserInput {
+                items: vec![UserInput::Text {
+                    text: "hello hooks".to_string(),
+                    text_elements: Vec::new(),
+                }],
+                final_output_json_schema: None,
+            },
+        )
+        .await;
+
+        assert!(sess.active_turn.lock().await.is_none());
+
+        let deadline = StdDuration::from_secs(2);
+        let start = std::time::Instant::now();
+        let warning = loop {
+            let remaining = deadline.saturating_sub(start.elapsed());
+            let evt = tokio::time::timeout(remaining, rx.recv())
+                .await
+                .expect("timeout waiting for event")
+                .expect("event");
+            if let EventMsg::Warning(warning) = evt.msg {
+                break warning;
+            }
+        };
+        assert!(warning.message.contains("blocked"));
+    }
+
+    #[tokio::test]
+    async fn request_command_approval_dispatches_permission_and_notification_hooks() {
+        let (mut sess, tc, rx) = make_session_and_context_with_rx().await;
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let permission_marker_path = temp_dir.path().join("permission_request.log");
+        let notification_marker_path = temp_dir.path().join("notification.log");
+        set_command_hooks_for_session(
+            &mut sess,
+            CommandHooksConfig {
+                permission_request: vec![CommandHookConfig {
+                    command: append_marker_command(&permission_marker_path, "permission_request"),
+                    ..Default::default()
+                }],
+                notification: vec![CommandHookConfig {
+                    command: append_marker_command(&notification_marker_path, "notification"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+
+        sess.spawn_task(
+            Arc::clone(&tc),
+            vec![UserInput::Text {
+                text: "keep turn active".to_string(),
+                text_elements: Vec::new(),
+            }],
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: false,
+            },
+        )
+        .await;
+
+        let sess_for_request = Arc::clone(&sess);
+        let tc_for_request = Arc::clone(&tc);
+        let approval_task = tokio::spawn(async move {
+            sess_for_request
+                .request_command_approval(
+                    tc_for_request.as_ref(),
+                    "call-1".to_string(),
+                    None,
+                    vec!["echo".to_string(), "hello".to_string()],
+                    tc_for_request.cwd.clone(),
+                    Some("test permission hook".to_string()),
+                    None,
+                    None,
+                )
+                .await
+        });
+
+        let deadline = StdDuration::from_secs(2);
+        let start = std::time::Instant::now();
+        let approval_event = loop {
+            let remaining = deadline.saturating_sub(start.elapsed());
+            let evt = tokio::time::timeout(remaining, rx.recv())
+                .await
+                .expect("timeout waiting for event")
+                .expect("event");
+            if let EventMsg::ExecApprovalRequest(event) = evt.msg {
+                break event;
+            }
+        };
+        let approval_key = approval_event
+            .approval_id
+            .clone()
+            .unwrap_or_else(|| approval_event.call_id.clone());
+        sess.notify_approval(&approval_key, ReviewDecision::Approved)
+            .await;
+
+        let decision = approval_task.await.expect("approval task should join");
+        assert_eq!(decision, ReviewDecision::Approved);
+
+        sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+        let permission_marker =
+            std::fs::read_to_string(&permission_marker_path).expect("read hook marker");
+        assert!(permission_marker.contains("permission_request"));
+        let notification_marker =
+            std::fs::read_to_string(&notification_marker_path).expect("read hook marker");
+        assert!(notification_marker.contains("notification"));
+    }
+
+    #[tokio::test]
+    async fn permission_request_hook_can_auto_approve_without_prompting() {
+        let (mut sess, tc, rx) = make_session_and_context_with_rx().await;
+        set_command_hooks_for_session(
+            &mut sess,
+            CommandHooksConfig {
+                permission_request: vec![CommandHookConfig {
+                    command: echo_stdout_command("{\"decision\":\"allow\"}"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+
+        sess.spawn_task(
+            Arc::clone(&tc),
+            vec![UserInput::Text {
+                text: "keep turn active".to_string(),
+                text_elements: Vec::new(),
+            }],
+            NeverEndingTask {
+                kind: TaskKind::Regular,
+                listen_to_cancellation_token: false,
+            },
+        )
+        .await;
+
+        let decision = sess
+            .request_command_approval(
+                tc.as_ref(),
+                "call-1".to_string(),
+                None,
+                vec!["echo".to_string(), "hello".to_string()],
+                tc.cwd.clone(),
+                Some("test permission hook".to_string()),
+                None,
+                None,
+            )
+            .await;
+        assert_eq!(decision, ReviewDecision::Approved);
+
+        let no_exec_prompt = tokio::time::timeout(StdDuration::from_millis(200), rx.recv()).await;
+        if let Ok(Ok(evt)) = no_exec_prompt
+            && matches!(evt.msg, EventMsg::ExecApprovalRequest(_))
+        {
+            panic!("unexpected ExecApprovalRequest event");
+        }
+
+        sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+    }
+
+    #[tokio::test]
+    async fn shutdown_dispatches_session_end_hook() {
+        let (mut sess, _tc, rx) = make_session_and_context_with_rx().await;
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let marker_path = temp_dir.path().join("session_end.log");
+        set_command_hooks_for_session(
+            &mut sess,
+            CommandHooksConfig {
+                session_end: vec![CommandHookConfig {
+                    command: append_marker_command(&marker_path, "session_end"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+
+        assert!(handlers::shutdown(&sess, "hook-shutdown".to_string()).await);
+
+        let deadline = StdDuration::from_secs(2);
+        let start = std::time::Instant::now();
+        loop {
+            let remaining = deadline.saturating_sub(start.elapsed());
+            let evt = tokio::time::timeout(remaining, rx.recv())
+                .await
+                .expect("timeout waiting for event")
+                .expect("event");
+            if matches!(evt.msg, EventMsg::ShutdownComplete) {
+                break;
+            }
+        }
+
+        let marker = std::fs::read_to_string(&marker_path).expect("read hook marker");
+        assert!(marker.contains("session_end"));
+    }
+
+    #[tokio::test]
+    async fn compact_handler_dispatches_pre_compact_hook() {
+        let (mut sess, _tc, _rx) = make_session_and_context_with_rx().await;
+        let temp_dir = tempfile::tempdir().expect("create temp dir");
+        let marker_path = temp_dir.path().join("pre_compact.log");
+        set_command_hooks_for_session(
+            &mut sess,
+            CommandHooksConfig {
+                pre_compact: vec![CommandHookConfig {
+                    command: append_marker_command(&marker_path, "pre_compact"),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            },
+        );
+
+        handlers::compact(&sess, "hook-compact".to_string()).await;
+
+        sess.abort_all_tasks(TurnAbortReason::Interrupted).await;
+        let marker = std::fs::read_to_string(&marker_path).expect("read hook marker");
+        assert!(marker.contains("pre_compact"));
     }
 
     #[tokio::test]
