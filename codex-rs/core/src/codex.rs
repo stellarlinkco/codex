@@ -164,6 +164,21 @@ fn command_hooks_for_config(config: &crate::config::Config) -> CommandHooksConfi
     command_hooks
 }
 
+fn user_input_preview_for_hooks(items: &[UserInput]) -> String {
+    items
+        .iter()
+        .map(|item| match item {
+            UserInput::Text { text, .. } => text.clone(),
+            UserInput::Image { .. } => "[image]".to_string(),
+            UserInput::LocalImage { path } => format!("[local_image:{}]", path.display()),
+            UserInput::Skill { name, path } => format!("[skill:${name}]({})", path.display()),
+            UserInput::Mention { name, path } => format!("[mention:${name}]({path})"),
+            _ => "[input]".to_string(),
+        })
+        .collect::<Vec<String>>()
+        .join("\n")
+}
+
 use crate::ModelProviderInfo;
 use crate::client::ModelClient;
 use crate::client::ModelClientSession;
@@ -8444,6 +8459,7 @@ mod tests {
         let network_approval = Arc::new(NetworkApprovalService::default());
 
         let file_watcher = Arc::new(FileWatcher::noop());
+        let command_hooks = command_hooks_for_config(config.as_ref());
         let services = SessionServices {
             mcp_connection_manager: Arc::new(RwLock::new(
                 McpConnectionManager::new_mcp_connection_manager_for_tests(
@@ -8460,9 +8476,7 @@ mod tests {
                 Arc::clone(&config),
                 Arc::clone(&auth_manager),
             ),
-            hooks: Hooks::new(HooksConfig {
-                command_hooks: command_hooks_for_config(config.as_ref()),
-            }),
+            hooks: Hooks::new(HooksConfig { command_hooks }),
             pending_hook_context: Mutex::new(Vec::new()),
             rollout: Mutex::new(None),
             user_shell: Arc::new(default_user_shell()),
@@ -8604,6 +8618,7 @@ mod tests {
         let network_approval = Arc::new(NetworkApprovalService::default());
 
         let file_watcher = Arc::new(FileWatcher::noop());
+        let command_hooks = command_hooks_for_config(config.as_ref());
         let services = SessionServices {
             mcp_connection_manager: Arc::new(RwLock::new(
                 McpConnectionManager::new_mcp_connection_manager_for_tests(
@@ -8620,9 +8635,7 @@ mod tests {
                 Arc::clone(&config),
                 Arc::clone(&auth_manager),
             ),
-            hooks: Hooks::new(HooksConfig {
-                command_hooks: command_hooks_for_config(config.as_ref()),
-            }),
+            hooks: Hooks::new(HooksConfig { command_hooks }),
             pending_hook_context: Mutex::new(Vec::new()),
             rollout: Mutex::new(None),
             user_shell: Arc::new(default_user_shell()),

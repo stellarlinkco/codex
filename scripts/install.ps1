@@ -3,15 +3,32 @@ $ErrorActionPreference = "Stop"
 $repo = if ($env:CODEX_REPO) { $env:CODEX_REPO } else { "stellarlinkco/codex" }
 $installDir = if ($env:INSTALL_DIR) { $env:INSTALL_DIR } else { Join-Path $HOME ".local\\bin" }
 
-$arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
+$baseUrl = if ($env:CODEX_BASE_URL) { $env:CODEX_BASE_URL.TrimEnd('/') } else { "https://github.com/$repo/releases/latest/download" }
+
+$arch = $null
+try {
+  $arch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()
+} catch {}
+
+if (-not $arch) {
+  $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
+}
+if (-not $arch) {
+  throw "Unable to detect Windows architecture (PROCESSOR_ARCHITECTURE=$env:PROCESSOR_ARCHITECTURE PROCESSOR_ARCHITEW6432=$env:PROCESSOR_ARCHITEW6432)"
+}
 switch ($arch) {
   "X64" { $target = "x86_64-pc-windows-msvc" }
+  "AMD64" { $target = "x86_64-pc-windows-msvc" }
+  "x86_64" { $target = "x86_64-pc-windows-msvc" }
   "Arm64" { $target = "aarch64-pc-windows-msvc" }
+  "aarch64" { $target = "aarch64-pc-windows-msvc" }
+  "X86" { throw "Unsupported Windows architecture: $arch (32-bit Windows is not supported)" }
+  "Arm" { throw "Unsupported Windows architecture: $arch (32-bit ARM is not supported)" }
   default { throw "Unsupported Windows architecture: $arch" }
 }
 
 $asset = "codex-$target.exe.zip"
-$url = "https://github.com/$repo/releases/latest/download/$asset"
+$url = "$baseUrl/$asset"
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ([System.Guid]::NewGuid().ToString())
 $zipPath = Join-Path $tempRoot $asset
