@@ -12,10 +12,6 @@ use crate::protocol::SandboxPolicy;
 use crate::protocol::SessionSource;
 use crate::protocol::SubAgentSource;
 use crate::turn_diff_tracker::TurnDiffTracker;
-use codex_hooks::CommandHookConfig;
-use codex_hooks::CommandHooksConfig;
-use codex_hooks::Hooks;
-use codex_hooks::HooksConfig;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::ResponseItem;
@@ -426,107 +422,6 @@ async fn spawn_agent_accepts_background_field() {
 }
 
 #[tokio::test]
-async fn spawn_agent_dispatches_subagent_start_hook() {
-    #[derive(Debug, Deserialize)]
-    struct SpawnAgentResult {
-        agent_id: String,
-    }
-
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let cwd = tempfile::tempdir().expect("temp dir");
-    turn.cwd = cwd.path().to_path_buf();
-
-    std::fs::create_dir_all(&turn.config.codex_home).expect("create codex_home");
-
-    let marker_path = turn.config.codex_home.join("subagent_start.log");
-    let injected_context = "subagent_start injected context";
-    let script = r#"import sys, json; data=json.load(sys.stdin); open(sys.argv[1], "a").write(data["hook_event_name"] + "\n"); print(json.dumps({"additionalContext": "subagent_start injected context"}))"#;
-    session.services.hooks = Hooks::new(HooksConfig {
-        command_hooks: CommandHooksConfig {
-            subagent_start: vec![CommandHookConfig {
-                command: vec![
-                    "python3".to_string(),
-                    "-c".to_string(),
-                    script.to_string(),
-                    marker_path.to_string_lossy().into_owned(),
-                ],
-                ..Default::default()
-            }],
-            ..Default::default()
-        },
-    });
-
-    let invocation = invocation(
-        Arc::new(session),
-        Arc::new(turn),
-        "spawn_agent",
-        function_payload(json!({
-            "message": "inspect this repo"
-        })),
-    );
-    let output = MultiAgentHandler
-        .handle(invocation)
-        .await
-        .expect("spawn_agent should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(content),
-        ..
-    } = output
-    else {
-        panic!("expected function output");
-    };
-    let result: SpawnAgentResult =
-        serde_json::from_str(&content).expect("spawn_agent result should be json");
-    let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
-
-    let hook_events = tokio::fs::read_to_string(&marker_path)
-        .await
-        .expect("subagent_start hook should write marker");
-    assert_eq!(hook_events.trim(), "SubagentStart");
-
-    let thread = manager
-        .get_thread(agent_id)
-        .await
-        .expect("spawned agent should exist");
-
-    let mut injected_index = None;
-    let mut prompt_index = None;
-    for _ in 0..50 {
-        injected_index = None;
-        prompt_index = None;
-        let history = thread.codex.session.clone_history().await;
-        let items = history.raw_items();
-        for (index, item) in items.iter().enumerate() {
-            let text = serde_json::to_string(item).expect("response item should serialize");
-            if injected_index.is_none() && text.contains(injected_context) {
-                injected_index = Some(index);
-            }
-            if prompt_index.is_none() && text.contains("inspect this repo") {
-                prompt_index = Some(index);
-            }
-            if injected_index.is_some() && prompt_index.is_some() {
-                break;
-            }
-        }
-        if injected_index.is_some() && prompt_index.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let injected_index = injected_index.expect("subagent_start context should be injected");
-    let prompt_index = prompt_index.expect("prompt should be recorded");
-    assert!(injected_index < prompt_index);
-
-    let _ = manager
-        .agent_control()
-        .shutdown_agent(agent_id)
-        .await
-        .expect("shutdown spawned agent");
-}
-
-#[tokio::test]
 async fn spawn_agent_rejects_worktree_outside_git_repo() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -552,136 +447,6 @@ async fn spawn_agent_rejects_worktree_outside_git_repo() {
             "worktree=true requires running inside a git repository".to_string()
         )
     );
-}
-
-#[tokio::test]
-async fn spawn_agent_worktree_outside_git_repo_uses_worktree_create_hook() {
-    #[derive(Debug, Deserialize)]
-    struct SpawnAgentResult {
-        agent_id: String,
-    }
-
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let non_repo_dir = tempfile::tempdir().expect("temp dir");
-    turn.cwd = non_repo_dir.path().to_path_buf();
-
-    std::fs::create_dir_all(&turn.config.codex_home).expect("create codex_home");
-
-    let worktree_base = tempfile::tempdir().expect("worktree base");
-    let create_marker = turn.config.codex_home.join("worktree_create_path.txt");
-    let remove_marker = turn.config.codex_home.join("worktree_remove_path.txt");
-
-    let create_script = r#"
-import json, os, sys
-data = json.load(sys.stdin)
-base = sys.argv[1]
-marker = sys.argv[2]
-path = os.path.join(base, data["name"])
-os.makedirs(path, exist_ok=True)
-open(marker, "w").write(path)
-print(path)
-"#;
-
-    let remove_script = r#"
-import json, shutil, sys
-data = json.load(sys.stdin)
-path = data["worktree_path"]
-shutil.rmtree(path, ignore_errors=True)
-open(sys.argv[1], "w").write(path)
-"#;
-
-    session.services.hooks = Hooks::new(HooksConfig {
-        command_hooks: CommandHooksConfig {
-            worktree_create: vec![CommandHookConfig {
-                command: vec![
-                    "python3".to_string(),
-                    "-c".to_string(),
-                    create_script.to_string(),
-                    worktree_base.path().to_string_lossy().into_owned(),
-                    create_marker.to_string_lossy().into_owned(),
-                ],
-                ..Default::default()
-            }],
-            worktree_remove: vec![CommandHookConfig {
-                command: vec![
-                    "python3".to_string(),
-                    "-c".to_string(),
-                    remove_script.to_string(),
-                    remove_marker.to_string_lossy().into_owned(),
-                ],
-                ..Default::default()
-            }],
-            ..Default::default()
-        },
-    });
-
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-    let spawn_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "spawn_agent",
-        function_payload(json!({
-            "message": "inspect this repo",
-            "worktree": true
-        })),
-    );
-    let output = MultiAgentHandler
-        .handle(spawn_invocation)
-        .await
-        .expect("spawn_agent with worktree should succeed with worktree_create hook");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(content),
-        success,
-        ..
-    } = output
-    else {
-        panic!("expected function output");
-    };
-    assert_eq!(success, Some(true));
-
-    let spawn_result: SpawnAgentResult =
-        serde_json::from_str(&content).expect("spawn_agent result should be json");
-    let agent_id = agent_id(&spawn_result.agent_id).expect("agent id should be valid");
-
-    let created_path = tokio::fs::read_to_string(&create_marker)
-        .await
-        .expect("worktree_create hook should write marker")
-        .trim()
-        .to_string();
-    assert!(!created_path.is_empty());
-    let created_path = PathBuf::from(created_path);
-    assert!(created_path.starts_with(worktree_base.path()));
-
-    let snapshot = manager
-        .get_thread(agent_id)
-        .await
-        .expect("spawned agent should exist")
-        .config_snapshot()
-        .await;
-    assert_eq!(snapshot.cwd, created_path);
-    assert_eq!(snapshot.cwd.exists(), true);
-
-    let close_invocation = invocation(
-        session,
-        turn,
-        "close_agent",
-        function_payload(json!({"id": spawn_result.agent_id})),
-    );
-    MultiAgentHandler
-        .handle(close_invocation)
-        .await
-        .expect("close_agent should succeed");
-
-    let removed_path = tokio::fs::read_to_string(&remove_marker)
-        .await
-        .expect("worktree_remove hook should write marker")
-        .trim()
-        .to_string();
-    assert_eq!(removed_path, created_path.to_string_lossy());
-    assert_eq!(std::fs::metadata(&created_path).is_err(), true);
 }
 
 #[tokio::test]
@@ -4687,124 +4452,6 @@ async fn team_task_claim_is_exclusive_under_concurrency() {
 }
 
 #[tokio::test]
-async fn team_task_complete_dispatches_hook_once_under_concurrency() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let cwd = tempfile::tempdir().expect("temp dir");
-    turn.cwd = cwd.path().to_path_buf();
-
-    let marker_path = turn.config.codex_home.join("task_completed.log");
-    let script = r#"import json, sys, time; data=json.load(sys.stdin); time.sleep(0.1); open(sys.argv[1], "a").write(data["hook_event_name"] + "\n")"#;
-    session.services.hooks = Hooks::new(HooksConfig {
-        command_hooks: CommandHooksConfig {
-            task_completed: vec![CommandHookConfig {
-                command: vec![
-                    "python3".to_string(),
-                    "-c".to_string(),
-                    script.to_string(),
-                    marker_path.to_string_lossy().into_owned(),
-                ],
-                ..Default::default()
-            }],
-            ..Default::default()
-        },
-    });
-
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-    let spawn_output = MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "spawn_team",
-            function_payload(json!({
-                "members": [
-                    {"name": "planner", "task": "plan"},
-                    {"name": "worker", "task": "work"}
-                ]
-            })),
-        ))
-        .await
-        .expect("spawn_team should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(spawn_content),
-        ..
-    } = spawn_output
-    else {
-        panic!("expected function output");
-    };
-    let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-
-    let list_output = MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "team_task_list",
-            function_payload(json!({"team_id": spawn_result.team_id})),
-        ))
-        .await
-        .expect("team_task_list should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(list_content),
-        ..
-    } = list_output
-    else {
-        panic!("expected function output");
-    };
-    let list_result: TeamTaskListResult =
-        serde_json::from_str(&list_content).expect("team_task_list result should be json");
-    let task_id = list_result.tasks.first().expect("task").task_id.clone();
-
-    let mut set = JoinSet::new();
-    for _ in 0..10 {
-        let session = session.clone();
-        let turn = turn.clone();
-        let team_id = list_result.team_id.clone();
-        let task_id = task_id.clone();
-        set.spawn(async move {
-            MultiAgentHandler
-                .handle(invocation(
-                    session,
-                    turn,
-                    "team_task_complete",
-                    function_payload(json!({"team_id": team_id, "task_id": task_id})),
-                ))
-                .await
-        });
-    }
-
-    let mut success = 0usize;
-    let mut already_completed = 0usize;
-    while let Some(result) = set.join_next().await {
-        let output = result.expect("join");
-        match output {
-            Ok(_) => success += 1,
-            Err(FunctionCallError::RespondToModel(msg)) if msg.contains("already completed") => {
-                already_completed += 1
-            }
-            Err(other) => panic!("unexpected result: {other:?}"),
-        }
-    }
-
-    assert_eq!(success, 1);
-    assert_eq!(already_completed, 9);
-
-    let hook_events = tokio::fs::read_to_string(&marker_path)
-        .await
-        .expect("task_completed hook should write marker");
-    assert_eq!(
-        hook_events
-            .lines()
-            .filter(|line| !line.trim().is_empty())
-            .count(),
-        1
-    );
-    assert_eq!(hook_events.trim(), "TaskCompleted");
-}
-
-#[tokio::test]
 async fn build_agent_spawn_config_uses_turn_context_values() {
     fn pick_allowed_sandbox_policy(
         constraint: &crate::config::Constrained<SandboxPolicy>,
@@ -4834,10 +4481,13 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
     let temp_dir = tempfile::tempdir().expect("temp dir");
     turn.cwd = temp_dir.path().to_path_buf();
     turn.codex_linux_sandbox_exe = Some(PathBuf::from("/bin/echo"));
-    turn.sandbox_policy = pick_allowed_sandbox_policy(
+    let sandbox_policy = pick_allowed_sandbox_policy(
         &turn.config.permissions.sandbox_policy,
         turn.config.permissions.sandbox_policy.get().clone(),
     );
+    turn.sandbox_policy
+        .set(sandbox_policy.clone())
+        .expect("sandbox policy set");
 
     let config = build_agent_spawn_config(&base_instructions, &turn, 0).expect("spawn config");
     let mut expected = (*turn.config).clone();
@@ -4859,7 +4509,7 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
     expected
         .permissions
         .sandbox_policy
-        .set(turn.sandbox_policy)
+        .set(sandbox_policy)
         .expect("sandbox policy set");
     assert_eq!(config, expected);
 }
@@ -4908,7 +4558,7 @@ async fn build_agent_resume_config_clears_base_instructions() {
     expected
         .permissions
         .sandbox_policy
-        .set(turn.sandbox_policy)
+        .set(turn.sandbox_policy.get().clone())
         .expect("sandbox policy set");
     assert_eq!(config, expected);
 }

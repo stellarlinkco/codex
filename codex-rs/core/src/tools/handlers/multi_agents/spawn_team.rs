@@ -161,8 +161,9 @@ pub async fn handle(
         let spawn_result = session
             .services
             .agent_control
-            .spawn_agent_thread(
+            .spawn_agent(
                 config.clone(),
+                input_items.clone(),
                 Some(thread_spawn_source(session.conversation_id, child_depth)),
             )
             .await;
@@ -175,8 +176,9 @@ pub async fn handle(
                     session
                         .services
                         .agent_control
-                        .spawn_agent_thread(
+                        .spawn_agent(
                             config,
+                            input_items,
                             Some(thread_spawn_source(session.conversation_id, child_depth)),
                         )
                         .await
@@ -186,8 +188,8 @@ pub async fn handle(
         }
         .map_err(collab_spawn_error);
 
-        let (agent_id, notification_source) = match spawn_result {
-            Ok((agent_id, notification_source)) => (agent_id, notification_source),
+        let agent_id = match spawn_result {
+            Ok(agent_id) => agent_id,
             Err(err) => {
                 if let Some(lease) = worktree_lease {
                     let _ = remove_worktree_lease(&session, &turn, lease).await;
@@ -209,56 +211,6 @@ pub async fn handle(
                 return Err(err);
             }
         };
-
-        let hook_context = dispatch_subagent_start_hook(
-            session.as_ref(),
-            turn.as_ref(),
-            agent_id,
-            role_name.unwrap_or("default"),
-        )
-        .await;
-        if !hook_context.is_empty() {
-            let injected = hook_context.join("\n\n");
-            if let Err(err) = session
-                .services
-                .agent_control
-                .inject_developer_message_without_turn(agent_id, injected)
-                .await
-            {
-                warn!("failed to inject subagent_start hook context: {err}");
-            }
-        }
-
-        if let Err(err) = session
-            .services
-            .agent_control
-            .send_spawn_input(agent_id, input_items, notification_source)
-            .await
-        {
-            if let Some(lease) = worktree_lease {
-                let _ = remove_worktree_lease(&session, &turn, lease).await;
-            }
-            let _ = session
-                .services
-                .agent_control
-                .shutdown_agent(agent_id)
-                .await;
-            cleanup_spawned_team_members(&session, &turn, &spawned_members).await;
-            session
-                .send_event(
-                    &turn,
-                    CollabWaitingEndEvent {
-                        sender_thread_id: session.conversation_id,
-                        call_id: event_call_id,
-                        agent_statuses: Vec::new(),
-                        statuses,
-                        receiver_names: team_member_names(&spawned_members),
-                    }
-                    .into(),
-                )
-                .await;
-            return Err(collab_spawn_error(err));
-        }
 
         if let Some(lease) = worktree_lease {
             register_worktree_lease(agent_id, lease);

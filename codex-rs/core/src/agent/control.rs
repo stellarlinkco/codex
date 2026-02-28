@@ -51,6 +51,10 @@ impl AgentControl {
         }
     }
 
+    pub(crate) fn spawned_thread_ids(&self) -> Vec<ThreadId> {
+        self.state.spawned_thread_ids()
+    }
+
     /// Spawn a new agent thread and submit the initial prompt.
     pub(crate) async fn spawn_agent(
         &self,
