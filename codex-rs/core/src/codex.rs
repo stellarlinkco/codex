@@ -164,21 +164,6 @@ fn command_hooks_for_config(config: &crate::config::Config) -> CommandHooksConfi
     command_hooks
 }
 
-fn user_input_preview_for_hooks(items: &[UserInput]) -> String {
-    items
-        .iter()
-        .map(|item| match item {
-            UserInput::Text { text, .. } => text.clone(),
-            UserInput::Image { .. } => "[image]".to_string(),
-            UserInput::LocalImage { path } => format!("[local_image:{}]", path.display()),
-            UserInput::Skill { name, path } => format!("[skill:${name}]({})", path.display()),
-            UserInput::Mention { name, path } => format!("[mention:${name}]({path})"),
-            _ => "[input]".to_string(),
-        })
-        .collect::<Vec<String>>()
-        .join("\n")
-}
-
 use crate::ModelProviderInfo;
 use crate::client::ModelClient;
 use crate::client::ModelClientSession;

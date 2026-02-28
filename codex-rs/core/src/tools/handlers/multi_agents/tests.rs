@@ -1833,6 +1833,7 @@ struct TeamInboxAckResult {
 }
 
 #[derive(Debug, Deserialize)]
+#[allow(dead_code)]
 struct TeamCleanupMemberResult {
     name: String,
     agent_id: String,
