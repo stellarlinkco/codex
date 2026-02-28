@@ -2717,23 +2717,7 @@ impl Session {
         //  command-level approvals use `call_id`.
         // `approval_id` is only present for subcommand callbacks (execve intercept)
         let effective_approval_id = approval_id.clone().unwrap_or_else(|| call_id.clone());
-        // Add the tx_approve callback to the map before sending the request.
-        let (tx_approve, rx_approve) = oneshot::channel();
-        let prev_entry = {
-            let mut active = self.active_turn.lock().await;
-            match active.as_mut() {
-                Some(at) => {
-                    let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_approval(effective_approval_id.clone(), tx_approve)
-                }
-                None => None,
-            }
-        };
-        if prev_entry.is_some() {
-            warn!("Overwriting existing pending approval for call_id: {effective_approval_id}");
-        }
 
-        let parsed_cmd = parse_command(&command);
         let proposed_network_policy_amendments = network_approval_context.as_ref().map(|context| {
             vec![
                 NetworkPolicyAmendment {
@@ -2754,6 +2738,99 @@ impl Session {
                 additional_permissions.as_ref(),
             )
         });
+
+        let hook_outcomes = self
+            .hooks()
+            .dispatch(HookPayload {
+                session_id: self.conversation_id,
+                transcript_path: self.transcript_path().await,
+                cwd: turn_context.cwd.clone(),
+                permission_mode: turn_context.approval_policy.get().to_string(),
+                hook_event: HookEvent::PermissionRequest {
+                    tool_name: "exec_command".to_string(),
+                    tool_input: serde_json::json!({
+                        "command": command.clone(),
+                        "cwd": cwd.clone(),
+                        "reason": reason.clone(),
+                        "network_approval_context": network_approval_context.clone(),
+                        "proposed_execpolicy_amendment": proposed_execpolicy_amendment.clone(),
+                        "proposed_network_policy_amendments": proposed_network_policy_amendments.clone(),
+                        "additional_permissions": additional_permissions.clone(),
+                        "available_decisions": available_decisions.clone(),
+                    }),
+                    tool_use_id: effective_approval_id.clone(),
+                    permission_suggestions: None,
+                },
+            })
+            .await;
+        let mut additional_context = Vec::new();
+        let mut hook_blocked = None;
+        let mut hook_permission_decision = None;
+        let mut hook_permission_decision_reason = None;
+        for hook_outcome in hook_outcomes {
+            let hook_name = hook_outcome.hook_name;
+            let result = hook_outcome.result;
+            if let Some(error) = result.error.as_deref() {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    hook_name = %hook_name,
+                    error,
+                    "permission_request hook failed; continuing"
+                );
+            }
+            if let HookResultControl::Block { reason } = result.control {
+                hook_blocked = Some((hook_name, reason));
+                break;
+            }
+            additional_context.extend(result.additional_context);
+            if let Some(decision) = result.permission_decision {
+                hook_permission_decision = Some(decision);
+                hook_permission_decision_reason = result.permission_decision_reason;
+            }
+        }
+        if let Some(reason) = hook_permission_decision_reason.as_deref()
+            && matches!(
+                hook_permission_decision,
+                Some(codex_hooks::HookPermissionDecision::Deny)
+                    | Some(codex_hooks::HookPermissionDecision::Ask)
+            )
+        {
+            additional_context.push(reason.to_string());
+        }
+        if let Some((hook_name, reason)) = hook_blocked.as_ref() {
+            additional_context.push(format!(
+                "permission_request hook '{hook_name}' blocked: {reason}"
+            ));
+        }
+        self.record_hook_context(turn_context, &additional_context)
+            .await;
+
+        if hook_blocked.is_some() {
+            return ReviewDecision::Denied;
+        }
+        match hook_permission_decision {
+            Some(codex_hooks::HookPermissionDecision::Allow) => return ReviewDecision::Approved,
+            Some(codex_hooks::HookPermissionDecision::Deny) => return ReviewDecision::Denied,
+            Some(codex_hooks::HookPermissionDecision::Ask) | None => {}
+        }
+
+        // Add the tx_approve callback to the map before sending the request.
+        let (tx_approve, rx_approve) = oneshot::channel();
+        let prev_entry = {
+            let mut active = self.active_turn.lock().await;
+            match active.as_mut() {
+                Some(at) => {
+                    let mut ts = at.turn_state.lock().await;
+                    ts.insert_pending_approval(effective_approval_id.clone(), tx_approve)
+                }
+                None => None,
+            }
+        };
+        if prev_entry.is_some() {
+            warn!("Overwriting existing pending approval for call_id: {effective_approval_id}");
+        }
+
+        let parsed_cmd = parse_command(&command);
         let event = EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
             call_id,
             approval_id,
@@ -2768,6 +2845,46 @@ impl Session {
             available_decisions: Some(available_decisions),
             parsed_cmd,
         });
+
+        let outcomes = self
+            .hooks()
+            .dispatch(HookPayload {
+                session_id: self.conversation_id,
+                transcript_path: self.transcript_path().await,
+                cwd: turn_context.cwd.clone(),
+                permission_mode: turn_context.approval_policy.get().to_string(),
+                hook_event: HookEvent::Notification {
+                    message: "Permission approval requested".to_string(),
+                    title: Some("Permission required".to_string()),
+                    notification_type: "permission_prompt".to_string(),
+                },
+            })
+            .await;
+        let mut additional_context = Vec::new();
+        for outcome in outcomes {
+            let hook_name = outcome.hook_name;
+            let result = outcome.result;
+            if let Some(error) = result.error.as_deref() {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    hook_name = %hook_name,
+                    error,
+                    "notification hook failed; continuing"
+                );
+            }
+            if let HookResultControl::Block { reason } = result.control {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    hook_name = %hook_name,
+                    reason,
+                    "notification hook returned a blocking decision; ignoring"
+                );
+            }
+            additional_context.extend(result.additional_context);
+        }
+        self.record_hook_context(turn_context, &additional_context)
+            .await;
+
         self.send_event(turn_context, event).await;
         rx_approve.await.unwrap_or_default()
     }
@@ -3601,6 +3718,110 @@ impl Session {
         guard.extend(additional_context.iter().cloned());
     }
 
+    pub(crate) async fn dispatch_user_prompt_submit_hook(
+        &self,
+        turn_context: &TurnContext,
+        items: &[UserInput],
+    ) -> Option<String> {
+        let prompt = items
+            .iter()
+            .map(|item| match item {
+                UserInput::Text { text, .. } => text.clone(),
+                UserInput::Image { .. } => "[image]".to_string(),
+                UserInput::LocalImage { path } => format!("[local_image:{}]", path.display()),
+                UserInput::Skill { name, path } => {
+                    format!("[skill:${name}]({})", path.display())
+                }
+                UserInput::Mention { name, path } => format!("[mention:${name}]({path})"),
+                _ => "[input]".to_string(),
+            })
+            .collect::<Vec<String>>()
+            .join("\n");
+
+        let hook_outcomes = self
+            .hooks()
+            .dispatch(HookPayload {
+                session_id: self.conversation_id,
+                transcript_path: self.transcript_path().await,
+                cwd: turn_context.cwd.clone(),
+                permission_mode: turn_context.approval_policy.get().to_string(),
+                hook_event: HookEvent::UserPromptSubmit { prompt },
+            })
+            .await;
+
+        let mut additional_context = Vec::new();
+        let mut blocked = None;
+        for hook_outcome in hook_outcomes {
+            let hook_name = hook_outcome.hook_name;
+            let result = hook_outcome.result;
+            if let Some(error) = result.error.as_deref() {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    hook_name = %hook_name,
+                    error,
+                    "user_prompt_submit hook failed; continuing"
+                );
+            }
+            if let HookResultControl::Block { reason } = result.control {
+                blocked = Some((hook_name, reason));
+                break;
+            }
+            additional_context.extend(result.additional_context);
+        }
+
+        self.record_hook_context(turn_context, &additional_context)
+            .await;
+        blocked.map(|(hook_name, reason)| {
+            format!("user_prompt_submit hook '{hook_name}' blocked: {reason}")
+        })
+    }
+
+    pub(crate) async fn dispatch_pre_compact_hook(
+        &self,
+        turn_context: &TurnContext,
+        trigger: &str,
+    ) {
+        let hook_outcomes = self
+            .hooks()
+            .dispatch(HookPayload {
+                session_id: self.conversation_id,
+                transcript_path: self.transcript_path().await,
+                cwd: turn_context.cwd.clone(),
+                permission_mode: turn_context.approval_policy.get().to_string(),
+                hook_event: HookEvent::PreCompact {
+                    trigger: trigger.to_string(),
+                    custom_instructions: turn_context.compact_prompt.clone(),
+                },
+            })
+            .await;
+
+        let mut additional_context = Vec::new();
+        for hook_outcome in hook_outcomes {
+            let hook_name = hook_outcome.hook_name;
+            let result = hook_outcome.result;
+            if let Some(error) = result.error.as_deref() {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    hook_name = %hook_name,
+                    error,
+                    "pre_compact hook failed; continuing"
+                );
+            }
+            if let HookResultControl::Block { reason } = result.control {
+                warn!(
+                    turn_id = %turn_context.sub_id,
+                    hook_name = %hook_name,
+                    reason,
+                    "pre_compact hook returned a blocking decision; ignoring"
+                );
+            }
+            additional_context.extend(result.additional_context);
+        }
+
+        self.record_hook_context(turn_context, &additional_context)
+            .await;
+    }
+
     pub(crate) fn hooks(&self) -> &Hooks {
         &self.services.hooks
     }
@@ -4033,6 +4254,17 @@ mod handlers {
         };
         sess.maybe_emit_unknown_model_warning_for_turn(current_context.as_ref())
             .await;
+        if let Some(reason) = sess
+            .dispatch_user_prompt_submit_hook(current_context.as_ref(), &items)
+            .await
+        {
+            sess.send_event(
+                current_context.as_ref(),
+                EventMsg::Warning(WarningEvent { message: reason }),
+            )
+            .await;
+            return;
+        }
         current_context.otel_manager.user_prompt(&items);
 
         // Attempt to inject input into current task.
@@ -4398,6 +4630,8 @@ mod handlers {
     pub async fn compact(sess: &Arc<Session>, sub_id: String) {
         let turn_context = sess.new_default_turn_with_sub_id(sub_id).await;
 
+        sess.dispatch_pre_compact_hook(turn_context.as_ref(), "manual_compact")
+            .await;
         sess.spawn_task(
             Arc::clone(&turn_context),
             vec![UserInput::Text {
@@ -8776,7 +9010,10 @@ mod tests {
         make_session_and_context_with_dynamic_tools_and_rx(Vec::new()).await
     }
 
-    fn set_command_hooks_for_session(session: &mut Arc<Session>, command_hooks: CommandHooksConfig) {
+    fn set_command_hooks_for_session(
+        session: &mut Arc<Session>,
+        command_hooks: CommandHooksConfig,
+    ) {
         let hooks = Hooks::new(HooksConfig { command_hooks });
         Arc::get_mut(session)
             .expect("session should be uniquely owned")
@@ -8974,6 +9211,8 @@ mod tests {
                     Some("test permission hook".to_string()),
                     None,
                     None,
+                    None,
+                    None,
                 )
                 .await
         });
@@ -9044,6 +9283,8 @@ mod tests {
                 vec!["echo".to_string(), "hello".to_string()],
                 tc.cwd.clone(),
                 Some("test permission hook".to_string()),
+                None,
+                None,
                 None,
                 None,
             )
