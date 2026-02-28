@@ -188,7 +188,18 @@ pub async fn handle(
             )
             .await
         } else {
-            remove_team_persistence(turn.config.codex_home.as_path(), &team_id).await
+            let empty_team = TeamRecord {
+                members: Vec::new(),
+                created_at: original_team.created_at,
+            };
+            persist_team_state(
+                turn.config.codex_home.as_path(),
+                session.conversation_id,
+                &team_id,
+                &empty_team,
+                None,
+            )
+            .await
         };
         if let Err(err) = persistence_result {
             let _ = restore_team_record(session.conversation_id, &team_id, original_team);

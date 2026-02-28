@@ -1481,7 +1481,7 @@ fn create_team_cleanup_tool() -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "team_cleanup".to_string(),
-        description: "Shutdown all members and remove team registry and persisted team artifacts."
+        description: "Remove shared team resources (team config, tasks, inbox). Must be run by the lead and fails if any teammates are still running; shut them down first with close_team."
             .to_string(),
         strict: false,
         parameters: JsonSchema::Object {

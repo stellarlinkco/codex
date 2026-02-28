@@ -1966,7 +1966,7 @@ async fn close_team_releases_slot_for_already_shutdown_member() {
 }
 
 #[tokio::test]
-async fn team_cleanup_releases_slot_for_already_shutdown_member() {
+async fn team_cleanup_fails_when_teammate_is_active() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         agent_id: String,
@@ -2010,28 +2010,6 @@ async fn team_cleanup_releases_slot_for_already_shutdown_member() {
     assert_eq!(spawn_result.members.len(), 1);
     let member_thread_id = agent_id(&spawn_result.members[0].agent_id).expect("valid agent id");
 
-    let thread = manager
-        .get_thread(member_thread_id)
-        .await
-        .expect("spawned member should exist");
-    let _ = thread
-        .submit(Op::Shutdown {})
-        .await
-        .expect("shutdown should submit");
-    timeout(Duration::from_secs(5), async {
-        loop {
-            if matches!(
-                manager.agent_control().get_status(member_thread_id).await,
-                AgentStatus::Shutdown
-            ) {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-    })
-    .await
-    .expect("member should reach shutdown");
-
     let spawned_threads = session.services.agent_control.spawned_thread_ids();
     assert_eq!(spawned_threads.len(), 1);
     assert_eq!(spawned_threads.contains(&member_thread_id), true);
@@ -2044,10 +2022,37 @@ async fn team_cleanup_releases_slot_for_already_shutdown_member() {
             "team_id": spawn_result.team_id
         })),
     );
+    let Err(err) = MultiAgentHandler.handle(cleanup_invocation).await else {
+        panic!("team_cleanup should fail when teammates are active");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("expected RespondToModel error");
+    };
+    assert!(message.contains("team_cleanup found active teammates"));
+
     MultiAgentHandler
-        .handle(cleanup_invocation)
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({
+                "team_id": spawn_result.team_id
+            })),
+        ))
         .await
-        .expect("team_cleanup should succeed");
+        .expect("close_team should succeed");
+
+    MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "team_cleanup",
+            function_payload(json!({
+                "team_id": spawn_result.team_id
+            })),
+        ))
+        .await
+        .expect("team_cleanup should succeed after close_team");
 
     let spawned_threads = session.services.agent_control.spawned_thread_ids();
     assert_eq!(spawned_threads.contains(&member_thread_id), false);
@@ -2269,7 +2274,7 @@ async fn spawn_team_wait_team_and_close_team_flow() {
     }
 
     let wait_missing_invocation = invocation(
-        session,
+        session.clone(),
         turn.clone(),
         "wait_team",
         function_payload(json!({
@@ -2283,6 +2288,36 @@ async fn spawn_team_wait_team_and_close_team_flow() {
         err,
         FunctionCallError::RespondToModel(format!("team `{}` not found", close_result.team_id))
     );
+    assert_eq!(
+        tokio::fs::metadata(team_dir(
+            turn.config.codex_home.as_path(),
+            &close_result.team_id
+        ))
+        .await
+        .is_ok(),
+        true
+    );
+    assert_eq!(
+        tokio::fs::metadata(team_tasks_dir(
+            turn.config.codex_home.as_path(),
+            &close_result.team_id,
+        ))
+        .await
+        .is_ok(),
+        true
+    );
+
+    MultiAgentHandler
+        .handle(invocation(
+            session,
+            turn.clone(),
+            "team_cleanup",
+            function_payload(json!({
+                "team_id": close_result.team_id
+            })),
+        ))
+        .await
+        .expect("team_cleanup should succeed");
     assert_eq!(
         tokio::fs::metadata(team_dir(
             turn.config.codex_home.as_path(),
@@ -2693,8 +2728,8 @@ async fn close_team_partial_close_removes_only_selected_member_worktree() {
     assert_eq!(persisted_config.members[0].name, "worker".to_string());
 
     let final_close_invocation = invocation(
-        session,
-        turn,
+        session.clone(),
+        turn.clone(),
         "close_team",
         function_payload(json!({
             "team_id": spawn_result.team_id
@@ -2716,6 +2751,33 @@ async fn close_team_partial_close_removes_only_selected_member_worktree() {
         list_worktree_paths(codex_home.as_path(), lead_thread_id).is_empty(),
         true
     );
+    assert_eq!(
+        tokio::fs::metadata(team_config_path(
+            codex_home.as_path(),
+            &spawn_result.team_id
+        ))
+        .await
+        .is_ok(),
+        true
+    );
+    assert_eq!(
+        tokio::fs::metadata(team_tasks_dir(codex_home.as_path(), &spawn_result.team_id))
+            .await
+            .is_ok(),
+        true
+    );
+
+    MultiAgentHandler
+        .handle(invocation(
+            session,
+            turn,
+            "team_cleanup",
+            function_payload(json!({
+                "team_id": spawn_result.team_id
+            })),
+        ))
+        .await
+        .expect("team_cleanup should succeed");
     assert_eq!(
         tokio::fs::metadata(team_config_path(
             codex_home.as_path(),
@@ -2790,6 +2852,22 @@ async fn team_cleanup_removes_worktrees_when_members_are_already_shutdown() {
             .expect("shutdown member before cleanup");
     }
 
+    MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({
+                "team_id": spawn_result.team_id
+            })),
+        ))
+        .await
+        .expect("close_team should succeed");
+    assert_eq!(
+        list_worktree_paths(codex_home.as_path(), lead_thread_id).is_empty(),
+        true
+    );
+
     let cleanup_invocation = invocation(
         session,
         turn,
@@ -2813,20 +2891,8 @@ async fn team_cleanup_removes_worktrees_when_members_are_already_shutdown() {
     let cleanup_result: TeamCleanupResult =
         serde_json::from_str(&cleanup_content).expect("team_cleanup result should be json");
     assert_eq!(cleanup_success, Some(true));
-    assert_eq!(cleanup_result.closed.len(), 2);
+    assert_eq!(cleanup_result.closed.is_empty(), true);
     assert_eq!(cleanup_result.removed_from_registry, true);
-    for member in &cleanup_result.closed {
-        assert_eq!(member.ok, true);
-        assert_eq!(member.error, None);
-        assert!(matches!(
-            member.status,
-            AgentStatus::Shutdown | AgentStatus::NotFound
-        ));
-    }
-    assert_eq!(
-        list_worktree_paths(codex_home.as_path(), lead_thread_id).is_empty(),
-        true
-    );
     assert_eq!(
         tokio::fs::metadata(team_config_path(
             codex_home.as_path(),
@@ -3012,7 +3078,7 @@ async fn close_team_partial_close_updates_persisted_team_config() {
     );
 
     let full_close_invocation = invocation(
-        session,
+        session.clone(),
         turn.clone(),
         "close_team",
         function_payload(json!({
@@ -3025,6 +3091,36 @@ async fn close_team_partial_close_updates_persisted_team_config() {
         .expect("close remaining team member");
     assert_eq!(
         tokio::fs::metadata(team_config_path(
+            turn.config.codex_home.as_path(),
+            &spawn_result.team_id,
+        ))
+        .await
+        .is_ok(),
+        true
+    );
+
+    MultiAgentHandler
+        .handle(invocation(
+            session,
+            turn.clone(),
+            "team_cleanup",
+            function_payload(json!({
+                "team_id": spawn_result.team_id
+            })),
+        ))
+        .await
+        .expect("team_cleanup should succeed");
+    assert_eq!(
+        tokio::fs::metadata(team_config_path(
+            turn.config.codex_home.as_path(),
+            &spawn_result.team_id,
+        ))
+        .await
+        .is_err(),
+        true
+    );
+    assert_eq!(
+        tokio::fs::metadata(team_tasks_dir(
             turn.config.codex_home.as_path(),
             &spawn_result.team_id,
         ))
@@ -3185,6 +3281,18 @@ async fn team_task_lifecycle_and_team_cleanup_flow() {
     assert_eq!(claim_result.task.state, PersistedTaskState::Claimed);
     assert_eq!(claim_result.task.assignee_name, "worker".to_string());
 
+    MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({
+                "team_id": claim_result.team_id
+            })),
+        ))
+        .await
+        .expect("close_team should succeed");
+
     let cleanup_invocation = invocation(
         session.clone(),
         turn.clone(),
@@ -3209,19 +3317,7 @@ async fn team_task_lifecycle_and_team_cleanup_flow() {
     assert_eq!(cleanup_result.removed_from_registry, true);
     assert_eq!(cleanup_result.removed_team_config, true);
     assert_eq!(cleanup_result.removed_task_dir, true);
-    assert_eq!(cleanup_result.closed.len(), 2);
-    for member in &cleanup_result.closed {
-        assert_eq!(member.name.is_empty(), false);
-        assert_eq!(member.agent_id.is_empty(), false);
-        assert_eq!(member.ok || member.error.is_some(), true);
-        assert!(matches!(
-            member.status,
-            AgentStatus::PendingInit
-                | AgentStatus::Running
-                | AgentStatus::NotFound
-                | AgentStatus::Shutdown
-        ));
-    }
+    assert_eq!(cleanup_result.closed.is_empty(), true);
     assert_eq!(
         tokio::fs::metadata(team_dir(
             turn.config.codex_home.as_path(),
@@ -3421,6 +3517,18 @@ async fn team_task_claim_and_complete_error_paths() {
         FunctionCallError::RespondToModel(format!("task `{worker_task_id}` is already completed"))
     );
 
+    MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({
+                "team_id": claim_worker_result.team_id
+            })),
+        ))
+        .await
+        .expect("close_team should succeed");
+
     let cleanup_invocation = invocation(
         session,
         turn,
@@ -3545,15 +3653,27 @@ async fn team_message_and_team_broadcast_send_inputs() {
     assert_eq!(user_input_count > 0, true);
 
     let cleanup_invocation = invocation(
-        session,
-        turn,
-        "team_cleanup",
+        session.clone(),
+        turn.clone(),
+        "close_team",
         function_payload(json!({
             "team_id": broadcast_result.team_id
         })),
     );
     MultiAgentHandler
         .handle(cleanup_invocation)
+        .await
+        .expect("close_team should succeed");
+
+    MultiAgentHandler
+        .handle(invocation(
+            session,
+            turn,
+            "team_cleanup",
+            function_payload(json!({
+                "team_id": broadcast_result.team_id
+            })),
+        ))
         .await
         .expect("team_cleanup should succeed");
 }
@@ -3881,6 +4001,16 @@ async fn team_inbox_ack_noops_when_token_empty() {
 
     MultiAgentHandler
         .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({"team_id": ack_result.team_id})),
+        ))
+        .await
+        .expect("close_team should succeed");
+
+    MultiAgentHandler
+        .handle(invocation(
             session,
             turn,
             "team_cleanup",
@@ -3939,6 +4069,16 @@ async fn team_inbox_ack_rejects_invalid_token() {
         panic!("expected respond to model error");
     };
     assert_eq!(message.starts_with("ack_token is invalid:"), true);
+
+    MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({"team_id": spawn_result.team_id})),
+        ))
+        .await
+        .expect("close_team should succeed");
 
     MultiAgentHandler
         .handle(invocation(
@@ -4058,6 +4198,16 @@ async fn team_inbox_ack_rejects_team_id_mismatch() {
 
     MultiAgentHandler
         .handle(invocation(
+            session_arc.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({"team_id": pop_result.team_id})),
+        ))
+        .await
+        .expect("close_team should succeed");
+
+    MultiAgentHandler
+        .handle(invocation(
             session_arc,
             turn,
             "team_cleanup",
@@ -4171,6 +4321,16 @@ async fn team_inbox_ack_rejects_thread_id_mismatch() {
         err,
         FunctionCallError::RespondToModel("ack_token thread_id mismatch".to_string())
     );
+
+    MultiAgentHandler
+        .handle(invocation(
+            session_arc.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({"team_id": pop_result.team_id})),
+        ))
+        .await
+        .expect("close_team should succeed");
 
     MultiAgentHandler
         .handle(invocation(
@@ -4296,6 +4456,16 @@ async fn team_inbox_pop_rejects_non_member() {
     let mut session = unwrap_arc(session_arc, "only one session ref");
     session.conversation_id = lead_thread_id;
     let session = Arc::new(session);
+    MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            Arc::clone(&turn),
+            "close_team",
+            function_payload(json!({"team_id": team_id})),
+        ))
+        .await
+        .expect("close_team should succeed");
+
     MultiAgentHandler
         .handle(invocation(
             session,
