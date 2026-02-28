@@ -1587,6 +1587,50 @@ impl Session {
         // record_initial_history can emit events. We record only after the SessionConfiguredEvent is emitted.
         sess.record_initial_history(initial_history).await;
 
+        let hook_outcomes = sess
+            .hooks()
+            .dispatch(HookPayload {
+                session_id: sess.conversation_id,
+                transcript_path: sess.transcript_path().await,
+                cwd: session_configuration.cwd.clone(),
+                permission_mode: session_configuration.approval_policy.value().to_string(),
+                hook_event: HookEvent::SessionStart {
+                    source: session_configuration.session_source.to_string(),
+                    model: session_configuration.collaboration_mode.model().to_string(),
+                    agent_type: match &session_configuration.session_source {
+                        SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+                            agent_role, ..
+                        }) => agent_role.clone(),
+                        _ => None,
+                    },
+                },
+            })
+            .await;
+        let mut additional_context = Vec::new();
+        for hook_outcome in hook_outcomes {
+            let hook_name = hook_outcome.hook_name;
+            let result = hook_outcome.result;
+            if let Some(error) = result.error.as_deref() {
+                warn!(
+                    hook_name = %hook_name,
+                    error,
+                    "session_start hook failed; continuing"
+                );
+            }
+            if let HookResultControl::Block { reason } = result.control {
+                warn!(
+                    hook_name = %hook_name,
+                    reason,
+                    "session_start hook returned a blocking decision; ignoring"
+                );
+            }
+            additional_context.extend(result.additional_context);
+        }
+        if !additional_context.is_empty() {
+            let mut guard = sess.services.pending_hook_context.lock().await;
+            guard.extend(additional_context);
+        }
+
         memories::start_memories_startup_task(
             &sess,
             Arc::clone(&config),
