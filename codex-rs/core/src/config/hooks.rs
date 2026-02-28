@@ -7,6 +7,7 @@ use codex_hooks::HookMatcherConfig;
 use serde::Deserialize;
 use std::io;
 use toml::Value as TomlValue;
+use tracing::warn;
 
 #[derive(Deserialize)]
 #[serde(untagged)]
@@ -75,7 +76,18 @@ pub(crate) fn command_hooks_from_layer_stack(
     for layer in
         config_layer_stack.get_layers(ConfigLayerStackOrdering::LowestPrecedenceFirst, false)
     {
-        let Some(layer_hooks) = parse_layer_hooks(&layer.config, &layer.name)? else {
+        let layer_hooks = match parse_layer_hooks(&layer.config, &layer.name) {
+            Ok(layer_hooks) => layer_hooks,
+            Err(error) => {
+                warn!(
+                    layer = ?layer.name,
+                    %error,
+                    "failed to parse config.toml [hooks] layer; ignoring"
+                );
+                continue;
+            }
+        };
+        let Some(layer_hooks) = layer_hooks else {
             continue;
         };
         extend_command_hooks(&mut hooks, layer_hooks);
@@ -272,6 +284,46 @@ command = "echo p-stop"
                 "-c".to_string(),
                 "echo p-stop".to_string()
             ]
+        );
+    }
+
+    #[test]
+    fn command_hooks_ignore_invalid_layers() {
+        let user_file = test_absolute_path("/tmp/codex-user/config.toml");
+        let project_folder = test_absolute_path("/tmp/codex-project/.codex");
+        let stack = ConfigLayerStack::new(
+            vec![
+                layer(
+                    ConfigLayerSource::User { file: user_file },
+                    r#"
+[hooks]
+
+[[hooks.stop]]
+command = ["echo", "ok"]
+"#,
+                ),
+                layer(
+                    ConfigLayerSource::Project {
+                        dot_codex_folder: project_folder,
+                    },
+                    r#"
+[hooks]
+
+[[hooks.stop]]
+command = 123
+"#,
+                ),
+            ],
+            ConfigRequirements::default(),
+            ConfigRequirementsToml::default(),
+        )
+        .expect("layer stack");
+
+        let hooks = command_hooks_from_layer_stack(&stack).expect("hooks config");
+        assert_eq!(hooks.stop.len(), 1);
+        assert_eq!(
+            hooks.stop[0].command,
+            vec!["echo".to_string(), "ok".to_string()]
         );
     }
 }
