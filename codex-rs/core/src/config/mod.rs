@@ -115,7 +115,7 @@ pub use codex_git::GhostSnapshotConfig;
 /// files are *silently truncated* to this size so we do not take up too much of
 /// the context window.
 pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
-pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(10);
+pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(20);
 pub(crate) const DEFAULT_AGENT_MAX_DEPTH: i32 = 1;
 
 #[cfg(test)]
@@ -1280,7 +1280,7 @@ pub struct ToolsToml {
 #[schemars(deny_unknown_fields)]
 pub struct AgentsToml {
     /// Maximum number of agent threads that can be open concurrently.
-    /// When unset, no limit is enforced.
+    /// When unset, falls back to `DEFAULT_AGENT_MAX_THREADS`.
     #[schemars(range(min = 1))]
     pub max_threads: Option<usize>,
 

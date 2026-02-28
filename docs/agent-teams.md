@@ -35,6 +35,11 @@ There is no fixed default team size. Set `members` according to task complexity 
 - Call `close_team` (optional `members` list for partial close).
 - Call `team_cleanup` to shut down all members and remove persisted team artifacts.
 
+Notes:
+
+- `background: true` members are auto-closed once they reach a final status, but the team record and persisted files remain until `close_team`/`team_cleanup`.
+- The per-session concurrency limit is controlled by `[agents].max_threads` (default: 20). Set it in `~/.codex/config.toml` or via `-c agents.max_threads=20`.
+
 ## Persisted data
 
 When `spawn_team` succeeds, Codex persists:
