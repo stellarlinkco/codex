@@ -84,7 +84,8 @@ impl ToolsConfig {
         let include_default_mode_request_user_input =
             features.enabled(Feature::DefaultModeRequestUserInput);
         let include_search_tool = features.enabled(Feature::Apps);
-        let include_agent_jobs = include_collab_tools && features.enabled(Feature::Sqlite);
+        let include_sqlite = features.enabled(Feature::Sqlite);
+        let include_agent_jobs = include_collab_tools && include_sqlite;
         let request_permission_enabled = features.enabled(Feature::RequestPermissions);
         let shell_command_backend =
             if features.enabled(Feature::ShellTool) && features.enabled(Feature::ShellZshFork) {
@@ -120,7 +121,7 @@ impl ToolsConfig {
             }
         };
 
-        let agent_jobs_worker_tools = include_agent_jobs
+        let agent_jobs_worker_tools = include_sqlite
             && matches!(
                 session_source,
                 SessionSource::SubAgent(SubAgentSource::Other(label))
@@ -2364,10 +2365,12 @@ pub(crate) fn build_specs(
         builder.register_handler("team_cleanup", multi_agent_handler);
     }
 
-    if config.agent_jobs_tools {
+    if config.agent_jobs_tools || config.agent_jobs_worker_tools {
         let agent_jobs_handler = Arc::new(BatchJobHandler);
-        builder.push_spec(create_spawn_agents_on_csv_tool());
-        builder.register_handler("spawn_agents_on_csv", agent_jobs_handler.clone());
+        if config.agent_jobs_tools {
+            builder.push_spec(create_spawn_agents_on_csv_tool());
+            builder.register_handler("spawn_agents_on_csv", agent_jobs_handler.clone());
+        }
         if config.agent_jobs_worker_tools {
             builder.push_spec(create_report_agent_job_result_tool());
             builder.register_handler("report_agent_job_result", agent_jobs_handler);
