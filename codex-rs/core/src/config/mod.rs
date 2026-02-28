@@ -115,7 +115,7 @@ pub use codex_git::GhostSnapshotConfig;
 /// files are *silently truncated* to this size so we do not take up too much of
 /// the context window.
 pub(crate) const PROJECT_DOC_MAX_BYTES: usize = 32 * 1024; // 32 KiB
-pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(20);
+pub(crate) const DEFAULT_AGENT_MAX_THREADS: Option<usize> = Some(100);
 pub(crate) const DEFAULT_AGENT_MAX_DEPTH: i32 = 1;
 
 #[cfg(test)]
