@@ -58,7 +58,7 @@ pub(crate) fn with_config_overrides(mut model: ModelInfo, config: &Config) -> Mo
 /// Build a minimal fallback model descriptor for missing/unknown slugs.
 pub(crate) fn model_info_from_slug(slug: &str) -> ModelInfo {
     warn!("Unknown model {slug} is used. This will use fallback model metadata.");
-    ModelInfo {
+    let mut model = ModelInfo {
         slug: slug.to_string(),
         display_name: slug.to_string(),
         description: None,
@@ -84,7 +84,14 @@ pub(crate) fn model_info_from_slug(slug: &str) -> ModelInfo {
         input_modalities: default_input_modalities(),
         prefer_websockets: false,
         used_fallback_model_metadata: true, // this is the fallback model metadata
+    };
+    if slug == "test-gpt-5.1-codex" {
+        model.shell_type = ConfigShellToolType::ShellCommand;
+        model.supports_parallel_tool_calls = true;
+        model.experimental_supported_tools =
+            vec!["test_sync_tool".to_string(), "grep_files".to_string()];
     }
+    model
 }
 
 fn local_personality_messages_for_slug(slug: &str) -> Option<ModelMessages> {

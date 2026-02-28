@@ -1641,10 +1641,11 @@ mod tests {
     }
 
     async fn can_run_js_repl_runtime_tests() -> bool {
-        // These white-box runtime tests are required on macOS. Linux relies on
-        // the codex-linux-sandbox arg0 dispatch path, which is exercised in
-        // integration tests instead.
-        cfg!(target_os = "macos")
+        if !cfg!(target_os = "macos") {
+            return false;
+        }
+
+        resolve_compatible_node(None).await.is_ok()
     }
     fn write_js_repl_test_package(base: &Path, name: &str, value: &str) -> anyhow::Result<()> {
         let pkg_dir = base.join("node_modules").join(name);
