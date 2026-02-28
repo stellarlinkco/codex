@@ -38,6 +38,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
+use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
 use codex_protocol::protocol::SessionSource;
@@ -86,6 +87,19 @@ struct ThreadEventEnvelope {
     thread_id: codex_protocol::ThreadId,
     thread: Arc<codex_core::CodexThread>,
     event: Event,
+}
+
+fn approval_policy_override_for_exec<T>(
+    cli_kv_overrides: &[(String, T)],
+) -> Option<AskForApproval> {
+    if cli_kv_overrides
+        .iter()
+        .any(|(key, _value)| key == "approval_policy")
+    {
+        None
+    } else {
+        Some(AskForApproval::Never)
+    }
 }
 
 pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::Result<()> {
@@ -154,6 +168,7 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             std::process::exit(1);
         }
     };
+    let approval_policy_override = approval_policy_override_for_exec(&cli_kv_overrides);
 
     let resolved_cwd = cwd.clone();
     let config_cwd = match resolved_cwd.as_deref() {
@@ -245,8 +260,8 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
         model,
         review_model: None,
         config_profile,
-        // Default to never ask for approvals in headless mode. Feature flags can override.
-        approval_policy: Some(AskForApproval::Never),
+        // Default to never ask for approvals in headless mode. `-c approval_policy=...` can override.
+        approval_policy: approval_policy_override,
         sandbox_mode,
         cwd: resolved_cwd,
         model_provider: model_provider.clone(),
@@ -567,6 +582,27 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
                     decision: ElicitationAction::Cancel,
                 })
                 .await?;
+        }
+        if let EventMsg::ExecApprovalRequest(ev) = &event.msg {
+            // Exec mode has no interactive approval surface; deny to avoid hanging.
+            thread
+                .submit(Op::ExecApproval {
+                    id: ev.effective_approval_id(),
+                    turn_id: Some(ev.turn_id.clone()),
+                    decision: ReviewDecision::Denied,
+                })
+                .await?;
+            continue;
+        }
+        if let EventMsg::ApplyPatchApprovalRequest(ev) = &event.msg {
+            // Exec mode has no interactive approval surface; deny to avoid hanging.
+            thread
+                .submit(Op::PatchApproval {
+                    id: ev.call_id.clone(),
+                    decision: ReviewDecision::Denied,
+                })
+                .await?;
+            continue;
         }
         if let EventMsg::McpStartupUpdate(update) = &event.msg
             && required_mcp_servers.contains(&update.server)
@@ -996,5 +1032,18 @@ mod tests {
         let err = decode_prompt_bytes(&input).expect_err("invalid utf-8 should fail");
 
         assert_eq!(err, PromptDecodeError::InvalidUtf8 { valid_up_to: 0 });
+    }
+
+    #[test]
+    fn exec_forces_never_approval_policy_unless_overridden() {
+        let empty: &[(String, ())] = &[];
+        assert_eq!(
+            approval_policy_override_for_exec(empty),
+            Some(AskForApproval::Never)
+        );
+        assert_eq!(
+            approval_policy_override_for_exec(&[("approval_policy".to_string(), ())]),
+            None
+        );
     }
 }
