@@ -130,6 +130,23 @@ fn legacy_notify_command_hooks(notify: Option<Vec<String>>) -> CommandHooksConfi
     hooks
 }
 
+fn command_hooks_for_config(config: &crate::config::Config) -> CommandHooksConfig {
+    let mut command_hooks =
+        match crate::config::hooks::command_hooks_from_layer_stack(&config.config_layer_stack) {
+            Ok(command_hooks) => command_hooks,
+            Err(error) => {
+                warn!(%error, "failed to parse config.toml [hooks]; ignoring");
+                CommandHooksConfig::default()
+            }
+        };
+    let legacy_notify_hooks = legacy_notify_command_hooks(config.notify.clone());
+    command_hooks.stop.extend(legacy_notify_hooks.stop);
+    command_hooks
+        .subagent_stop
+        .extend(legacy_notify_hooks.subagent_stop);
+    command_hooks
+}
+
 fn user_input_preview_for_hooks(items: &[UserInput]) -> String {
     items
         .iter()
@@ -1409,9 +1426,8 @@ impl Session {
             config: Arc::clone(&config),
             default_model: session_configuration.collaboration_mode.model().to_string(),
         });
-        let mut hooks = Hooks::new(HooksConfig {
-            command_hooks: legacy_notify_command_hooks(config.notify.clone()),
-        });
+        let command_hooks = command_hooks_for_config(config.as_ref());
+        let mut hooks = Hooks::new(HooksConfig { command_hooks });
         hooks.set_async_results_tx(async_hook_tx);
         hooks.set_non_command_executor(hook_executor);
 
@@ -8259,6 +8275,7 @@ mod tests {
         let network_approval = Arc::new(NetworkApprovalService::default());
 
         let file_watcher = Arc::new(FileWatcher::noop());
+        let command_hooks = command_hooks_for_config(config.as_ref());
         let services = SessionServices {
             mcp_connection_manager: Arc::new(RwLock::new(
                 McpConnectionManager::new_mcp_connection_manager_for_tests(
@@ -8274,9 +8291,7 @@ mod tests {
                 Arc::clone(&config),
                 Arc::clone(&auth_manager),
             ),
-            hooks: Hooks::new(HooksConfig {
-                command_hooks: legacy_notify_command_hooks(config.notify.clone()),
-            }),
+            hooks: Hooks::new(HooksConfig { command_hooks }),
             pending_hook_context: Mutex::new(Vec::new()),
             rollout: Mutex::new(None),
             user_shell: Arc::new(default_user_shell()),
@@ -8416,6 +8431,7 @@ mod tests {
         let network_approval = Arc::new(NetworkApprovalService::default());
 
         let file_watcher = Arc::new(FileWatcher::noop());
+        let command_hooks = command_hooks_for_config(config.as_ref());
         let services = SessionServices {
             mcp_connection_manager: Arc::new(RwLock::new(
                 McpConnectionManager::new_mcp_connection_manager_for_tests(
@@ -8431,9 +8447,7 @@ mod tests {
                 Arc::clone(&config),
                 Arc::clone(&auth_manager),
             ),
-            hooks: Hooks::new(HooksConfig {
-                command_hooks: legacy_notify_command_hooks(config.notify.clone()),
-            }),
+            hooks: Hooks::new(HooksConfig { command_hooks }),
             pending_hook_context: Mutex::new(Vec::new()),
             rollout: Mutex::new(None),
             user_shell: Arc::new(default_user_shell()),
