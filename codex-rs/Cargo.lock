@@ -1731,7 +1731,7 @@ dependencies = [
  "codex-utils-stream-parser",
  "codex-utils-string",
  "codex-windows-sandbox",
- "core-foundation 0.9.4",
+ "core-foundation 0.10.1",
  "core_test_support",
  "csv",
  "ctor 0.6.3",
@@ -2574,7 +2574,7 @@ dependencies = [
 name = "codex-utils-sleep-inhibitor"
 version = "1.2.1"
 dependencies = [
- "core-foundation 0.9.4",
+ "core-foundation 0.10.1",
  "libc",
  "tracing",
  "windows-sys 0.61.2",
