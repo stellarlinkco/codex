@@ -117,7 +117,7 @@ landlock = { workspace = true }
 seccompiler = { workspace = true }
 
 [target.'cfg(target_os = "macos")'.dependencies]
-core-foundation = "0.9"
+core-foundation = "0.10"
 keyring = { workspace = true, features = ["apple-native"] }
 
 # Build OpenSSL from source for musl builds.
