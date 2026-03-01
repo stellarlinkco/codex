@@ -133,15 +133,13 @@ use tracing::warn;
 use uuid::Uuid;
 
 fn command_hooks_for_config(config: &crate::config::Config) -> CommandHooksConfig {
-    let command_hooks =
-        match crate::config::hooks::command_hooks_from_layer_stack(&config.config_layer_stack) {
-            Ok(command_hooks) => command_hooks,
-            Err(error) => {
-                warn!(%error, "failed to parse config.toml [hooks]; ignoring");
-                CommandHooksConfig::default()
-            }
-        };
-    command_hooks
+    match crate::config::hooks::command_hooks_from_layer_stack(&config.config_layer_stack) {
+        Ok(command_hooks) => command_hooks,
+        Err(error) => {
+            warn!(%error, "failed to parse config.toml [hooks]; ignoring");
+            CommandHooksConfig::default()
+        }
+    }
 }
 
 use crate::ModelProviderInfo;
@@ -4769,12 +4767,11 @@ mod handlers {
         }
 
         let current_snapshot = sess.services.shell_snapshot_tx.subscribe().borrow().clone();
-        if let Some(snapshot) = current_snapshot {
-            if let Err(err) = tokio::fs::remove_file(&snapshot.path).await
-                && err.kind() != std::io::ErrorKind::NotFound
-            {
-                warn!("failed to remove shell snapshot after shutdown: {err}");
-            }
+        if let Some(snapshot) = current_snapshot
+            && let Err(err) = tokio::fs::remove_file(&snapshot.path).await
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!("failed to remove shell snapshot after shutdown: {err}");
         }
 
         let event = Event {
