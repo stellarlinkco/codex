@@ -86,7 +86,7 @@ impl AgentControl {
         let new_thread = match session_source {
             Some(session_source) => {
                 state
-                    .spawn_new_thread_with_source(config, self.clone(), session_source, false)
+                    .spawn_new_thread_with_source(config, self.clone(), session_source, false, None)
                     .await?
             }
             None => state.spawn_new_thread(config, self.clone()).await?,
@@ -254,6 +254,23 @@ impl AgentControl {
         thread.agent_status().await
     }
 
+    pub(crate) async fn get_agent_nickname_and_role(
+        &self,
+        agent_id: ThreadId,
+    ) -> Option<(Option<String>, Option<String>)> {
+        let Ok(state) = self.upgrade() else {
+            return None;
+        };
+        let Ok(thread) = state.get_thread(agent_id).await else {
+            return None;
+        };
+        let session_source = thread.config_snapshot().await.session_source;
+        Some((
+            session_source.get_nickname(),
+            session_source.get_agent_role(),
+        ))
+    }
+
     /// Subscribe to status updates for `agent_id`, yielding the latest value and changes.
     pub(crate) async fn subscribe_status(
         &self,
@@ -338,8 +355,8 @@ mod tests {
     use crate::config::Config;
     use crate::config::ConfigBuilder;
     use crate::config_loader::LoaderOverrides;
+    use crate::contextual_user_message::SUBAGENT_NOTIFICATION_OPEN_TAG;
     use crate::features::Feature;
-    use crate::session_prefix::SUBAGENT_NOTIFICATION_OPEN_TAG;
     use assert_matches::assert_matches;
     use codex_protocol::config_types::ModeKind;
     use codex_protocol::models::ContentItem;

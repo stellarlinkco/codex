@@ -415,18 +415,38 @@ async fn emit_exec_stage(
         }
         ToolEventStage::Success(output)
         | ToolEventStage::Failure(ToolEventFailure::Output(output)) => {
+            let deny_marker = output
+                .stderr
+                .text
+                .lines()
+                .chain(output.aggregated_output.text.lines())
+                .find(|line| line.starts_with("Execution denied"));
+            let (status, aggregated_output) = if output.exit_code == 0 {
+                (
+                    ExecCommandStatus::Completed,
+                    output.aggregated_output.text.clone(),
+                )
+            } else if let Some(deny_marker) = deny_marker {
+                let aggregated_output = if deny_marker.contains("Execution forbidden by policy") {
+                    "Execution forbidden by policy".to_string()
+                } else {
+                    "exec command rejected by user".to_string()
+                };
+                (ExecCommandStatus::Declined, aggregated_output)
+            } else {
+                (
+                    ExecCommandStatus::Failed,
+                    output.aggregated_output.text.clone(),
+                )
+            };
             let exec_result = ExecCommandResult {
                 stdout: output.stdout.text.clone(),
                 stderr: output.stderr.text.clone(),
-                aggregated_output: output.aggregated_output.text.clone(),
+                aggregated_output,
                 exit_code: output.exit_code,
                 duration: output.duration,
                 formatted_output: format_exec_output_str(&output, ctx.turn.truncation_policy),
-                status: if output.exit_code == 0 {
-                    ExecCommandStatus::Completed
-                } else {
-                    ExecCommandStatus::Failed
-                },
+                status,
             };
             emit_exec_end(ctx, exec_input, exec_result).await;
         }

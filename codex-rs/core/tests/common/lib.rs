@@ -1,5 +1,7 @@
 #![expect(clippy::expect_used)]
 
+use anyhow::Context as _;
+use anyhow::ensure;
 use codex_utils_cargo_bin::CargoBinError;
 use ctor::ctor;
 use tempfile::TempDir;
@@ -97,6 +99,42 @@ pub fn test_tmp_path() -> AbsolutePathBuf {
 
 pub fn test_tmp_path_buf() -> PathBuf {
     test_tmp_path().into_path_buf()
+}
+
+/// Fetch a DotSlash resource and return the resolved executable/file path.
+pub fn fetch_dotslash_file(
+    dotslash_file: &std::path::Path,
+    dotslash_cache: Option<&std::path::Path>,
+) -> anyhow::Result<PathBuf> {
+    let mut command = std::process::Command::new("dotslash");
+    command.arg("--").arg("fetch").arg(dotslash_file);
+    if let Some(dotslash_cache) = dotslash_cache {
+        command.env("DOTSLASH_CACHE", dotslash_cache);
+    }
+    let output = command.output().with_context(|| {
+        format!(
+            "failed to run dotslash to fetch resource {}",
+            dotslash_file.display()
+        )
+    })?;
+    ensure!(
+        output.status.success(),
+        "dotslash fetch failed for {}: {}",
+        dotslash_file.display(),
+        String::from_utf8_lossy(&output.stderr).trim()
+    );
+    let fetched_path = String::from_utf8(output.stdout)
+        .context("dotslash fetch output was not utf8")?
+        .trim()
+        .to_string();
+    ensure!(!fetched_path.is_empty(), "dotslash fetch output was empty");
+    let fetched_path = PathBuf::from(fetched_path);
+    ensure!(
+        fetched_path.is_file(),
+        "dotslash returned non-file path: {}",
+        fetched_path.display()
+    );
+    Ok(fetched_path)
 }
 
 /// Returns a default `Config` whose on-disk state is confined to the provided
@@ -243,31 +281,8 @@ pub fn format_with_current_shell_display_non_login(command: &str) -> String {
         .expect("serialize current shell command without login")
 }
 
-fn cargo_bin_with_fallback(binary: &str, package: &str) -> Result<PathBuf, CargoBinError> {
-    if let Ok(path) = codex_utils_cargo_bin::cargo_bin(binary) {
-        return Ok(path);
-    }
-
-    if !codex_utils_cargo_bin::runfiles_available()
-        && let Ok(repo_root) = codex_utils_cargo_bin::repo_root()
-    {
-        let _ = std::process::Command::new("cargo")
-            .arg("build")
-            .args(["-p", package, "--bin", binary])
-            .current_dir(repo_root.join("codex-rs"))
-            .status();
-    }
-
-    codex_utils_cargo_bin::cargo_bin(binary)
-}
-
-pub fn codex_bin() -> Result<PathBuf, CargoBinError> {
-    cargo_bin_with_fallback("codex", "codex-cli")
-}
-
 pub fn stdio_server_bin() -> Result<String, CargoBinError> {
-    cargo_bin_with_fallback("test_stdio_server", "codex-rmcp-client")
-        .map(|p| p.to_string_lossy().to_string())
+    codex_utils_cargo_bin::cargo_bin("test_stdio_server").map(|p| p.to_string_lossy().to_string())
 }
 
 pub mod fs_wait {

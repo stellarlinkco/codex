@@ -441,7 +441,7 @@ async fn dispatch_pre_tool_use_hook(
             session_id: session.conversation_id,
             transcript_path: session.transcript_path().await,
             cwd: turn.cwd.clone(),
-            permission_mode: approval_policy_for_hooks(turn.approval_policy).to_string(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
             hook_event: HookEvent::PreToolUse {
                 tool_name: invocation.tool_name.clone(),
                 tool_input,
@@ -531,7 +531,7 @@ async fn dispatch_post_tool_use_hook(
             session_id: session.conversation_id,
             transcript_path: session.transcript_path().await,
             cwd: turn.cwd.clone(),
-            permission_mode: approval_policy_for_hooks(turn.approval_policy).to_string(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
             hook_event: HookEvent::PostToolUse {
                 tool_name: invocation.tool_name.clone(),
                 tool_input,
@@ -593,7 +593,7 @@ async fn dispatch_post_tool_use_failure_hook(
             session_id: session.conversation_id,
             transcript_path: session.transcript_path().await,
             cwd: turn.cwd.clone(),
-            permission_mode: approval_policy_for_hooks(turn.approval_policy).to_string(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
             hook_event: HookEvent::PostToolUseFailure {
                 tool_name: invocation.tool_name.clone(),
                 tool_input,
@@ -798,6 +798,7 @@ mod tests {
                 timeout_ms: None,
                 sandbox_permissions: None,
                 prefix_rule: None,
+                additional_permissions: None,
                 justification: None,
             },
         };
@@ -819,6 +820,7 @@ mod tests {
                 timeout_ms: Some(5),
                 sandbox_permissions: None,
                 prefix_rule: None,
+                additional_permissions: None,
                 justification: None,
             }
         );
@@ -833,6 +835,7 @@ mod tests {
                 timeout_ms: None,
                 sandbox_permissions: None,
                 prefix_rule: None,
+                additional_permissions: None,
                 justification: None,
             },
         };

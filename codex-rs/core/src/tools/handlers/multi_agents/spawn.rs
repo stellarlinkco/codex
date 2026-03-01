@@ -208,6 +208,12 @@ pub async fn handle(
         maybe_start_background_agent_cleanup(session.clone(), turn.clone(), agent_id);
     }
 
+    let (new_agent_nickname, new_agent_role) = session
+        .services
+        .agent_control
+        .get_agent_nickname_and_role(agent_id)
+        .await
+        .unwrap_or((None, None));
     let status = session.services.agent_control.get_status(agent_id).await;
     session
         .send_event(
@@ -216,8 +222,8 @@ pub async fn handle(
                 call_id,
                 sender_thread_id: session.conversation_id,
                 new_thread_id: Some(agent_id),
-                new_agent_nickname: None,
-                new_agent_role: None,
+                new_agent_nickname,
+                new_agent_role,
                 prompt,
                 status,
             }

@@ -1021,7 +1021,7 @@ async fn dispatch_subagent_start_hook(
             session_id: session.conversation_id,
             transcript_path: session.transcript_path().await,
             cwd: turn.cwd.clone(),
-            permission_mode: approval_policy_for_hooks(turn.approval_policy).to_string(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
             hook_event: HookEvent::SubagentStart {
                 agent_id: agent_id.to_string(),
                 agent_type: agent_type.to_string(),
@@ -1067,7 +1067,7 @@ async fn dispatch_teammate_idle_hook(
             session_id: session.conversation_id,
             transcript_path: session.transcript_path().await,
             cwd: turn.cwd.clone(),
-            permission_mode: approval_policy_for_hooks(turn.approval_policy).to_string(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
             hook_event: HookEvent::TeammateIdle {
                 teammate_name: teammate_name.to_string(),
                 team_name: team_id.to_string(),
@@ -1116,7 +1116,7 @@ async fn dispatch_task_completed_hook(
             session_id: session.conversation_id,
             transcript_path: session.transcript_path().await,
             cwd: turn.cwd.clone(),
-            permission_mode: approval_policy_for_hooks(turn.approval_policy).to_string(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
             hook_event: HookEvent::TaskCompleted {
                 task_id: task_id.to_string(),
                 task_subject: task_subject.to_string(),
@@ -1166,7 +1166,7 @@ async fn dispatch_worktree_create_hook(
             session_id: session.conversation_id,
             transcript_path: session.transcript_path().await,
             cwd: turn.cwd.clone(),
-            permission_mode: approval_policy_for_hooks(turn.approval_policy).to_string(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
             hook_event: HookEvent::WorktreeCreate { name },
         })
         .await;
@@ -1232,7 +1232,7 @@ async fn dispatch_worktree_remove_hook(
             session_id: session.conversation_id,
             transcript_path: session.transcript_path().await,
             cwd: turn.cwd.clone(),
-            permission_mode: approval_policy_for_hooks(turn.approval_policy).to_string(),
+            permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
             hook_event: HookEvent::WorktreeRemove { worktree_path },
         })
         .await;
@@ -1704,7 +1704,7 @@ fn input_preview(items: &[UserInput]) -> String {
     parts.join("\n")
 }
 
-fn build_agent_spawn_config(
+pub(crate) fn build_agent_spawn_config(
     base_instructions: &BaseInstructions,
     turn: &TurnContext,
     child_depth: i32,
@@ -1742,7 +1742,7 @@ fn build_agent_shared_config(
     config
         .permissions
         .sandbox_policy
-        .set(turn.sandbox_policy.clone())
+        .set(turn.sandbox_policy.get().clone())
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!("sandbox_policy is invalid: {err}"))
         })?;

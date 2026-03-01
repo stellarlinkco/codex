@@ -87,6 +87,12 @@ See the configuration reference for the latest hook settings:
 
 The generated JSON Schema for `config.toml` lives at `codex-rs/core/config.schema.json`.
 
+## SQLite State DB
+
+Codex stores the SQLite-backed state DB under `sqlite_home` (config key) or the
+`CODEX_SQLITE_HOME` environment variable. When unset, WorkspaceWrite sandbox
+sessions default to a temp directory; other modes default to `CODEX_HOME`.
+
 ## Notices
 
 Codex stores "do not show again" flags for some UI prompts under the `[notice]` table.

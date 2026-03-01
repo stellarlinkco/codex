@@ -23,7 +23,6 @@ use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::SystemTime;
 use tokio::fs;
 use tokio::time::Duration;
 use tokio::time::Instant;
@@ -39,8 +38,10 @@ struct SnapshotRun {
 }
 
 const POLICY_PATH_FOR_TEST: &str = "/codex/policy/path";
-const SNAPSHOT_WAIT_TIMEOUT: Duration = Duration::from_secs(15);
-const SNAPSHOT_DELETE_TIMEOUT: Duration = Duration::from_secs(5);
+const SNAPSHOT_PATH_FOR_TEST: &str = "/codex/snapshot/path";
+const SNAPSHOT_MARKER_VAR: &str = "CODEX_SNAPSHOT_POLICY_MARKER";
+const SNAPSHOT_MARKER_VALUE: &str = "from_snapshot";
+const POLICY_SUCCESS_OUTPUT: &str = "policy-after-snapshot";
 
 #[derive(Debug, Default)]
 struct SnapshotRunOptions {
@@ -49,33 +50,22 @@ struct SnapshotRunOptions {
 
 async fn wait_for_snapshot(codex_home: &Path) -> Result<PathBuf> {
     let snapshot_dir = codex_home.join("shell_snapshots");
-    let deadline = Instant::now() + SNAPSHOT_WAIT_TIMEOUT;
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         if let Ok(mut entries) = fs::read_dir(&snapshot_dir).await {
-            let mut newest: Option<(SystemTime, PathBuf)> = None;
             while let Some(entry) = entries.next_entry().await? {
-                let modified = entry
-                    .metadata()
-                    .await
-                    .and_then(|metadata| metadata.modified())
-                    .unwrap_or(SystemTime::UNIX_EPOCH);
-                match newest.as_ref() {
-                    Some((newest_modified, _)) if *newest_modified >= modified => {}
-                    _ => {
-                        newest = Some((modified, entry.path()));
-                    }
+                let path = entry.path();
+                let Some(extension) = path.extension().and_then(|ext| ext.to_str()) else {
+                    continue;
+                };
+                if extension == "sh" || extension == "ps1" {
+                    return Ok(path);
                 }
-            }
-            if let Some((_modified, path)) = newest {
-                return Ok(path);
             }
         }
 
         if Instant::now() >= deadline {
-            anyhow::bail!(
-                "timed out waiting for shell snapshot in {}",
-                snapshot_dir.display()
-            );
+            anyhow::bail!("timed out waiting for shell snapshot");
         }
 
         sleep(Duration::from_millis(25)).await;
@@ -99,25 +89,20 @@ async fn wait_for_file_contents(path: &Path) -> Result<String> {
     }
 }
 
-async fn wait_for_path_removed(path: &Path) -> Result<()> {
-    let deadline = Instant::now() + SNAPSHOT_DELETE_TIMEOUT;
-    loop {
-        if !path.exists() {
-            return Ok(());
-        }
-        if Instant::now() >= deadline {
-            anyhow::bail!("timed out waiting for path removal {}", path.display());
-        }
-        sleep(Duration::from_millis(25)).await;
-    }
-}
-
 fn policy_set_path_for_test() -> HashMap<String, String> {
     HashMap::from([("PATH".to_string(), POLICY_PATH_FOR_TEST.to_string())])
 }
 
-fn command_printing_path() -> &'static str {
-    "printf '%s' \"$PATH\""
+fn snapshot_override_content_for_policy_test() -> String {
+    format!(
+        "# Snapshot file\nexport PATH='{SNAPSHOT_PATH_FOR_TEST}'\nexport {SNAPSHOT_MARKER_VAR}='{SNAPSHOT_MARKER_VALUE}'\n"
+    )
+}
+
+fn command_asserting_policy_after_snapshot() -> String {
+    format!(
+        "if [ \"${{{SNAPSHOT_MARKER_VAR}:-}}\" = \"{SNAPSHOT_MARKER_VALUE}\" ] && [ \"$PATH\" != \"{SNAPSHOT_PATH_FOR_TEST}\" ]; then case \":$PATH:\" in *\":{POLICY_PATH_FOR_TEST}:\"*) printf \"{POLICY_SUCCESS_OUTPUT}\" ;; *) printf \"path=%s marker=%s\" \"$PATH\" \"${{{SNAPSHOT_MARKER_VAR}:-missing}}\" ;; esac; else printf \"path=%s marker=%s\" \"$PATH\" \"${{{SNAPSHOT_MARKER_VAR}:-missing}}\"; fi"
+    )
 }
 
 #[allow(clippy::expect_used)]
@@ -163,7 +148,7 @@ async fn run_snapshot_command_with_options(
     let codex = test.codex.clone();
     let codex_home = test.home.path().to_path_buf();
     let session_model = test.session_configured.model.clone();
-    let cwd = canonical_turn_cwd(test.cwd_path());
+    let cwd = test.cwd_path().to_path_buf();
 
     codex
         .submit(Op::UserTurn {
@@ -249,7 +234,7 @@ async fn run_shell_command_snapshot_with_options(
     let codex = test.codex.clone();
     let codex_home = test.home.path().to_path_buf();
     let session_model = test.session_configured.model.clone();
-    let cwd = canonical_turn_cwd(test.cwd_path());
+    let cwd = test.cwd_path().to_path_buf();
 
     codex
         .submit(Op::UserTurn {
@@ -319,7 +304,7 @@ async fn run_tool_turn_on_harness(
     let test = harness.test();
     let codex = test.codex.clone();
     let session_model = test.session_configured.model.clone();
-    let cwd = canonical_turn_cwd(test.cwd_path());
+    let cwd = test.cwd_path().to_path_buf();
     codex
         .submit(Op::UserTurn {
             items: vec![UserInput::Text {
@@ -352,19 +337,8 @@ async fn run_tool_turn_on_harness(
     Ok(end)
 }
 
-fn stdout_has_policy_path(stdout: &str) -> bool {
-    normalize_newlines(stdout)
-        .trim()
-        .split(':')
-        .any(|segment| segment == POLICY_PATH_FOR_TEST)
-}
-
 fn normalize_newlines(text: &str) -> String {
     text.replace("\r\n", "\n")
-}
-
-fn canonical_turn_cwd(path: &Path) -> PathBuf {
-    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn assert_posix_snapshot_sections(snapshot: &str) {
@@ -427,20 +401,40 @@ async fn shell_command_snapshot_preserves_shell_environment_policy_set() -> Resu
         config.permissions.shell_environment_policy.r#set = policy_set_path_for_test();
     });
     let harness = TestCodexHarness::with_builder(builder).await?;
+    let codex_home = harness.test().home.path().to_path_buf();
+    run_tool_turn_on_harness(
+        &harness,
+        "warm up shell snapshot",
+        "shell-snapshot-policy-warmup",
+        "shell_command",
+        json!({
+            "command": "printf warmup",
+            "timeout_ms": 1_000,
+        }),
+    )
+    .await?;
+    let snapshot_path = wait_for_snapshot(&codex_home).await?;
+    fs::write(&snapshot_path, snapshot_override_content_for_policy_test()).await?;
+
+    let command = command_asserting_policy_after_snapshot();
     let end = run_tool_turn_on_harness(
         &harness,
         "verify shell policy after snapshot",
-        "shell-snapshot-policy-assert-0",
+        "shell-snapshot-policy-assert",
         "shell_command",
         json!({
-            "command": command_printing_path(),
+            "command": command,
             "timeout_ms": 1_000,
         }),
     )
     .await?;
 
-    assert!(stdout_has_policy_path(&end.stdout));
+    assert_eq!(
+        normalize_newlines(&end.stdout).trim(),
+        POLICY_SUCCESS_OUTPUT
+    );
     assert_eq!(end.exit_code, 0);
+    assert!(snapshot_path.starts_with(codex_home));
 
     Ok(())
 }
@@ -455,20 +449,40 @@ async fn linux_unified_exec_snapshot_preserves_shell_environment_policy_set() ->
         config.permissions.shell_environment_policy.r#set = policy_set_path_for_test();
     });
     let harness = TestCodexHarness::with_builder(builder).await?;
+    let codex_home = harness.test().home.path().to_path_buf();
+    run_tool_turn_on_harness(
+        &harness,
+        "warm up unified exec shell snapshot",
+        "shell-snapshot-policy-warmup-exec",
+        "exec_command",
+        json!({
+            "cmd": "printf warmup",
+            "yield_time_ms": 1_000,
+        }),
+    )
+    .await?;
+    let snapshot_path = wait_for_snapshot(&codex_home).await?;
+    fs::write(&snapshot_path, snapshot_override_content_for_policy_test()).await?;
+
+    let command = command_asserting_policy_after_snapshot();
     let end = run_tool_turn_on_harness(
         &harness,
         "verify unified exec policy after snapshot",
-        "shell-snapshot-policy-assert-exec-0",
+        "shell-snapshot-policy-assert-exec",
         "exec_command",
         json!({
-            "cmd": command_printing_path(),
+            "cmd": command,
             "yield_time_ms": 1_000,
         }),
     )
     .await?;
 
-    assert!(stdout_has_policy_path(&end.stdout));
+    assert_eq!(
+        normalize_newlines(&end.stdout).trim(),
+        POLICY_SUCCESS_OUTPUT
+    );
     assert_eq!(end.exit_code, 0);
+    assert!(snapshot_path.starts_with(codex_home));
 
     Ok(())
 }
@@ -484,7 +498,7 @@ async fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
 
     let test = harness.test();
     let codex = test.codex.clone();
-    let cwd = canonical_turn_cwd(test.cwd_path());
+    let cwd = test.cwd_path().to_path_buf();
     let codex_home = test.home.path().to_path_buf();
     let target = cwd.join("snapshot-apply.txt");
 
@@ -560,7 +574,13 @@ async fn shell_snapshot_deleted_after_shutdown_with_skills() -> Result<()> {
 
     drop(codex);
     drop(harness);
-    wait_for_path_removed(&snapshot_path).await?;
+    sleep(Duration::from_millis(150)).await;
+
+    assert_eq!(
+        snapshot_path.exists(),
+        false,
+        "snapshot should be removed after shutdown"
+    );
 
     Ok(())
 }

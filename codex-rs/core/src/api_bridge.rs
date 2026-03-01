@@ -9,7 +9,6 @@ use http::HeaderMap;
 use serde::Deserialize;
 
 use crate::auth::CodexAuth;
-use crate::auth::read_openai_api_key_from_env;
 use crate::error::CodexErr;
 use crate::error::RetryLimitReachedError;
 use crate::error::UnexpectedResponseError;
@@ -123,9 +122,7 @@ const CF_RAY_HEADER: &str = "cf-ray";
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::auth::OPENAI_API_KEY_ENV_VAR;
     use pretty_assertions::assert_eq;
-    use serial_test::serial;
 
     #[test]
     fn map_api_error_maps_server_overloaded() {
@@ -220,55 +217,6 @@ mod tests {
             None
         );
     }
-
-    struct EnvVarGuard {
-        key: &'static str,
-        original: Option<std::ffi::OsString>,
-    }
-
-    impl EnvVarGuard {
-        fn set(key: &'static str, value: &str) -> Self {
-            let original = std::env::var_os(key);
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, original }
-        }
-    }
-
-    impl Drop for EnvVarGuard {
-        fn drop(&mut self) {
-            unsafe {
-                match &self.original {
-                    Some(value) => std::env::set_var(self.key, value),
-                    None => std::env::remove_var(self.key),
-                }
-            }
-        }
-    }
-
-    #[test]
-    #[serial(openai_api_key_env)]
-    fn auth_provider_uses_openai_api_key_env_when_auth_is_missing() {
-        let _guard = EnvVarGuard::set(OPENAI_API_KEY_ENV_VAR, "sk-env");
-        let provider = ModelProviderInfo::create_openai_provider();
-        let resolved =
-            auth_provider_from_auth(None, &provider).expect("openai auth provider should resolve");
-
-        assert_eq!(resolved.bearer_token(), Some("sk-env".to_string()));
-    }
-
-    #[test]
-    #[serial(openai_api_key_env)]
-    fn auth_provider_does_not_override_existing_auth_with_openai_api_key_env() {
-        let _guard = EnvVarGuard::set(OPENAI_API_KEY_ENV_VAR, "sk-env");
-        let provider = ModelProviderInfo::create_openai_provider();
-        let auth = CodexAuth::from_api_key("sk-from-auth");
-        let resolved = auth_provider_from_auth(Some(auth), &provider)
-            .expect("openai auth provider should resolve");
-
-        assert_eq!(resolved.bearer_token(), Some("sk-from-auth".to_string()));
-    }
 }
 
 fn extract_request_tracking_id(headers: Option<&HeaderMap>) -> Option<String> {
@@ -302,16 +250,6 @@ pub(crate) fn auth_provider_from_auth(
     if let Some(token) = provider.experimental_bearer_token.clone() {
         return Ok(CoreAuthProvider {
             token: Some(token),
-            account_id: None,
-        });
-    }
-
-    if auth.is_none()
-        && provider.is_openai()
-        && let Some(api_key) = read_openai_api_key_from_env()
-    {
-        return Ok(CoreAuthProvider {
-            token: Some(api_key),
             account_id: None,
         });
     }

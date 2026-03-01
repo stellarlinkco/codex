@@ -29,6 +29,12 @@
         "$ref": "#/definitions/AgentRoleToml"
       },
       "properties": {
+        "job_max_runtime_seconds": {
+          "description": "Default maximum runtime in seconds for agent job workers.",
+          "format": "uint64",
+          "minimum": 1.0,
+          "type": "integer"
+        },
         "max_depth": {
           "description": "Maximum nesting depth allowed for spawned agent threads. Root sessions start at depth 0.",
           "format": "int32",
@@ -313,10 +319,16 @@
             "codex_git_commit": {
               "type": "boolean"
             },
+            "collab": {
+              "type": "boolean"
+            },
             "collaboration_modes": {
               "type": "boolean"
             },
             "connectors": {
+              "type": "boolean"
+            },
+            "default_mode_request_user_input": {
               "type": "boolean"
             },
             "elevated_windows_sandbox": {
@@ -346,6 +358,9 @@
             "js_repl_tools_only": {
               "type": "boolean"
             },
+            "memories": {
+              "type": "boolean"
+            },
             "memory_tool": {
               "type": "boolean"
             },
@@ -361,7 +376,13 @@
             "prevent_idle_sleep": {
               "type": "boolean"
             },
+            "realtime_conversation": {
+              "type": "boolean"
+            },
             "remote_models": {
+              "type": "boolean"
+            },
+            "request_permissions": {
               "type": "boolean"
             },
             "request_rule": {
@@ -409,6 +430,9 @@
             "use_linux_sandbox_bwrap": {
               "type": "boolean"
             },
+            "voice_transcription": {
+              "type": "boolean"
+            },
             "web_search": {
               "type": "boolean"
             },
@@ -436,6 +460,14 @@
         },
         "model": {
           "type": "string"
+        },
+        "model_catalog_json": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/AbsolutePathBuf"
+            }
+          ],
+          "description": "Optional path to a JSON model catalog (applied on startup only)."
         },
         "model_instructions_file": {
           "allOf": [
@@ -1389,6 +1421,11 @@
             "type": "string"
           },
           "type": "array"
+        },
+        "theme": {
+          "default": null,
+          "description": "Syntax highlighting theme name (kebab-case).\n\nWhen set, overrides automatic light/dark theme detection. Use `/theme` in the TUI or see `$CODEX_HOME/themes` for custom themes.",
+          "type": "string"
         }
       },
       "type": "object"
@@ -1455,13 +1492,6 @@
             "responses"
           ],
           "type": "string"
-        },
-        {
-          "description": "The Messages API exposed by Anthropic at `/v1/messages`.",
-          "enum": [
-            "anthropic"
-          ],
-          "type": "string"
         }
       ]
     }
@@ -1505,7 +1535,7 @@
       "default": null,
       "description": "Settings for app-specific controls."
     },
-    "background_terminal_timeout": {
+    "background_terminal_max_timeout": {
       "description": "Maximum poll window for background terminal output (`write_stdin`), in milliseconds. Default: `300000` (5 minutes).",
       "format": "uint64",
       "minimum": 0.0,
@@ -1582,10 +1612,16 @@
         "codex_git_commit": {
           "type": "boolean"
         },
+        "collab": {
+          "type": "boolean"
+        },
         "collaboration_modes": {
           "type": "boolean"
         },
         "connectors": {
+          "type": "boolean"
+        },
+        "default_mode_request_user_input": {
           "type": "boolean"
         },
         "elevated_windows_sandbox": {
@@ -1615,6 +1651,9 @@
         "js_repl_tools_only": {
           "type": "boolean"
         },
+        "memories": {
+          "type": "boolean"
+        },
         "memory_tool": {
           "type": "boolean"
         },
@@ -1630,7 +1669,13 @@
         "prevent_idle_sleep": {
           "type": "boolean"
         },
+        "realtime_conversation": {
+          "type": "boolean"
+        },
         "remote_models": {
+          "type": "boolean"
+        },
+        "request_permissions": {
           "type": "boolean"
         },
         "request_rule": {
@@ -1676,6 +1721,9 @@
           "type": "boolean"
         },
         "use_linux_sandbox_bwrap": {
+          "type": "boolean"
+        },
+        "voice_transcription": {
           "type": "boolean"
         },
         "web_search": {
@@ -1997,6 +2045,14 @@
         }
       ],
       "description": "User-level skill config entries keyed by SKILL.md path."
+    },
+    "sqlite_home": {
+      "allOf": [
+        {
+          "$ref": "#/definitions/AbsolutePathBuf"
+        }
+      ],
+      "description": "Directory where Codex stores the SQLite state DB. Defaults to `$CODEX_SQLITE_HOME` when set. Otherwise uses `$CODEX_HOME`."
     },
     "suppress_unstable_features_warning": {
       "description": "Suppress warnings about unstable (under development) features.",

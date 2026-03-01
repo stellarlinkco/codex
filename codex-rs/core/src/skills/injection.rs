@@ -3,32 +3,21 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 
 use crate::analytics_client::AnalyticsEventsClient;
+use crate::analytics_client::InvocationType;
 use crate::analytics_client::SkillInvocation;
 use crate::analytics_client::TrackEventsContext;
 use crate::instructions::SkillInstructions;
 use crate::mentions::build_skill_name_counts;
 use crate::skills::SkillMetadata;
-use codex_hooks::CommandHookConfig;
-use codex_hooks::CommandHooksConfig;
-use codex_hooks::HookHandlerType;
-use codex_hooks::HookMatcherConfig;
 use codex_otel::OtelManager;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::user_input::UserInput;
-use serde::Deserialize;
 use tokio::fs;
 
 #[derive(Debug, Default)]
 pub(crate) struct SkillInjections {
     pub(crate) items: Vec<ResponseItem>,
     pub(crate) warnings: Vec<String>,
-    pub(crate) scoped_hooks: Vec<SkillScopedHooks>,
-}
-
-#[derive(Debug)]
-pub(crate) struct SkillScopedHooks {
-    pub(crate) skill_name: String,
-    pub(crate) hooks: CommandHooksConfig,
 }
 
 pub(crate) async fn build_skill_injections(
@@ -44,30 +33,22 @@ pub(crate) async fn build_skill_injections(
     let mut result = SkillInjections {
         items: Vec::with_capacity(mentioned_skills.len()),
         warnings: Vec::new(),
-        scoped_hooks: Vec::new(),
     };
     let mut invocations = Vec::new();
 
     for skill in mentioned_skills {
-        match fs::read_to_string(&skill.path).await {
+        match fs::read_to_string(&skill.path_to_skills_md).await {
             Ok(contents) => {
                 emit_skill_injected_metric(otel, skill, "ok");
                 invocations.push(SkillInvocation {
                     skill_name: skill.name.clone(),
                     skill_scope: skill.scope,
-                    skill_path: skill.path.clone(),
+                    skill_path: skill.path_to_skills_md.clone(),
+                    invocation_type: InvocationType::Explicit,
                 });
-                if let Some(hooks) =
-                    parse_skill_scoped_hooks(skill, &contents, &mut result.warnings)
-                {
-                    result.scoped_hooks.push(SkillScopedHooks {
-                        skill_name: skill.name.clone(),
-                        hooks,
-                    });
-                }
                 result.items.push(ResponseItem::from(SkillInstructions {
                     name: skill.name.clone(),
-                    path: skill.path.to_string_lossy().into_owned(),
+                    path: skill.path_to_skills_md.to_string_lossy().into_owned(),
                     contents,
                 }));
             }
@@ -76,7 +57,7 @@ pub(crate) async fn build_skill_injections(
                 let message = format!(
                     "Failed to load skill {name} at {path}: {err:#}",
                     name = skill.name,
-                    path = skill.path.display()
+                    path = skill.path_to_skills_md.display()
                 );
                 result.warnings.push(message);
             }
@@ -86,235 +67,6 @@ pub(crate) async fn build_skill_injections(
     analytics_client.track_skill_invocations(tracking, invocations);
 
     result
-}
-
-#[derive(Debug, Deserialize)]
-struct SkillFrontmatterHooks {
-    #[serde(default)]
-    hooks: Option<HashMap<String, Vec<HookMatcherGroup>>>,
-}
-
-#[derive(Debug, Deserialize)]
-struct HookMatcherGroup {
-    #[serde(default)]
-    matcher: Option<String>,
-    hooks: Vec<HookHandlerConfig>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type", rename_all = "lowercase")]
-enum HookHandlerConfig {
-    Command {
-        command: String,
-        #[serde(default, rename = "async")]
-        async_: bool,
-        #[serde(default)]
-        timeout: Option<u64>,
-        #[serde(default, rename = "statusMessage")]
-        status_message: Option<String>,
-        #[serde(default)]
-        once: bool,
-    },
-    Prompt {
-        prompt: String,
-        #[serde(default)]
-        model: Option<String>,
-        #[serde(default)]
-        timeout: Option<u64>,
-        #[serde(default, rename = "statusMessage")]
-        status_message: Option<String>,
-        #[serde(default)]
-        once: bool,
-    },
-    Agent {
-        prompt: String,
-        #[serde(default)]
-        model: Option<String>,
-        #[serde(default)]
-        timeout: Option<u64>,
-        #[serde(default, rename = "statusMessage")]
-        status_message: Option<String>,
-        #[serde(default)]
-        once: bool,
-    },
-}
-
-fn parse_skill_scoped_hooks(
-    skill: &SkillMetadata,
-    contents: &str,
-    warnings: &mut Vec<String>,
-) -> Option<CommandHooksConfig> {
-    let frontmatter = extract_frontmatter(contents)?;
-
-    let parsed: SkillFrontmatterHooks = match serde_yaml::from_str(&frontmatter) {
-        Ok(parsed) => parsed,
-        Err(err) => {
-            warnings.push(format!(
-                "Failed to parse hooks for skill {name} at {path}: {err:#}",
-                name = skill.name,
-                path = skill.path.display()
-            ));
-            return None;
-        }
-    };
-    let event_hooks = parsed.hooks?;
-
-    let mut hooks = CommandHooksConfig::default();
-    for (event_name, matcher_groups) in event_hooks {
-        for matcher_group in matcher_groups {
-            let matcher = matcher_group.matcher.clone();
-            for (index, handler) in matcher_group.hooks.into_iter().enumerate() {
-                let mut hook = CommandHookConfig {
-                    name: Some(format!("skill:{}:{}:{}", skill.name, event_name, index + 1)),
-                    matcher: HookMatcherConfig {
-                        matcher: matcher.clone(),
-                        ..Default::default()
-                    },
-                    ..Default::default()
-                };
-
-                match handler {
-                    HookHandlerConfig::Command {
-                        command,
-                        async_,
-                        timeout,
-                        status_message,
-                        once,
-                    } => {
-                        hook.handler_type = HookHandlerType::Command;
-                        hook.command = shell_command_argv(&command);
-                        hook.async_ = async_;
-                        hook.timeout = timeout;
-                        hook.status_message = status_message;
-                        hook.once = once;
-                    }
-                    HookHandlerConfig::Prompt {
-                        prompt,
-                        model,
-                        timeout,
-                        status_message,
-                        once,
-                    } => {
-                        hook.handler_type = HookHandlerType::Prompt;
-                        hook.prompt = Some(prompt);
-                        hook.model = model;
-                        hook.timeout = timeout;
-                        hook.status_message = status_message;
-                        hook.once = once;
-                    }
-                    HookHandlerConfig::Agent {
-                        prompt,
-                        model,
-                        timeout,
-                        status_message,
-                        once,
-                    } => {
-                        hook.handler_type = HookHandlerType::Agent;
-                        hook.prompt = Some(prompt);
-                        hook.model = model;
-                        hook.timeout = timeout;
-                        hook.status_message = status_message;
-                        hook.once = once;
-                    }
-                }
-
-                if !push_hook_for_event(&mut hooks, &event_name, hook) {
-                    warnings.push(format!(
-                        "Skill {name} at {path} defines hooks for unknown event {event_name}",
-                        name = skill.name,
-                        path = skill.path.display()
-                    ));
-                }
-            }
-        }
-    }
-
-    if command_hooks_config_is_empty(&hooks) {
-        None
-    } else {
-        Some(hooks)
-    }
-}
-
-fn command_hooks_config_is_empty(hooks: &CommandHooksConfig) -> bool {
-    hooks.session_start.is_empty()
-        && hooks.session_end.is_empty()
-        && hooks.user_prompt_submit.is_empty()
-        && hooks.pre_tool_use.is_empty()
-        && hooks.permission_request.is_empty()
-        && hooks.notification.is_empty()
-        && hooks.post_tool_use.is_empty()
-        && hooks.post_tool_use_failure.is_empty()
-        && hooks.stop.is_empty()
-        && hooks.teammate_idle.is_empty()
-        && hooks.task_completed.is_empty()
-        && hooks.config_change.is_empty()
-        && hooks.subagent_start.is_empty()
-        && hooks.subagent_stop.is_empty()
-        && hooks.pre_compact.is_empty()
-        && hooks.worktree_create.is_empty()
-        && hooks.worktree_remove.is_empty()
-}
-
-fn push_hook_for_event(
-    hooks: &mut CommandHooksConfig,
-    event_name: &str,
-    hook: CommandHookConfig,
-) -> bool {
-    match event_name.trim() {
-        "SessionStart" => hooks.session_start.push(hook),
-        "SessionEnd" => hooks.session_end.push(hook),
-        "UserPromptSubmit" => hooks.user_prompt_submit.push(hook),
-        "PreToolUse" => hooks.pre_tool_use.push(hook),
-        "PermissionRequest" => hooks.permission_request.push(hook),
-        "Notification" => hooks.notification.push(hook),
-        "PostToolUse" => hooks.post_tool_use.push(hook),
-        "PostToolUseFailure" => hooks.post_tool_use_failure.push(hook),
-        "Stop" => hooks.stop.push(hook),
-        "TeammateIdle" => hooks.teammate_idle.push(hook),
-        "TaskCompleted" => hooks.task_completed.push(hook),
-        "ConfigChange" => hooks.config_change.push(hook),
-        "SubagentStart" => hooks.subagent_start.push(hook),
-        "SubagentStop" => hooks.subagent_stop.push(hook),
-        "PreCompact" => hooks.pre_compact.push(hook),
-        "WorktreeCreate" => hooks.worktree_create.push(hook),
-        "WorktreeRemove" => hooks.worktree_remove.push(hook),
-        _ => return false,
-    }
-    true
-}
-
-fn extract_frontmatter(contents: &str) -> Option<String> {
-    let mut lines = contents.lines();
-    if !matches!(lines.next(), Some(line) if line.trim() == "---") {
-        return None;
-    }
-
-    let mut frontmatter_lines: Vec<&str> = Vec::new();
-    let mut found_closing = false;
-    for line in lines.by_ref() {
-        if line.trim() == "---" {
-            found_closing = true;
-            break;
-        }
-        frontmatter_lines.push(line);
-    }
-
-    if frontmatter_lines.is_empty() || !found_closing {
-        return None;
-    }
-
-    Some(frontmatter_lines.join("\n"))
-}
-
-#[cfg(windows)]
-fn shell_command_argv(command: &str) -> Vec<String> {
-    vec!["cmd".to_string(), "/C".to_string(), command.to_string()]
-}
-
-#[cfg(not(windows))]
-fn shell_command_argv(command: &str) -> Vec<String> {
-    vec!["sh".to_string(), "-c".to_string(), command.to_string()]
 }
 
 fn emit_skill_injected_metric(otel: Option<&OtelManager>, skill: &SkillMetadata, status: &str) {
@@ -369,9 +121,9 @@ pub(crate) fn collect_explicit_skill_mentions(
             if let Some(skill) = selection_context
                 .skills
                 .iter()
-                .find(|skill| skill.path.as_path() == path.as_path())
+                .find(|skill| skill.path_to_skills_md.as_path() == path.as_path())
             {
-                seen_paths.insert(skill.path.clone());
+                seen_paths.insert(skill.path_to_skills_md.clone());
                 seen_names.insert(skill.name.clone());
                 selected.push(skill.clone());
             }
@@ -552,23 +304,27 @@ fn select_skills_from_mentions(
         .collect();
 
     for skill in selection_context.skills {
-        if selection_context.disabled_paths.contains(&skill.path)
-            || seen_paths.contains(&skill.path)
+        if selection_context
+            .disabled_paths
+            .contains(&skill.path_to_skills_md)
+            || seen_paths.contains(&skill.path_to_skills_md)
         {
             continue;
         }
 
-        let path_str = skill.path.to_string_lossy();
+        let path_str = skill.path_to_skills_md.to_string_lossy();
         if mention_skill_paths.contains(path_str.as_ref()) {
-            seen_paths.insert(skill.path.clone());
+            seen_paths.insert(skill.path_to_skills_md.clone());
             seen_names.insert(skill.name.clone());
             selected.push(skill.clone());
         }
     }
 
     for skill in selection_context.skills {
-        if selection_context.disabled_paths.contains(&skill.path)
-            || seen_paths.contains(&skill.path)
+        if selection_context
+            .disabled_paths
+            .contains(&skill.path_to_skills_md)
+            || seen_paths.contains(&skill.path_to_skills_md)
         {
             continue;
         }
@@ -595,7 +351,7 @@ fn select_skills_from_mentions(
         }
 
         if seen_names.insert(skill.name.clone()) {
-            seen_paths.insert(skill.path.clone());
+            seen_paths.insert(skill.path_to_skills_md.clone());
             selected.push(skill.clone());
         }
     }
@@ -726,8 +482,9 @@ mod tests {
             interface: None,
             dependencies: None,
             policy: None,
+            permission_profile: None,
             permissions: None,
-            path: PathBuf::from(path),
+            path_to_skills_md: PathBuf::from(path),
             scope: codex_protocol::protocol::SkillScope::User,
         }
     }
@@ -749,93 +506,6 @@ mod tests {
         connector_slug_counts: &HashMap<String, usize>,
     ) -> Vec<SkillMetadata> {
         collect_explicit_skill_mentions(inputs, skills, disabled_paths, connector_slug_counts)
-    }
-
-    #[test]
-    fn parses_skill_scoped_hooks_from_frontmatter() {
-        let skill = make_skill("ralph-wiggum", "/tmp/skill/SKILL.md");
-        let contents = r#"---
-name: ralph-wiggum
-description: Loop enforcer
-hooks:
-  Stop:
-    - hooks:
-        - type: command
-          command: "echo hi"
----
-
-Body
-"#;
-        let mut warnings = Vec::new();
-        let hooks =
-            parse_skill_scoped_hooks(&skill, contents, &mut warnings).expect("hooks config");
-
-        assert_eq!(warnings, Vec::<String>::new());
-        assert_eq!(hooks.stop.len(), 1);
-        assert_eq!(hooks.stop[0].handler_type, HookHandlerType::Command);
-        assert_eq!(hooks.stop[0].matcher.matcher, None);
-
-        #[cfg(windows)]
-        assert_eq!(
-            hooks.stop[0].command.first().map(String::as_str),
-            Some("cmd")
-        );
-        #[cfg(not(windows))]
-        assert_eq!(
-            hooks.stop[0].command.first().map(String::as_str),
-            Some("sh")
-        );
-    }
-
-    #[test]
-    fn unknown_hook_events_are_warned_and_ignored() {
-        let skill = make_skill("weird-skill", "/tmp/skill/SKILL.md");
-        let contents = r#"---
-name: weird-skill
-description: Weird
-hooks:
-  NotARealEvent:
-    - hooks:
-        - type: command
-          command: "echo hi"
----
-
-Body
-"#;
-        let mut warnings = Vec::new();
-        let hooks = parse_skill_scoped_hooks(&skill, contents, &mut warnings);
-
-        assert!(hooks.is_none());
-        assert_eq!(warnings.len(), 1);
-        assert!(warnings[0].contains("unknown event"));
-    }
-
-    #[test]
-    fn parses_skill_hook_matchers() {
-        let skill = make_skill("secure-ops", "/tmp/skill/SKILL.md");
-        let contents = r#"---
-name: secure-ops
-description: Secure operations
-hooks:
-  PreToolUse:
-    - matcher: "Bash"
-      hooks:
-        - type: command
-          command: "echo hi"
----
-
-Body
-"#;
-        let mut warnings = Vec::new();
-        let hooks =
-            parse_skill_scoped_hooks(&skill, contents, &mut warnings).expect("hooks config");
-
-        assert_eq!(warnings, Vec::<String>::new());
-        assert_eq!(hooks.pre_tool_use.len(), 1);
-        assert_eq!(
-            hooks.pre_tool_use[0].matcher.matcher.as_deref(),
-            Some("Bash")
-        );
     }
 
     #[test]
