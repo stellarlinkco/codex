@@ -5640,6 +5640,17 @@ pub(crate) async fn run_turn(
                         }
                         sess.record_hook_context(&turn_context, &additional_context)
                             .await;
+                        if token_limit_reached
+                            && run_auto_compact(
+                                &sess,
+                                &turn_context,
+                                InitialContextInjection::BeforeLastUserMessage,
+                            )
+                            .await
+                            .is_err()
+                        {
+                            return None;
+                        }
                         continue;
                     }
                     sess.record_hook_context(&turn_context, &additional_context)

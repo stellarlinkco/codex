@@ -102,10 +102,14 @@ or:
 
 `ok: false` is treated as a blocking decision (for blockable events).
 
+If a prompt hook times out, the request fails, or the response is not valid JSON, Codex records the error and continues (non-blocking).
+
 ### Agent hooks (`type: agent`)
 
 Agent hooks spawn a verifier subagent that can use tools (Read/Grep/Glob/etc) and must return a
 final JSON-only message with the same `{ok, reason}` shape as prompt hooks.
+
+If an agent hook times out, fails to spawn, or returns invalid JSON, Codex records the error and continues (non-blocking).
 
 ## Matchers
 
