@@ -383,11 +383,42 @@ impl ModelsManager {
     ) -> Self {
         let cache_path = codex_home.join(MODEL_CACHE_FILE);
         let cache_manager = ModelsCacheManager::new(cache_path, DEFAULT_MODEL_CACHE_TTL);
+        let mut remote_models = Self::load_remote_models_from_file()
+            .unwrap_or_else(|err| panic!("failed to load bundled models.json: {err}"));
+        let test_tools = vec![
+            "test_sync_tool".to_string(),
+            "read_file".to_string(),
+            "grep_files".to_string(),
+            "list_dir".to_string(),
+        ];
+
+        if let Some(base) = remote_models
+            .iter()
+            .find(|model| model.slug == "gpt-5-codex")
+            .cloned()
+        {
+            let slug = "test-gpt-5-codex".to_string();
+            let mut test_model = base;
+            test_model.slug.clone_from(&slug);
+            test_model.display_name = slug;
+            test_model.experimental_supported_tools = test_tools.clone();
+            remote_models.push(test_model);
+        }
+
+        if let Some(base) = remote_models
+            .iter()
+            .find(|model| model.slug == "gpt-5.1-codex")
+            .cloned()
+        {
+            let slug = "test-gpt-5.1-codex".to_string();
+            let mut test_model = base;
+            test_model.slug.clone_from(&slug);
+            test_model.display_name = slug;
+            test_model.experimental_supported_tools = test_tools;
+            remote_models.push(test_model);
+        }
         Self {
-            remote_models: RwLock::new(
-                Self::load_remote_models_from_file()
-                    .unwrap_or_else(|err| panic!("failed to load bundled models.json: {err}")),
-            ),
+            remote_models: RwLock::new(remote_models),
             catalog_mode: CatalogMode::Default,
             collaboration_modes_config: CollaborationModesConfig::default(),
             auth_manager,
