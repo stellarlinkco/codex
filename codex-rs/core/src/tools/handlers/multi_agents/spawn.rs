@@ -33,6 +33,11 @@ pub async fn handle(
     arguments: String,
 ) -> Result<ToolOutput, FunctionCallError> {
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
+    if let Some(team_id) = find_team_for_member(session.conversation_id)? {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "spawn_agent is disabled for agent team teammates (team `{team_id}`). Ask the team lead to spawn agents."
+        )));
+    }
     let role_name = args
         .agent_type
         .as_deref()

@@ -46,6 +46,11 @@ pub async fn handle(
         team_id: provided_team_id,
         members: requested_members,
     } = parse_arguments(&arguments)?;
+    if let Some(team_id) = find_team_for_member(session.conversation_id)? {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "spawn_team is disabled for agent team teammates (team `{team_id}`). Ask the team lead to spawn teams."
+        )));
+    }
     if requested_members.is_empty() {
         return Err(FunctionCallError::RespondToModel(
             "members must be non-empty".to_string(),

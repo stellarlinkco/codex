@@ -29,6 +29,7 @@ use crate::features::FEATURES;
 use crate::features::Feature;
 use crate::features::Features;
 use crate::features::maybe_push_unstable_features_warning;
+use crate::hooks_executor::HooksNonCommandExecutor;
 #[cfg(test)]
 use crate::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use crate::models_manager::manager::ModelsManager;
@@ -58,6 +59,8 @@ use chrono::Utc;
 use codex_hooks::CommandHooksConfig;
 use codex_hooks::HookEvent;
 use codex_hooks::HookPayload;
+use codex_hooks::HookResponse;
+use codex_hooks::HookResult;
 use codex_hooks::HookResultControl;
 use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
@@ -116,6 +119,7 @@ use serde_json;
 use serde_json::Value;
 use tokio::sync::Mutex;
 use tokio::sync::RwLock;
+use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -1036,10 +1040,68 @@ impl Session {
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(FileWatcherEvent::SkillsChanged { .. }) => {
+                    Ok(FileWatcherEvent::SkillsChanged { paths }) => {
                         let Some(sess) = weak_sess.upgrade() else {
                             break;
                         };
+                        let (cwd, permission_mode) = {
+                            let state = sess.state.lock().await;
+                            (
+                                state.session_configuration.cwd.clone(),
+                                state
+                                    .session_configuration
+                                    .approval_policy
+                                    .value()
+                                    .to_string(),
+                            )
+                        };
+                        let hook_outcomes = sess
+                            .hooks()
+                            .dispatch(HookPayload {
+                                session_id: sess.conversation_id,
+                                transcript_path: sess.transcript_path().await,
+                                cwd,
+                                permission_mode,
+                                hook_event: HookEvent::ConfigChange {
+                                    source: "skills".to_string(),
+                                    file_path: paths.into_iter().next(),
+                                },
+                            })
+                            .await;
+                        let mut blocked = None;
+                        let mut additional_context = Vec::new();
+                        for hook_outcome in hook_outcomes {
+                            let hook_name = hook_outcome.hook_name;
+                            let result = hook_outcome.result;
+                            if let Some(error) = result.error.as_deref() {
+                                warn!(
+                                    hook_name = %hook_name,
+                                    error,
+                                    "config_change hook failed; continuing"
+                                );
+                            }
+                            additional_context.extend(result.additional_context);
+                            if let HookResultControl::Block { reason } = result.control {
+                                blocked = Some((hook_name, reason));
+                                break;
+                            }
+                        }
+                        if !additional_context.is_empty() {
+                            let mut guard = sess.services.pending_hook_context.lock().await;
+                            guard.extend(additional_context);
+                        }
+                        if let Some((hook_name, reason)) = blocked {
+                            let event = Event {
+                                id: sess.next_internal_sub_id(),
+                                msg: EventMsg::Warning(WarningEvent {
+                                    message: format!(
+                                        "config_change hook '{hook_name}' blocked skills update: {reason}"
+                                    ),
+                                }),
+                            };
+                            sess.send_event_raw(event).await;
+                            continue;
+                        }
                         let event = Event {
                             id: sess.next_internal_sub_id(),
                             msg: EventMsg::SkillsUpdateAvailable,
@@ -1048,6 +1110,43 @@ impl Session {
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                }
+            }
+        });
+    }
+
+    fn start_hook_async_results_listener(
+        self: &Arc<Self>,
+        mut rx: mpsc::UnboundedReceiver<HookResponse>,
+    ) {
+        let weak_sess = Arc::downgrade(self);
+        tokio::spawn(async move {
+            while let Some(hook_response) = rx.recv().await {
+                let Some(sess) = weak_sess.upgrade() else {
+                    break;
+                };
+
+                let HookResponse {
+                    hook_name,
+                    result:
+                        HookResult {
+                            mut additional_context,
+                            error,
+                            ..
+                        },
+                } = hook_response;
+
+                if let Some(error) = error.as_deref() {
+                    warn!(
+                        hook_name = %hook_name,
+                        error,
+                        "async hook failed; continuing"
+                    );
+                }
+
+                if !additional_context.is_empty() {
+                    let mut guard = sess.services.pending_hook_context.lock().await;
+                    guard.append(&mut additional_context);
                 }
             }
         });
@@ -1462,6 +1561,32 @@ impl Session {
                 (None, None)
             };
 
+        let model_client = ModelClient::new(
+            Some(Arc::clone(&auth_manager)),
+            conversation_id,
+            session_configuration.provider.clone(),
+            session_configuration.session_source.clone(),
+            config.model_verbosity,
+            ws_version_from_features(config.as_ref()),
+            config.features.enabled(Feature::EnableRequestCompression),
+            config.features.enabled(Feature::RuntimeMetrics),
+            Self::build_model_client_beta_features_header(config.as_ref()),
+        );
+
+        let (hook_async_results_tx, hook_async_results_rx) = mpsc::unbounded_channel();
+        let mut hooks = Hooks::new(HooksConfig {
+            command_hooks: command_hooks_for_config(config.as_ref()),
+        });
+        hooks.set_async_results_tx(hook_async_results_tx);
+        hooks.set_non_command_executor(Arc::new(HooksNonCommandExecutor {
+            model_client: model_client.clone(),
+            models_manager: Arc::clone(&models_manager),
+            otel_manager: otel_manager.clone(),
+            agent_control: agent_control.clone(),
+            config: Arc::clone(&config),
+            default_model: session_configuration.collaboration_mode.model().to_string(),
+        }));
+
         let services = SessionServices {
             // Initialize the MCP connection manager with an uninitialized
             // instance. It will be replaced with one created via
@@ -1483,9 +1608,7 @@ impl Session {
                 Arc::clone(&config),
                 Arc::clone(&auth_manager),
             ),
-            hooks: Hooks::new(HooksConfig {
-                command_hooks: command_hooks_for_config(config.as_ref()),
-            }),
+            hooks,
             pending_hook_context: Mutex::new(Vec::new()),
             rollout: Mutex::new(rollout_recorder),
             user_shell: Arc::new(default_shell),
@@ -1505,17 +1628,7 @@ impl Session {
             network_proxy,
             network_approval: Arc::clone(&network_approval),
             state_db: state_db_ctx.clone(),
-            model_client: ModelClient::new(
-                Some(Arc::clone(&auth_manager)),
-                conversation_id,
-                session_configuration.provider.clone(),
-                session_configuration.session_source.clone(),
-                config.model_verbosity,
-                ws_version_from_features(config.as_ref()),
-                config.features.enabled(Feature::EnableRequestCompression),
-                config.features.enabled(Feature::RuntimeMetrics),
-                Self::build_model_client_beta_features_header(config.as_ref()),
-            ),
+            model_client,
         };
         let js_repl = Arc::new(JsReplHandle::with_node_path(
             config.js_repl_node_path.clone(),
@@ -1567,6 +1680,7 @@ impl Session {
         }
 
         // Start the watcher after SessionConfigured so it cannot emit earlier events.
+        sess.start_hook_async_results_listener(hook_async_results_rx);
         sess.start_file_watcher_listener();
         // Construct sandbox_state before MCP startup so it can be sent to each
         // MCP server immediately after it becomes ready (avoiding blocking).
@@ -3904,6 +4018,7 @@ impl Session {
 
 async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiver<Submission>) {
     // To break out of this loop, send Op::Shutdown.
+    let mut session_end_reason = None;
     while let Ok(sub) = rx_sub.recv().await {
         debug!(?sub, "Submission");
         match sub.op.clone() {
@@ -4062,6 +4177,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
             }
             Op::Shutdown => {
                 if handlers::shutdown(&sess, sub.id.clone()).await {
+                    session_end_reason = Some("shutdown".to_string());
                     break;
                 }
             }
@@ -4069,6 +4185,46 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                 handlers::review(&sess, &config, sub.id.clone(), review_request).await;
             }
             _ => {} // Ignore unknown ops; enum is non_exhaustive to allow extensions.
+        }
+    }
+    let reason = session_end_reason.unwrap_or_else(|| "submission_channel_closed".to_string());
+    let (cwd, permission_mode) = {
+        let state = sess.state.lock().await;
+        (
+            state.session_configuration.cwd.clone(),
+            state
+                .session_configuration
+                .approval_policy
+                .value()
+                .to_string(),
+        )
+    };
+    let hook_outcomes = sess
+        .hooks()
+        .dispatch(HookPayload {
+            session_id: sess.conversation_id,
+            transcript_path: sess.transcript_path().await,
+            cwd,
+            permission_mode,
+            hook_event: HookEvent::SessionEnd { reason },
+        })
+        .await;
+    for hook_outcome in hook_outcomes {
+        let hook_name = hook_outcome.hook_name;
+        let result = hook_outcome.result;
+        if let Some(error) = result.error.as_deref() {
+            warn!(
+                hook_name = %hook_name,
+                error,
+                "session_end hook failed; continuing"
+            );
+        }
+        if let HookResultControl::Block { reason } = result.control {
+            warn!(
+                hook_name = %hook_name,
+                reason,
+                "session_end hook returned a blocking decision; ignoring"
+            );
         }
     }
     debug!("Agent loop exited");
@@ -5064,6 +5220,34 @@ fn errors_to_info(errors: &[SkillError]) -> Vec<SkillErrorInfo> {
         .collect()
 }
 
+struct ScopedHooksGuard {
+    hooks: Hooks,
+    scope_id: String,
+}
+
+impl Drop for ScopedHooksGuard {
+    fn drop(&mut self) {
+        self.hooks.remove_scoped_hooks(&self.scope_id);
+    }
+}
+
+fn install_skill_scoped_hooks(
+    hooks: &Hooks,
+    turn_id: &str,
+    skill_scoped_hooks: Vec<crate::skills::injection::SkillScopedHooks>,
+) -> Vec<ScopedHooksGuard> {
+    let mut guards = Vec::with_capacity(skill_scoped_hooks.len());
+    for scoped in skill_scoped_hooks {
+        let scope_id = format!("{turn_id}:skill:{}", scoped.skill_name);
+        hooks.insert_scoped_command_hooks(scope_id.clone(), scoped.hooks);
+        guards.push(ScopedHooksGuard {
+            hooks: hooks.clone(),
+            scope_id,
+        });
+    }
+    guards
+}
+
 /// Takes a user message as input and runs a loop where, at each sampling request, the model
 /// replies with either:
 ///
@@ -5176,6 +5360,7 @@ pub(crate) async fn run_turn(
     let SkillInjections {
         items: skill_items,
         warnings: skill_warnings,
+        scoped_hooks: skill_scoped_hooks,
     } = build_skill_injections(
         &mentioned_skills,
         Some(&otel_manager),
@@ -5183,6 +5368,9 @@ pub(crate) async fn run_turn(
         tracking.clone(),
     )
     .await;
+
+    let _scoped_hook_guards =
+        install_skill_scoped_hooks(sess.hooks(), &turn_context.sub_id, skill_scoped_hooks);
 
     for message in skill_warnings {
         sess.send_event(&turn_context, EventMsg::Warning(WarningEvent { message }))
@@ -5240,6 +5428,7 @@ pub(crate) async fn run_turn(
     // many turns, from the perspective of the user, it is a single turn.
     let turn_diff_tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
     let mut server_model_warning_emitted_for_turn = false;
+    let mut stop_hook_active = false;
 
     // `ModelClientSession` is turn-scoped and caches WebSocket + sticky routing state, so we reuse
     // one instance across retries within this turn.
@@ -5401,7 +5590,7 @@ pub(crate) async fn run_turn(
                             permission_mode: turn_context.approval_policy.value().to_string(),
                             hook_event: if is_subagent_stop {
                                 HookEvent::SubagentStop {
-                                    stop_hook_active: false,
+                                    stop_hook_active,
                                     agent_id: sess.conversation_id.to_string(),
                                     agent_type: turn_context.session_source.to_string(),
                                     agent_transcript_path: transcript_path,
@@ -5409,7 +5598,7 @@ pub(crate) async fn run_turn(
                                 }
                             } else {
                                 HookEvent::Stop {
-                                    stop_hook_active: false,
+                                    stop_hook_active,
                                     last_assistant_message: last_agent_message.clone(),
                                 }
                             },
@@ -5417,6 +5606,7 @@ pub(crate) async fn run_turn(
                         .await;
 
                     let mut additional_context = Vec::new();
+                    let mut blocked = None;
                     for hook_outcome in hook_outcomes {
                         let hook_name = hook_outcome.hook_name;
                         let result = hook_outcome.result;
@@ -5428,17 +5618,30 @@ pub(crate) async fn run_turn(
                                 "stop hook failed; continuing"
                             );
                         }
-                        if let HookResultControl::Block { reason } = result.control {
-                            warn!(
-                                turn_id = %turn_context.sub_id,
-                                hook_name = %hook_name,
-                                reason,
-                                "stop hook returned a blocking decision; ignoring"
-                            );
-                        }
                         additional_context.extend(result.additional_context);
+
+                        if let HookResultControl::Block { reason } = result.control {
+                            blocked = Some((hook_name, reason));
+                            break;
+                        }
                     }
 
+                    if let Some((hook_name, reason)) = blocked {
+                        stop_hook_active = true;
+                        warn!(
+                            turn_id = %turn_context.sub_id,
+                            hook_name = %hook_name,
+                            reason = %reason,
+                            "stop hook blocked stop; continuing"
+                        );
+                        let reason = reason.trim();
+                        if !reason.is_empty() {
+                            additional_context.push(reason.to_string());
+                        }
+                        sess.record_hook_context(&turn_context, &additional_context)
+                            .await;
+                        continue;
+                    }
                     sess.record_hook_context(&turn_context, &additional_context)
                         .await;
                     break;

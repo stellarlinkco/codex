@@ -931,6 +931,24 @@ fn get_team_record(
         .ok_or_else(|| FunctionCallError::RespondToModel(format!("team `{team_id}` not found")))
 }
 
+fn find_team_for_member(member_thread_id: ThreadId) -> Result<Option<String>, FunctionCallError> {
+    let registry = team_registry()
+        .lock()
+        .map_err(|_| FunctionCallError::Fatal("team registry poisoned".to_string()))?;
+    for teams in registry.values() {
+        for (team_id, record) in teams {
+            if record
+                .members
+                .iter()
+                .any(|member| member.agent_id == member_thread_id)
+            {
+                return Ok(Some(team_id.clone()));
+            }
+        }
+    }
+    Ok(None)
+}
+
 fn insert_team_record(
     sender_thread_id: ThreadId,
     team_id: String,
@@ -944,6 +962,11 @@ fn insert_team_record(
         return Err(FunctionCallError::RespondToModel(format!(
             "team `{team_id}` already exists"
         )));
+    }
+    if !teams.is_empty() {
+        return Err(FunctionCallError::RespondToModel(
+            "one team per session: clean up the current team before starting a new one".to_string(),
+        ));
     }
     teams.insert(team_id, record);
     Ok(())

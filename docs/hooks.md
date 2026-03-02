@@ -220,7 +220,8 @@ Output precedence when multiple keys are present:
 - Permission decisions prefer `hookSpecificOutput.permissionDecision` over top-level `permissionDecision`.
 - `continue=false` takes precedence over any decision fields.
 - Block reason:
-  - For `user_prompt_submit`, `stop`, `subagent_stop`, `config_change`: `reason` → `stopReason` → fallback.
+  - If blocked by `continue=false`: `stopReason` → `reason` → fallback.
+  - For `user_prompt_submit`, `stop`, `subagent_stop`, `config_change` (decision-based blocking): `reason` → `stopReason` → fallback.
   - For `pre_tool_use`:
     - If blocked by `decision`: `reason` → `stopReason` → `hookSpecificOutput.permissionDecisionReason` → fallback.
     - If blocked by `permissionDecision`: `hookSpecificOutput.permissionDecisionReason` → `permissionDecisionReason` → `reason` → `stopReason` → fallback.

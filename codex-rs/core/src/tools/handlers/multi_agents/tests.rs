@@ -2214,6 +2214,83 @@ async fn team_cleanup_fails_when_teammate_is_active() {
         .await;
 }
 
+#[test]
+fn insert_team_record_enforces_one_team_per_session() {
+    let lead_thread_id = ThreadId::new();
+    let member_thread_id = ThreadId::new();
+    let record = TeamRecord {
+        members: vec![TeamMember {
+            name: "worker".to_string(),
+            agent_id: member_thread_id,
+            agent_type: None,
+        }],
+        created_at: 0,
+    };
+    insert_team_record(lead_thread_id, "team-1".to_string(), record.clone())
+        .expect("first insert should succeed");
+    let err = insert_team_record(lead_thread_id, "team-2".to_string(), record)
+        .expect_err("second insert should fail");
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("expected RespondToModel error");
+    };
+    assert!(message.contains("one team per session"));
+    remove_team_record(lead_thread_id, "team-1").expect("cleanup should succeed");
+}
+
+#[tokio::test]
+async fn spawn_is_rejected_for_agent_team_teammates() {
+    let (mut session, turn) = make_session_and_context().await;
+    let lead_thread_id = session.conversation_id;
+    let member_thread_id = ThreadId::new();
+    insert_team_record(
+        lead_thread_id,
+        "team-1".to_string(),
+        TeamRecord {
+            members: vec![TeamMember {
+                name: "worker".to_string(),
+                agent_id: member_thread_id,
+                agent_type: None,
+            }],
+            created_at: 0,
+        },
+    )
+    .expect("insert team record should succeed");
+
+    session.conversation_id = member_thread_id;
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let spawn_agent_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_agent",
+        function_payload(json!({"message": "do work"})),
+    );
+    let Err(err) = MultiAgentHandler.handle(spawn_agent_invocation).await else {
+        panic!("spawn_agent should fail for agent team teammates");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("expected RespondToModel error");
+    };
+    assert!(message.contains("spawn_agent is disabled for agent team teammates"));
+
+    let spawn_team_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "spawn_team",
+        function_payload(json!({"members": [{"name": "worker", "task": "work"}]})),
+    );
+    let Err(err) = MultiAgentHandler.handle(spawn_team_invocation).await else {
+        panic!("spawn_team should fail for agent team teammates");
+    };
+    let FunctionCallError::RespondToModel(message) = err else {
+        panic!("expected RespondToModel error");
+    };
+    assert!(message.contains("spawn_team is disabled for agent team teammates"));
+
+    remove_team_record(lead_thread_id, "team-1").expect("cleanup should succeed");
+}
+
 #[tokio::test]
 async fn spawn_team_wait_team_and_close_team_flow() {
     let (mut session, turn) = make_session_and_context().await;
