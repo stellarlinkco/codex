@@ -430,7 +430,11 @@ fn build_anthropic_request(prompt: &Prompt, model_info: &ModelInfo) -> Result<Me
                 ));
             }
             ResponseItem::CustomToolCallOutput { call_id, output } => {
-                messages.push(anthropic_tool_result_message(call_id, output, false));
+                messages.push(anthropic_tool_result_message(
+                    call_id,
+                    anthropic_tool_result_text(&output),
+                    output.success == Some(false),
+                ));
             }
             _ => {}
         }

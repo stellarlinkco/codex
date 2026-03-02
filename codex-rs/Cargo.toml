@@ -69,7 +69,7 @@ members = [
 resolver = "2"
 
 [workspace.package]
-version = "0.0.0"
+version = "1.2.2"
 # Track the edition for all workspace crates in one place. Individual
 # crates can still override this value, but keeping it here means new
 # crates created with `cargo new -w ...` automatically inherit the 2024
@@ -115,6 +115,7 @@ codex-protocol = { path = "protocol" }
 codex-responses-api-proxy = { path = "responses-api-proxy" }
 codex-rmcp-client = { path = "rmcp-client" }
 codex-secrets = { path = "secrets" }
+codex-serve = { path = "serve" }
 codex-shell-command = { path = "shell-command" }
 codex-shell-escalation = { path = "shell-escalation" }
 codex-skills = { path = "skills" }
@@ -148,6 +149,7 @@ mcp_test_support = { path = "mcp-server/tests/common" }
 age = "0.11.1"
 allocative = "0.3.3"
 ansi-to-tui = "7.0.0"
+anthropic-sdk-rs = "0.1.2"
 anyhow = "1"
 arboard = { version = "3", features = ["wayland-data-control"] }
 assert_cmd = "2"
@@ -192,6 +194,7 @@ indexmap = "2.12.0"
 insta = "1.46.3"
 inventory = "0.3.19"
 itertools = "0.14.0"
+jsonschema = "0.18.3"
 keyring = { version = "3.6", default-features = false }
 landlock = "0.4.4"
 lazy_static = "1"

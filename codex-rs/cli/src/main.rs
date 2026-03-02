@@ -22,6 +22,7 @@ use codex_exec::Command as ExecCommand;
 use codex_exec::ReviewArgs;
 use codex_execpolicy::ExecPolicyCheckCommand;
 use codex_responses_api_proxy::Args as ResponsesApiProxyArgs;
+use codex_serve::Cli as ServeCli;
 use codex_state::StateRuntime;
 use codex_state::state_db_path;
 use codex_tui::AppExitInfo;
@@ -86,6 +87,9 @@ enum Subcommand {
     /// Run Codex non-interactively.
     #[clap(visible_alias = "e")]
     Exec(ExecCli),
+
+    /// Start Codex as a Web UI server (HTTP+SSE).
+    Serve(ServeCli),
 
     /// Run a code review non-interactively.
     Review(ReviewArgs),
@@ -583,6 +587,13 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
                 root_config_overrides.clone(),
             );
             codex_exec::run_main(exec_cli, arg0_paths.clone()).await?;
+        }
+        Some(Subcommand::Serve(mut serve_cli)) => {
+            prepend_config_flags(
+                &mut serve_cli.config_overrides,
+                root_config_overrides.clone(),
+            );
+            codex_serve::run_main(serve_cli, arg0_paths.codex_linux_sandbox_exe.clone()).await?;
         }
         Some(Subcommand::Review(review_args)) => {
             let mut exec_cli = ExecCli::try_parse_from(["codex", "exec"])?;

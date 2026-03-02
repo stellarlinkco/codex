@@ -18,6 +18,7 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+anthropic-sdk-rs = { workspace = true }
 arc-swap = "1.8.2"
 async-channel = { workspace = true }
 async-trait = { workspace = true }
@@ -62,6 +63,7 @@ futures = { workspace = true }
 http = { workspace = true }
 iana-time-zone = { workspace = true }
 indexmap = { workspace = true }
+jsonschema = { workspace = true }
 keyring = { workspace = true, features = ["crypto-rust"] }
 libc = { workspace = true }
 notify = { workspace = true }
