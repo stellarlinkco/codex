@@ -757,7 +757,6 @@ mod tests {
             dependencies: None,
             policy: None,
             permission_profile: None,
-            permissions: None,
             path_to_skills_md: PathBuf::from("/tmp/a/SKILL.md"),
             scope: SkillScope::User,
         };
@@ -769,7 +768,6 @@ mod tests {
             dependencies: None,
             policy: None,
             permission_profile: None,
-            permissions: None,
             path_to_skills_md: PathBuf::from("/tmp/b/SKILL.md"),
             scope: SkillScope::User,
         };
