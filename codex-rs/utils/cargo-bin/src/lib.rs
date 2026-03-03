@@ -61,13 +61,26 @@ pub fn cargo_bin(name: &str) -> Result<PathBuf, CargoBinError> {
                     }
                     None => workspace_root.join("target"),
                 };
+                let file_name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
+
+                // Under `cargo test` / `cargo nextest`, the test binary lives under
+                // `<target-dir>/<...>/<profile>/deps/<test-binary>`. Prefer resolving binaries
+                // relative to that directory so custom profiles and `--target` layouts work.
+                if let Ok(exe) = std::env::current_exe()
+                    && let Some(profile_dir) = exe.parent().and_then(|parent| parent.parent())
+                {
+                    let path = profile_dir.join(&file_name);
+                    if path.exists() {
+                        return Ok(path);
+                    }
+                }
+
                 let profile_dir = if cfg!(debug_assertions) {
                     "debug"
                 } else {
                     "release"
                 };
-                let file_name = format!("{name}{}", std::env::consts::EXE_SUFFIX);
-                let path = target_dir.join(profile_dir).join(file_name);
+                let path = target_dir.join(profile_dir).join(&file_name);
                 if path.exists() {
                     return Ok(path);
                 }
