@@ -521,6 +521,7 @@ jobs:
             # package set below. Pre-build them so `cargo_bin(...)` can find the executables.
             cargo build --all-features --target ${{ matrix.target }} --profile ci-test --bins \
               -p codex-exec \
+              -p codex-execve-wrapper \
               -p codex-linux-sandbox \
               -p codex-rmcp-client
 
