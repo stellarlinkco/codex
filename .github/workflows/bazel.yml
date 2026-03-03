@@ -160,6 +160,14 @@ jobs:
             --build_metadata=VISIBILITY=PUBLIC
           )
 
+          codex_cli_version="$(grep -m1 '^version' codex-rs/Cargo.toml \
+            | sed -E 's/version *= *"([^"]+)".*/\1/')"
+          if [[ -z "${codex_cli_version}" ]]; then
+            echo "Failed to parse codex-rs/Cargo.toml version" >&2
+            exit 1
+          fi
+          bazel_args+=("--action_env=CODEX_CLI_VERSION=${codex_cli_version}")
+
           if [[ "${RUNNER_OS:-}" != "Windows" ]]; then
             # Bazel test sandboxes on macOS may resolve an older Homebrew `node`
             # before the `actions/setup-node` runtime on PATH.
