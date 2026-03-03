@@ -12,6 +12,7 @@ use codex_core::config::ConfigBuilder;
 use codex_core::config::ConfigOverrides;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use regex_lite::Regex;
+use std::io::Read;
 use std::path::PathBuf;
 
 pub mod apps_test_server;
@@ -127,19 +128,75 @@ pub fn fetch_dotslash_file(
     if let Some(dotslash_cache) = dotslash_cache {
         command.env("DOTSLASH_CACHE", dotslash_cache);
     }
-    let output = command.output().with_context(|| {
+    command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    let mut child = command.spawn().with_context(|| {
         format!(
             "failed to run dotslash to fetch resource {}",
             dotslash_file.display()
         )
     })?;
+    let mut stdout = child
+        .stdout
+        .take()
+        .context("dotslash stdout should be captured")?;
+    let mut stderr = child
+        .stderr
+        .take()
+        .context("dotslash stderr should be captured")?;
+
+    let stdout_handle = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        stdout.read_to_end(&mut buffer).map(|_| buffer)
+    });
+    let stderr_handle = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        stderr.read_to_end(&mut buffer).map(|_| buffer)
+    });
+
+    let timeout = std::time::Duration::from_secs(20);
+    let start = std::time::Instant::now();
+    let mut timed_out = false;
+    let status = loop {
+        if let Some(status) = child
+            .try_wait()
+            .context("failed to poll dotslash fetch status")?
+        {
+            break status;
+        }
+        if start.elapsed() >= timeout {
+            timed_out = true;
+            let _ = child.kill();
+            break child
+                .wait()
+                .context("failed to reap dotslash fetch after timeout")?;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    };
+    let stdout = stdout_handle
+        .join()
+        .expect("dotslash stdout reader thread should not panic")
+        .context("failed to read dotslash stdout")?;
+    let stderr = stderr_handle
+        .join()
+        .expect("dotslash stderr reader thread should not panic")
+        .context("failed to read dotslash stderr")?;
+
+    if timed_out {
+        anyhow::bail!(
+            "dotslash fetch timed out after {}s for {}",
+            timeout.as_secs(),
+            dotslash_file.display()
+        );
+    }
     ensure!(
-        output.status.success(),
+        status.success(),
         "dotslash fetch failed for {}: {}",
         dotslash_file.display(),
-        String::from_utf8_lossy(&output.stderr).trim()
+        String::from_utf8_lossy(&stderr).trim()
     );
-    let fetched_path = String::from_utf8(output.stdout)
+    let fetched_path = String::from_utf8(stdout)
         .context("dotslash fetch output was not utf8")?
         .trim()
         .to_string();
