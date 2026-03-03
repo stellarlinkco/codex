@@ -379,6 +379,7 @@ pub struct MemoriesToml {
     /// When `false`, skip injecting memory usage instructions into developer prompts.
     pub use_memories: Option<bool>,
     /// Maximum number of recent raw memories retained for global consolidation.
+    #[serde(alias = "max_raw_memories_for_global")]
     pub max_raw_memories_for_consolidation: Option<usize>,
     /// Maximum number of days since a memory was last used before it becomes ineligible for phase 2 selection.
     pub max_unused_days: Option<i64>,
@@ -389,8 +390,10 @@ pub struct MemoriesToml {
     /// Minimum idle time between last thread activity and memory creation (hours). > 12h recommended.
     pub min_rollout_idle_hours: Option<i64>,
     /// Model used for thread summarisation.
+    #[serde(alias = "phase_1_model")]
     pub extract_model: Option<String>,
     /// Model used for memory consolidation.
+    #[serde(alias = "phase_2_model")]
     pub consolidation_model: Option<String>,
 }
 
