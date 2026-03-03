@@ -823,6 +823,14 @@ impl TurnContext {
 }
 
 fn local_time_context() -> (String, String) {
+    if let (Ok(current_date), Ok(timezone)) = (
+        std::env::var("CODEX_TEST_CURRENT_DATE"),
+        std::env::var("CODEX_TEST_TIMEZONE"),
+    ) && !current_date.is_empty()
+        && !timezone.is_empty()
+    {
+        return (current_date, timezone);
+    }
     match iana_time_zone::get_timezone() {
         Ok(timezone) => (Local::now().format("%Y-%m-%d").to_string(), timezone),
         Err(_) => (

@@ -49,6 +49,21 @@ fn configure_insta_workspace_root_for_snapshot_tests() {
     }
 }
 
+#[ctor]
+fn freeze_time_context_for_tests() {
+    if std::env::var_os("CODEX_TEST_CURRENT_DATE").is_some()
+        && std::env::var_os("CODEX_TEST_TIMEZONE").is_some()
+    {
+        return;
+    }
+
+    // Safety: this ctor runs at process startup before test threads begin.
+    unsafe {
+        std::env::set_var("CODEX_TEST_CURRENT_DATE", "2026-03-03");
+        std::env::set_var("CODEX_TEST_TIMEZONE", "Etc/UTC");
+    }
+}
+
 #[track_caller]
 pub fn assert_regex_match<'s>(pattern: &str, actual: &'s str) -> regex_lite::Captures<'s> {
     let regex = Regex::new(pattern).unwrap_or_else(|err| {
