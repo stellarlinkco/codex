@@ -4,6 +4,7 @@ use crate::CodexAuth;
 use crate::ThreadManager;
 use crate::built_in_model_providers;
 use crate::codex::make_session_and_context;
+use crate::codex::make_session_and_context_with_rx;
 use crate::config::types::ShellEnvironmentPolicy;
 use crate::function_tool::FunctionCallError;
 use crate::protocol::AskForApproval;
@@ -2542,6 +2543,105 @@ async fn spawn_team_wait_team_and_close_team_flow() {
         .is_err(),
         true
     );
+}
+
+#[tokio::test]
+async fn wait_team_any_includes_non_final_member_statuses_in_events() {
+    let (mut session, turn, rx) = make_session_and_context_with_rx().await;
+    let manager = thread_manager();
+    Arc::get_mut(&mut session)
+        .expect("session should be unique")
+        .services
+        .agent_control = manager.agent_control();
+
+    let spawn_output = MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_team",
+            function_payload(json!({
+                "members": [
+                    {"name": "planner", "task": "plan the work"},
+                    {"name": "worker", "task": "execute the task"}
+                ]
+            })),
+        ))
+        .await
+        .expect("spawn_team should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(spawn_content),
+        ..
+    } = spawn_output
+    else {
+        panic!("expected function output");
+    };
+    let spawn_result: SpawnTeamResult =
+        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
+
+    let planner = spawn_result
+        .members
+        .iter()
+        .find(|member| member.name == "planner")
+        .expect("planner should exist");
+    let worker = spawn_result
+        .members
+        .iter()
+        .find(|member| member.name == "worker")
+        .expect("worker should exist");
+    let planner_id = agent_id(&planner.agent_id).expect("valid planner agent id");
+    let worker_id = agent_id(&worker.agent_id).expect("valid worker agent id");
+
+    manager
+        .agent_control()
+        .shutdown_agent(planner_id)
+        .await
+        .expect("shutdown planner");
+
+    MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "wait_team",
+            function_payload(json!({
+                "team_id": spawn_result.team_id,
+                "mode": "any",
+                "timeout_ms": 1_000
+            })),
+        ))
+        .await
+        .expect("wait_team should succeed");
+
+    let waiting_end = timeout(Duration::from_secs(5), async {
+        loop {
+            let event = rx.recv().await.expect("event should be received");
+            match event.msg {
+                codex_protocol::protocol::EventMsg::CollabWaitingEnd(ev)
+                    if ev.call_id == "team/wait:call-1" =>
+                {
+                    break ev;
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .expect("wait_team should emit a CollabWaitingEnd event");
+
+    let worker_status = waiting_end
+        .agent_statuses
+        .iter()
+        .find(|entry| entry.thread_id == worker_id)
+        .map(|entry| &entry.status)
+        .expect("worker should have a status entry");
+    assert!(!matches!(worker_status, &AgentStatus::NotFound));
+
+    manager
+        .agent_control()
+        .shutdown_agent(worker_id)
+        .await
+        .expect("shutdown worker");
+    remove_team_record(session.conversation_id, &spawn_result.team_id)
+        .expect("team record should be removed");
 }
 
 #[tokio::test]

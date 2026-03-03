@@ -112,7 +112,20 @@ pub async fn handle(
         .iter()
         .cloned()
         .collect::<HashMap<_, _>>();
-    let agent_statuses = team_member_status_entries(&team.members, &final_statuses);
+    let mut reported_statuses = final_statuses.clone();
+    for member in &team.members {
+        if reported_statuses.contains_key(&member.agent_id) {
+            continue;
+        }
+        let status = session
+            .services
+            .agent_control
+            .get_status(member.agent_id)
+            .await;
+        reported_statuses.insert(member.agent_id, status);
+    }
+
+    let agent_statuses = team_member_status_entries(&team.members, &reported_statuses);
     session
         .send_event(
             &turn,
@@ -120,7 +133,7 @@ pub async fn handle(
                 sender_thread_id: session.conversation_id,
                 call_id: event_call_id,
                 agent_statuses,
-                statuses: final_statuses.clone(),
+                statuses: reported_statuses.clone(),
             }
             .into(),
         )
@@ -147,16 +160,10 @@ pub async fn handle(
 
     let mut member_statuses = Vec::with_capacity(team.members.len());
     for member in &team.members {
-        let state = match final_statuses.get(&member.agent_id) {
-            Some(state) => state.clone(),
-            None => {
-                session
-                    .services
-                    .agent_control
-                    .get_status(member.agent_id)
-                    .await
-            }
-        };
+        let state = reported_statuses
+            .get(&member.agent_id)
+            .cloned()
+            .unwrap_or(AgentStatus::NotFound);
         member_statuses.push(WaitTeamMemberStatus {
             name: member.name.clone(),
             agent_id: member.agent_id.to_string(),

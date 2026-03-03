@@ -438,7 +438,7 @@ fn status_summary_spans(status: &AgentStatus) -> Vec<Span<'static>> {
             spans
         }
         AgentStatus::Shutdown => vec![Span::from("Shutdown").dim()],
-        AgentStatus::NotFound => vec![Span::from("Not found").red()],
+        AgentStatus::NotFound => vec![Span::from("Unavailable").dim()],
     }
 }
 
@@ -459,6 +459,8 @@ mod tests {
             .expect("valid robie thread id");
         let bob_id = ThreadId::from_string("00000000-0000-0000-0000-000000000003")
             .expect("valid bob thread id");
+        let alice_id = ThreadId::from_string("00000000-0000-0000-0000-000000000004")
+            .expect("valid alice thread id");
 
         let spawn = spawn_end(CollabAgentSpawnEndEvent {
             call_id: "call-spawn".to_string(),
@@ -497,6 +499,7 @@ mod tests {
             AgentStatus::Completed(Some("39916800".to_string())),
         );
         statuses.insert(bob_id, AgentStatus::Errored("tool timeout".to_string()));
+        statuses.insert(alice_id, AgentStatus::NotFound);
         let finished = waiting_end(CollabWaitingEndEvent {
             sender_thread_id,
             call_id: "call-wait".to_string(),
@@ -512,6 +515,12 @@ mod tests {
                     agent_nickname: Some("Bob".to_string()),
                     agent_role: Some("worker".to_string()),
                     status: AgentStatus::Errored("tool timeout".to_string()),
+                },
+                CollabAgentStatusEntry {
+                    thread_id: alice_id,
+                    agent_nickname: Some("Alice".to_string()),
+                    agent_role: Some("worker".to_string()),
+                    status: AgentStatus::NotFound,
                 },
             ],
             statuses,
