@@ -2560,7 +2560,7 @@ consolidation_model = "gpt-5"
             extract_model: Some("gpt-5-mini".to_string()),
             consolidation_model: Some("gpt-5".to_string()),
         });
-        assert_eq!(expected_memories_toml.clone(), memories_cfg.memories);
+        assert_eq!(expected_memories_toml, memories_cfg.memories);
 
         let legacy_memories = r#"
 [memories]
