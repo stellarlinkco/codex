@@ -78,6 +78,7 @@ pub async fn handle(
         .await
         .map_err(FunctionCallError::RespondToModel)?;
     apply_member_model_overrides(&mut config, model_provider, model)?;
+    apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
     apply_spawn_agent_overrides(&mut config, child_depth);
     let worktree_lease = if use_worktree {
         match create_agent_worktree(&session, &turn).await {

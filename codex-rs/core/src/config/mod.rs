@@ -62,6 +62,7 @@ use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary;
 use codex_protocol::config_types::SandboxMode;
+use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::config_types::Verbosity;
 use codex_protocol::config_types::WebSearchMode;
@@ -185,6 +186,9 @@ pub struct Config {
 
     /// Optional override of model selection.
     pub model: Option<String>,
+
+    /// Effective service tier preference for new turns.
+    pub service_tier: Option<ServiceTier>,
 
     /// Model used specifically for review sessions.
     pub review_model: Option<String>,
@@ -436,12 +440,16 @@ pub struct Config {
     pub realtime_audio: RealtimeAudioConfig,
 
     /// Experimental / do not use. Overrides only the realtime conversation
-    /// websocket transport base URL (the `Op::RealtimeConversation` `/ws`
+    /// websocket transport base URL (the `Op::RealtimeConversation`
+    /// `/v1/realtime`
     /// connection) without changing normal provider HTTP requests.
     pub experimental_realtime_ws_base_url: Option<String>,
+    /// Experimental / do not use. Selects the realtime websocket model/snapshot
+    /// used for the `Op::RealtimeConversation` connection.
+    pub experimental_realtime_ws_model: Option<String>,
     /// Experimental / do not use. Overrides only the realtime conversation
-    /// websocket transport backend prompt (the `Op::RealtimeConversation`
-    /// `/ws` session.create backend_prompt) without changing normal prompts.
+    /// websocket transport instructions (the `Op::RealtimeConversation`
+    /// `/ws` session.update instructions) without changing normal prompts.
     pub experimental_realtime_ws_backend_prompt: Option<String>,
     /// When set, restricts ChatGPT login to a specific workspace identifier.
     pub forced_chatgpt_workspace_id: Option<String>,
@@ -1181,6 +1189,9 @@ pub struct ConfigToml {
     /// Optionally specify a personality for the model
     pub personality: Option<Personality>,
 
+    /// Optional explicit service tier preference for new turns.
+    pub service_tier: Option<ServiceTier>,
+
     /// Base URL for requests to ChatGPT (as opposed to the OpenAI API).
     pub chatgpt_base_url: Option<String>,
 
@@ -1189,12 +1200,16 @@ pub struct ConfigToml {
     pub audio: Option<RealtimeAudioToml>,
 
     /// Experimental / do not use. Overrides only the realtime conversation
-    /// websocket transport base URL (the `Op::RealtimeConversation` `/ws`
+    /// websocket transport base URL (the `Op::RealtimeConversation`
+    /// `/v1/realtime`
     /// connection) without changing normal provider HTTP requests.
     pub experimental_realtime_ws_base_url: Option<String>,
+    /// Experimental / do not use. Selects the realtime websocket model/snapshot
+    /// used for the `Op::RealtimeConversation` connection.
+    pub experimental_realtime_ws_model: Option<String>,
     /// Experimental / do not use. Overrides only the realtime conversation
-    /// websocket transport backend prompt (the `Op::RealtimeConversation`
-    /// `/ws` session.create backend_prompt) without changing normal prompts.
+    /// websocket transport instructions (the `Op::RealtimeConversation`
+    /// `/ws` session.update instructions) without changing normal prompts.
     pub experimental_realtime_ws_backend_prompt: Option<String>,
     pub projects: Option<HashMap<String, ProjectConfig>>,
 
@@ -1551,6 +1566,7 @@ pub struct ConfigOverrides {
     pub approval_policy: Option<AskForApproval>,
     pub sandbox_mode: Option<SandboxMode>,
     pub model_provider: Option<String>,
+    pub service_tier: Option<Option<ServiceTier>>,
     pub config_profile: Option<String>,
     pub codex_linux_sandbox_exe: Option<PathBuf>,
     pub main_execve_wrapper_exe: Option<PathBuf>,
@@ -1681,6 +1697,7 @@ impl Config {
             approval_policy: approval_policy_override,
             sandbox_mode,
             model_provider,
+            service_tier: service_tier_override,
             config_profile: config_profile_key,
             codex_linux_sandbox_exe,
             main_execve_wrapper_exe,
@@ -1941,6 +1958,16 @@ impl Config {
         let forced_login_method = cfg.forced_login_method;
 
         let model = model.or(config_profile.model).or(cfg.model);
+        let service_tier = if features.enabled(Feature::FastMode) {
+            service_tier_override.unwrap_or_else(|| {
+                config_profile
+                    .service_tier
+                    .or(cfg.service_tier)
+                    .filter(|tier| matches!(tier, ServiceTier::Fast))
+            })
+        } else {
+            None
+        };
 
         let compact_prompt = compact_prompt.or(cfg.compact_prompt).and_then(|value| {
             let trimmed = value.trim();
@@ -2087,6 +2114,7 @@ impl Config {
 
         let config = Self {
             model,
+            service_tier,
             review_model,
             model_context_window: cfg.model_context_window,
             model_auto_compact_token_limit: cfg.model_auto_compact_token_limit,
@@ -2183,6 +2211,7 @@ impl Config {
                     speaker: audio.speaker,
                 }),
             experimental_realtime_ws_base_url: cfg.experimental_realtime_ws_base_url,
+            experimental_realtime_ws_model: cfg.experimental_realtime_ws_model,
             experimental_realtime_ws_backend_prompt: cfg.experimental_realtime_ws_backend_prompt,
             forced_chatgpt_workspace_id,
             forced_login_method,
@@ -2506,29 +2535,31 @@ persistence = "none"
 
         let memories = r#"
 [memories]
+no_memories_if_mcp_or_web_search = true
 generate_memories = false
 use_memories = false
-max_raw_memories_for_global = 512
+max_raw_memories_for_consolidation = 512
 max_unused_days = 21
 max_rollout_age_days = 42
 max_rollouts_per_startup = 9
 min_rollout_idle_hours = 24
-phase_1_model = "gpt-5-mini"
-phase_2_model = "gpt-5"
+extract_model = "gpt-5-mini"
+consolidation_model = "gpt-5"
 "#;
         let memories_cfg =
             toml::from_str::<ConfigToml>(memories).expect("TOML deserialization should succeed");
         assert_eq!(
             Some(MemoriesToml {
+                no_memories_if_mcp_or_web_search: Some(true),
                 generate_memories: Some(false),
                 use_memories: Some(false),
-                max_raw_memories_for_global: Some(512),
+                max_raw_memories_for_consolidation: Some(512),
                 max_unused_days: Some(21),
                 max_rollout_age_days: Some(42),
                 max_rollouts_per_startup: Some(9),
                 min_rollout_idle_hours: Some(24),
-                phase_1_model: Some("gpt-5-mini".to_string()),
-                phase_2_model: Some("gpt-5".to_string()),
+                extract_model: Some("gpt-5-mini".to_string()),
+                consolidation_model: Some("gpt-5".to_string()),
             }),
             memories_cfg.memories
         );
@@ -2542,15 +2573,16 @@ phase_2_model = "gpt-5"
         assert_eq!(
             config.memories,
             MemoriesConfig {
+                no_memories_if_mcp_or_web_search: true,
                 generate_memories: false,
                 use_memories: false,
-                max_raw_memories_for_global: 512,
+                max_raw_memories_for_consolidation: 512,
                 max_unused_days: 21,
                 max_rollout_age_days: 42,
                 max_rollouts_per_startup: 9,
                 min_rollout_idle_hours: 24,
-                phase_1_model: Some("gpt-5-mini".to_string()),
-                phase_2_model: Some("gpt-5".to_string()),
+                extract_model: Some("gpt-5-mini".to_string()),
+                consolidation_model: Some("gpt-5".to_string()),
             }
         );
     }
@@ -4867,6 +4899,7 @@ model_verbosity = "high"
                 review_model: None,
                 model_context_window: None,
                 model_auto_compact_token_limit: None,
+                service_tier: None,
                 model_provider_id: "openai".to_string(),
                 model_provider: fixture.openai_provider.clone(),
                 permissions: Permissions {
@@ -4922,6 +4955,7 @@ model_verbosity = "high"
                 chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
                 realtime_audio: RealtimeAudioConfig::default(),
                 experimental_realtime_ws_base_url: None,
+                experimental_realtime_ws_model: None,
                 experimental_realtime_ws_backend_prompt: None,
                 base_instructions: None,
                 developer_instructions: None,
@@ -4995,6 +5029,7 @@ model_verbosity = "high"
             review_model: None,
             model_context_window: None,
             model_auto_compact_token_limit: None,
+            service_tier: None,
             model_provider_id: "openai-custom".to_string(),
             model_provider: fixture.openai_custom_provider.clone(),
             permissions: Permissions {
@@ -5050,6 +5085,7 @@ model_verbosity = "high"
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             realtime_audio: RealtimeAudioConfig::default(),
             experimental_realtime_ws_base_url: None,
+            experimental_realtime_ws_model: None,
             experimental_realtime_ws_backend_prompt: None,
             base_instructions: None,
             developer_instructions: None,
@@ -5121,6 +5157,7 @@ model_verbosity = "high"
             review_model: None,
             model_context_window: None,
             model_auto_compact_token_limit: None,
+            service_tier: None,
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
             permissions: Permissions {
@@ -5176,6 +5213,7 @@ model_verbosity = "high"
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             realtime_audio: RealtimeAudioConfig::default(),
             experimental_realtime_ws_base_url: None,
+            experimental_realtime_ws_model: None,
             experimental_realtime_ws_backend_prompt: None,
             base_instructions: None,
             developer_instructions: None,
@@ -5233,6 +5271,7 @@ model_verbosity = "high"
             review_model: None,
             model_context_window: None,
             model_auto_compact_token_limit: None,
+            service_tier: None,
             model_provider_id: "openai".to_string(),
             model_provider: fixture.openai_provider.clone(),
             permissions: Permissions {
@@ -5288,6 +5327,7 @@ model_verbosity = "high"
             chatgpt_base_url: "https://chatgpt.com/backend-api/".to_string(),
             realtime_audio: RealtimeAudioConfig::default(),
             experimental_realtime_ws_base_url: None,
+            experimental_realtime_ws_model: None,
             experimental_realtime_ws_backend_prompt: None,
             base_instructions: None,
             developer_instructions: None,
@@ -6129,6 +6169,34 @@ experimental_realtime_ws_backend_prompt = "prompt from config"
         assert_eq!(
             config.experimental_realtime_ws_backend_prompt.as_deref(),
             Some("prompt from config")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn experimental_realtime_ws_model_loads_from_config_toml() -> std::io::Result<()> {
+        let cfg: ConfigToml = toml::from_str(
+            r#"
+experimental_realtime_ws_model = "realtime-test-model"
+"#,
+        )
+        .expect("TOML deserialization should succeed");
+
+        assert_eq!(
+            cfg.experimental_realtime_ws_model.as_deref(),
+            Some("realtime-test-model")
+        );
+
+        let codex_home = TempDir::new()?;
+        let config = Config::load_from_base_config_with_overrides(
+            cfg,
+            ConfigOverrides::default(),
+            codex_home.path().to_path_buf(),
+        )?;
+
+        assert_eq!(
+            config.experimental_realtime_ws_model.as_deref(),
+            Some("realtime-test-model")
         );
         Ok(())
     }

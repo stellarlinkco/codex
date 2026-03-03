@@ -1,10 +1,17 @@
+//! Implements the collaboration tool surface for spawning and managing sub-agents.
+//!
+//! This handler translates model tool calls into `AgentControl` operations and keeps spawned
+//! agents aligned with the live turn that created them. Sub-agents start from the turn's effective
+//! config, inherit runtime-only state such as provider, approval policy, sandbox, and cwd, and
+//! then optionally layer role-specific config on top.
+
 use crate::agent::AgentStatus;
 use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::config::Config;
-use crate::config::Constrained;
 use crate::error::CodexErr;
+use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
@@ -57,6 +64,7 @@ use tokio::time::timeout_at;
 use tracing::debug;
 use tracing::warn;
 
+/// Function-tool handler for the multi-agent collaboration API.
 pub struct MultiAgentHandler;
 
 /// Minimum wait timeout to prevent tight polling loops from burning CPU.
@@ -1758,6 +1766,13 @@ fn input_preview(items: &[UserInput]) -> String {
     parts.join("\n")
 }
 
+/// Builds the base config snapshot for a newly spawned sub-agent.
+///
+/// The returned config starts from the parent's effective config and then refreshes the
+/// runtime-owned fields carried on `turn`, including model selection, reasoning settings,
+/// approval policy, sandbox, and cwd. Role-specific overrides are layered after this step;
+/// skipping this helper and cloning stale config state directly can send the child agent out with
+/// the wrong provider or runtime policy.
 pub(crate) fn build_agent_spawn_config(
     base_instructions: &BaseInstructions,
     turn: &TurnContext,
@@ -1790,6 +1805,27 @@ fn build_agent_shared_config(
     config.model_reasoning_summary = Some(turn.reasoning_summary);
     config.developer_instructions = turn.developer_instructions.clone();
     config.compact_prompt = turn.compact_prompt.clone();
+    apply_spawn_agent_runtime_overrides(&mut config, turn)?;
+    apply_spawn_agent_overrides(&mut config, child_depth);
+
+    Ok(config)
+}
+
+/// Copies runtime-only turn state onto a child config before it is handed to `AgentControl`.
+///
+/// These values are chosen by the live turn rather than persisted config, so leaving them stale
+/// can make a child agent disagree with its parent about approval policy, cwd, or sandboxing.
+fn apply_spawn_agent_runtime_overrides(
+    config: &mut Config,
+    turn: &TurnContext,
+) -> Result<(), FunctionCallError> {
+    config
+        .permissions
+        .approval_policy
+        .set(turn.approval_policy.value())
+        .map_err(|err| {
+            FunctionCallError::RespondToModel(format!("approval_policy is invalid: {err}"))
+        })?;
     config.permissions.shell_environment_policy = turn.shell_environment_policy.clone();
     config.codex_linux_sandbox_exe = turn.codex_linux_sandbox_exe.clone();
     config.cwd = turn.cwd.clone();
@@ -1800,13 +1836,13 @@ fn build_agent_shared_config(
         .map_err(|err| {
             FunctionCallError::RespondToModel(format!("sandbox_policy is invalid: {err}"))
         })?;
-    apply_spawn_agent_overrides(&mut config, child_depth);
-
-    Ok(config)
+    Ok(())
 }
 
-fn apply_spawn_agent_overrides(config: &mut Config, _child_depth: i32) {
-    config.permissions.approval_policy = Constrained::allow_only(AskForApproval::Never);
+fn apply_spawn_agent_overrides(config: &mut Config, child_depth: i32) {
+    if child_depth >= config.agent_max_depth {
+        config.features.disable(Feature::Collab);
+    }
 }
 
 #[cfg(test)]

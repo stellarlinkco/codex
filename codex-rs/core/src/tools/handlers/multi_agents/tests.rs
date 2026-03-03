@@ -253,7 +253,7 @@ async fn spawn_agent_rejects_when_message_and_items_are_both_set() {
 }
 
 #[tokio::test]
-async fn spawn_agent_uses_explorer_role_and_sets_never_approval_policy() {
+async fn spawn_agent_uses_explorer_role_and_inherits_approval_policy() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         agent_id: String,
@@ -270,6 +270,9 @@ async fn spawn_agent_uses_explorer_role_and_sets_never_approval_policy() {
         .set(AskForApproval::OnRequest)
         .expect("approval policy should be set");
     turn.config = Arc::new(config);
+    turn.approval_policy
+        .set(AskForApproval::OnRequest)
+        .expect("approval policy should be set");
     let explorer_config_path = turn.config.codex_home.join("agents").join("explorer.toml");
     tokio::fs::create_dir_all(
         explorer_config_path
@@ -313,7 +316,7 @@ async fn spawn_agent_uses_explorer_role_and_sets_never_approval_policy() {
         .await;
     assert_eq!(snapshot.model, expected_model);
     assert_eq!(snapshot.reasoning_effort, None);
-    assert_eq!(snapshot.approval_policy, AskForApproval::Never);
+    assert_eq!(snapshot.approval_policy, AskForApproval::OnRequest);
 }
 
 #[tokio::test]
@@ -5054,6 +5057,9 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
     turn.sandbox_policy
         .set(sandbox_policy.clone())
         .expect("sandbox policy set");
+    turn.approval_policy
+        .set(AskForApproval::OnRequest)
+        .expect("approval policy set");
 
     let config = build_agent_spawn_config(&base_instructions, &turn, 0).expect("spawn config");
     let mut expected = (*turn.config).clone();
@@ -5070,7 +5076,7 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
     expected
         .permissions
         .approval_policy
-        .set(AskForApproval::Never)
+        .set(AskForApproval::OnRequest)
         .expect("approval policy set");
     expected
         .permissions
@@ -5102,6 +5108,9 @@ async fn build_agent_resume_config_clears_base_instructions() {
     let mut base_config = (*turn.config).clone();
     base_config.base_instructions = Some("caller-base".to_string());
     turn.config = Arc::new(base_config);
+    turn.approval_policy
+        .set(AskForApproval::OnRequest)
+        .expect("approval policy set");
 
     let config = build_agent_resume_config(&turn, 0).expect("resume config");
 
@@ -5119,7 +5128,7 @@ async fn build_agent_resume_config_clears_base_instructions() {
     expected
         .permissions
         .approval_policy
-        .set(AskForApproval::Never)
+        .set(AskForApproval::OnRequest)
         .expect("approval policy set");
     expected
         .permissions
