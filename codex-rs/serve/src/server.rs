@@ -1940,6 +1940,7 @@ async fn handle_post_message(
             model: guard.model.clone(),
             effort: guard.reasoning_effort,
             summary: Some(ReasoningSummaryConfig::Auto),
+            service_tier: None,
             final_output_json_schema: None,
             collaboration_mode,
             personality: None,

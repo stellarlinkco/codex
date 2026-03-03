@@ -148,6 +148,7 @@ async fn anthropic_output_schema_and_reasoning_delta_round_trip() -> anyhow::Res
             model,
             effort: None,
             summary: Some(ReasoningSummary::Auto),
+            service_tier: None,
             collaboration_mode: None,
             personality: None,
         })
@@ -248,6 +249,7 @@ async fn anthropic_prefers_api_key_over_bearer_auth() -> anyhow::Result<()> {
             model,
             effort: None,
             summary: Some(ReasoningSummary::Auto),
+            service_tier: None,
             collaboration_mode: None,
             personality: None,
         })
@@ -377,6 +379,7 @@ async fn anthropic_output_schema_auto_repairs_invalid_json() -> anyhow::Result<(
             model,
             effort: None,
             summary: Some(ReasoningSummary::Auto),
+            service_tier: None,
             collaboration_mode: None,
             personality: None,
         })
@@ -478,6 +481,7 @@ async fn anthropic_output_schema_extracts_embedded_json_without_retry() -> anyho
             model,
             effort: None,
             summary: Some(ReasoningSummary::Auto),
+            service_tier: None,
             collaboration_mode: None,
             personality: None,
         })
@@ -665,6 +669,7 @@ async fn anthropic_output_schema_stops_after_retry_budget() -> anyhow::Result<()
             model,
             effort: None,
             summary: Some(ReasoningSummary::Auto),
+            service_tier: None,
             collaboration_mode: None,
             personality: None,
         })

@@ -126,6 +126,7 @@ impl HooksNonCommandExecutor {
                     None,
                     ReasoningSummaryConfig::None,
                     None,
+                    None,
                 )
                 .await
                 .map_err(|err| format!("prompt hook request failed: {err}"))?;

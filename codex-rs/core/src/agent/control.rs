@@ -231,6 +231,9 @@ impl AgentControl {
             other => other,
         };
         let notification_source = session_source.clone();
+        let inherited_shell_snapshot = self
+            .inherited_shell_snapshot_for_source(&state, session_source.as_ref())
+            .await;
 
         let new_thread = match session_source {
             Some(session_source) => {
@@ -290,6 +293,7 @@ impl AgentControl {
                             self.clone(),
                             session_source,
                             false,
+                            inherited_shell_snapshot,
                         )
                         .await?
                 } else {
@@ -300,6 +304,7 @@ impl AgentControl {
                             session_source,
                             false,
                             None,
+                            inherited_shell_snapshot,
                         )
                         .await?
                 }

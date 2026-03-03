@@ -84,7 +84,12 @@ impl ToolsConfig {
         let include_default_mode_request_user_input =
             features.enabled(Feature::DefaultModeRequestUserInput);
         let include_search_tool = features.enabled(Feature::Apps);
-        let include_agent_jobs = include_collab_tools && features.enabled(Feature::Sqlite);
+        let include_sqlite = features.enabled(Feature::Sqlite);
+        let is_agent_job_worker = matches!(
+            session_source,
+            SessionSource::SubAgent(SubAgentSource::Other(label)) if label.starts_with("agent_job:")
+        );
+        let include_agent_jobs = include_collab_tools && include_sqlite;
         let request_permission_enabled = features.enabled(Feature::RequestPermissions);
         let shell_command_backend =
             if features.enabled(Feature::ShellTool) && features.enabled(Feature::ShellZshFork) {
@@ -120,12 +125,10 @@ impl ToolsConfig {
             }
         };
 
-        let agent_jobs_worker_tools = include_agent_jobs
-            && matches!(
-                session_source,
-                SessionSource::SubAgent(SubAgentSource::Other(label))
-                    if label.starts_with("agent_job:")
-            );
+        let agent_jobs_tools = include_agent_jobs && !is_agent_job_worker;
+        // Agent job workers may run with collab tools disabled (e.g. due to agent depth), but still
+        // need to report results back to the parent.
+        let agent_jobs_worker_tools = include_sqlite && is_agent_job_worker;
 
         Self {
             shell_type,
@@ -141,7 +144,7 @@ impl ToolsConfig {
             collab_tools: include_collab_tools,
             default_mode_request_user_input: include_default_mode_request_user_input,
             experimental_supported_tools: model_info.experimental_supported_tools.clone(),
-            agent_jobs_tools: include_agent_jobs,
+            agent_jobs_tools,
             agent_jobs_worker_tools,
         }
     }
@@ -2337,10 +2340,12 @@ pub(crate) fn build_specs(
         builder.register_handler("team_cleanup", multi_agent_handler);
     }
 
-    if config.agent_jobs_tools {
+    if config.agent_jobs_tools || config.agent_jobs_worker_tools {
         let agent_jobs_handler = Arc::new(BatchJobHandler);
-        builder.push_spec(create_spawn_agents_on_csv_tool());
-        builder.register_handler("spawn_agents_on_csv", agent_jobs_handler.clone());
+        if config.agent_jobs_tools {
+            builder.push_spec(create_spawn_agents_on_csv_tool());
+            builder.register_handler("spawn_agents_on_csv", agent_jobs_handler.clone());
+        }
         if config.agent_jobs_worker_tools {
             builder.push_spec(create_report_agent_job_result_tool());
             builder.register_handler("report_agent_job_result", agent_jobs_handler);
@@ -2640,18 +2645,32 @@ mod tests {
             )),
         });
         let (tools, _) = build_specs(&tools_config, None, None, &[]).build();
-        assert_contains_tool_names(
-            &tools,
-            &[
-                "spawn_agent",
-                "send_input",
-                "resume_agent",
-                "wait",
-                "close_agent",
-                "spawn_agents_on_csv",
-                "report_agent_job_result",
-            ],
+        assert_contains_tool_names(&tools, &["report_agent_job_result"]);
+        assert!(
+            !tools
+                .iter()
+                .any(|t| tool_name(&t.spec) == "spawn_agents_on_csv"),
+            "agent job worker should not have spawn_agents_on_csv"
         );
+    }
+
+    #[test]
+    fn test_build_specs_agent_job_worker_tools_enabled_without_collab() {
+        let config = test_config();
+        let model_info =
+            ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+        let mut features = Features::with_defaults();
+        features.enable(Feature::Sqlite);
+        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_info: &model_info,
+            features: &features,
+            web_search_mode: Some(WebSearchMode::Cached),
+            session_source: SessionSource::SubAgent(SubAgentSource::Other(
+                "agent_job:test".to_string(),
+            )),
+        });
+        let (tools, _) = build_specs(&tools_config, None, None, &[]).build();
+        assert_contains_tool_names(&tools, &["report_agent_job_result"]);
     }
 
     #[test]
