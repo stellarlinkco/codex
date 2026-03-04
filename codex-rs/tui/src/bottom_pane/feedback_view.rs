@@ -657,7 +657,9 @@ mod tests {
     fn make_view(category: FeedbackCategory) -> FeedbackNoteView {
         let (tx_raw, _rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
         let tx = AppEventSender::new(tx_raw);
-        let snapshot = codex_feedback::CodexFeedback::new().snapshot(None);
+        let snapshot = codex_feedback::CodexFeedback::new()
+            .snapshot(None)
+            .with_feedback_diagnostics(FeedbackDiagnostics::default());
         FeedbackNoteView::new(
             category,
             snapshot,

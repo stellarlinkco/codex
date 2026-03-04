@@ -1,17 +1,9 @@
 ---
 source: tui/src/bottom_pane/feedback_view.rs
+assertion_line: 698
 expression: rendered
 ---
 ▌ Tell us more (other)
-▌
-▌ Connectivity diagnostics
-▌   - Proxy environment variables are set and may affect
-▌     connectivity.
-▌     - http_proxy = http://127.0.0.1:7890
-▌     - https_proxy = http://127.0.0.1:7890
-▌     - all_proxy = http://127.0.0.1:7890
-▌   - OPENAI_BASE_URL is set and may affect connectivity.
-▌     - OPENAI_BASE_URL = http://localhost:8317/v1
 ▌
 ▌ (optional) Write a short description to help us further
 
