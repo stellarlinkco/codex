@@ -4117,7 +4117,6 @@ impl Session {
 
 async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiver<Submission>) {
     // To break out of this loop, send Op::Shutdown.
-    let session_end_reason = None;
     while let Ok(sub) = rx_sub.recv().await {
         debug!(?sub, "Submission");
         let dispatch_span = submission_dispatch_span(&sub);
@@ -4328,7 +4327,7 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
             break;
         }
     }
-    let reason = session_end_reason.unwrap_or_else(|| "submission_channel_closed".to_string());
+    let reason = "submission_channel_closed".to_string();
     let (cwd, permission_mode) = {
         let state = sess.state.lock().await;
         (
