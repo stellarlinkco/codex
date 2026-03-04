@@ -313,6 +313,9 @@
             "apps_mcp_gateway": {
               "type": "boolean"
             },
+            "artifact": {
+              "type": "boolean"
+            },
             "child_agents_md": {
               "type": "boolean"
             },
@@ -350,6 +353,9 @@
               "type": "boolean"
             },
             "fast_mode": {
+              "type": "boolean"
+            },
+            "image_detail_original": {
               "type": "boolean"
             },
             "include_apply_patch_tool": {
@@ -1104,14 +1110,8 @@
         "enabled": {
           "default": true,
           "type": "boolean"
-        },
-        "path": {
-          "$ref": "#/definitions/AbsolutePathBuf"
         }
       },
-      "required": [
-        "path"
-      ],
       "type": "object"
     },
     "ProjectConfig": {
@@ -1707,6 +1707,9 @@
         "apps_mcp_gateway": {
           "type": "boolean"
         },
+        "artifact": {
+          "type": "boolean"
+        },
         "child_agents_md": {
           "type": "boolean"
         },
@@ -1744,6 +1747,9 @@
           "type": "boolean"
         },
         "fast_mode": {
+          "type": "boolean"
+        },
+        "image_detail_original": {
           "type": "boolean"
         },
         "include_apply_patch_tool": {

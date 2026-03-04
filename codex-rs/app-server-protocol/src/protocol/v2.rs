@@ -2071,6 +2071,61 @@ pub struct ThreadSetNameResponse {}
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
+pub struct ThreadMetadataUpdateParams {
+    pub thread_id: String,
+    /// Patch the stored Git metadata for this thread.
+    /// Omit a field to leave it unchanged, set it to `null` to clear it, or
+    /// provide a string to replace the stored value.
+    #[ts(optional = nullable)]
+    pub git_info: Option<ThreadMetadataGitInfoUpdateParams>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadMetadataGitInfoUpdateParams {
+    /// Omit to leave the stored commit unchanged, set to `null` to clear it,
+    /// or provide a non-empty string to replace it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "super::serde_helpers::serialize_double_option",
+        deserialize_with = "super::serde_helpers::deserialize_double_option"
+    )]
+    #[ts(optional = nullable, type = "string | null")]
+    pub sha: Option<Option<String>>,
+    /// Omit to leave the stored branch unchanged, set to `null` to clear it,
+    /// or provide a non-empty string to replace it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "super::serde_helpers::serialize_double_option",
+        deserialize_with = "super::serde_helpers::deserialize_double_option"
+    )]
+    #[ts(optional = nullable, type = "string | null")]
+    pub branch: Option<Option<String>>,
+    /// Omit to leave the stored origin URL unchanged, set to `null` to clear it,
+    /// or provide a non-empty string to replace it.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "super::serde_helpers::serialize_double_option",
+        deserialize_with = "super::serde_helpers::deserialize_double_option"
+    )]
+    #[ts(optional = nullable, type = "string | null")]
+    pub origin_url: Option<Option<String>>,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+pub struct ThreadMetadataUpdateResponse {
+    pub thread: Thread,
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
 pub struct ThreadUnarchiveResponse {
     pub thread: Thread,
 }
@@ -3579,6 +3634,15 @@ pub struct ThreadUnarchivedNotification {
 pub struct ThreadClosedNotification {
     pub thread_id: String,
 }
+
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[serde(rename_all = "camelCase")]
+#[ts(export_to = "v2/")]
+/// Notification emitted when watched local skill files change.
+///
+/// Treat this as an invalidation signal and re-run `skills/list` with the
+/// client's current parameters when refreshed skill metadata is needed.
+pub struct SkillsChangedNotification {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]

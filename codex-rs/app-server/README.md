@@ -126,6 +126,7 @@ Example with notification opt-out:
 - `thread/list` — page through stored rollouts; supports cursor-based pagination and optional `modelProviders`, `sourceKinds`, `archived`, `cwd`, and `searchTerm` filters. Each returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded.
 - `thread/loaded/list` — list the thread ids currently loaded in memory.
 - `thread/read` — read a stored thread by id without resuming it; optionally include turns via `includeTurns`. The returned `thread` includes `status` (`ThreadStatus`), defaulting to `notLoaded` when the thread is not currently loaded.
+- `thread/metadata/update` — patch stored thread metadata in sqlite; currently supports updating persisted `gitInfo` fields and returns the refreshed `thread`.
 - `thread/status/changed` — notification emitted when a loaded thread’s status changes (`threadId` + new `status`).
 - `thread/archive` — move a thread’s rollout file into the archived directory; returns `{}` on success and emits `thread/archived`.
 - `thread/unsubscribe` — unsubscribe this connection from thread turn/item events. If this was the last subscriber, the server shuts down and unloads the thread, then emits `thread/closed`.
@@ -147,6 +148,7 @@ Example with notification opt-out:
 - `experimentalFeature/list` — list feature flags with stage metadata (`beta`, `underDevelopment`, `stable`, etc.), enabled/default-enabled state, and cursor pagination. For non-beta flags, `displayName`/`description`/`announcement` are `null`.
 - `collaborationMode/list` — list available collaboration mode presets (experimental, no pagination). This response omits built-in developer instructions; clients should either pass `settings.developer_instructions: null` when setting a mode to use Codex's built-in instructions, or provide their own instructions explicitly.
 - `skills/list` — list skills for one or more `cwd` values (optional `forceReload`).
+- `skills/changed` — notification emitted when watched local skill files change.
 - `skills/remote/list` — list public remote skills (**under development; do not call from production clients yet**).
 - `skills/remote/export` — download a remote skill by `hazelnutId` into `skills` under `codex_home` (**under development; do not call from production clients yet**).
 - `app/list` — list available apps.
@@ -321,6 +323,34 @@ Use `thread/read` to fetch a stored thread by id without resuming it. Pass `incl
 { "method": "thread/read", "id": 23, "params": { "threadId": "thr_123", "includeTurns": true } }
 { "id": 23, "result": {
     "thread": { "id": "thr_123", "status": { "type": "notLoaded" }, "turns": [ ... ] }
+} }
+```
+
+### Example: Update stored thread metadata
+
+Use `thread/metadata/update` to patch sqlite-backed metadata for a thread without resuming it. Today this supports persisted `gitInfo`; omitted fields are left unchanged, while explicit `null` clears a stored value.
+
+```json
+{ "method": "thread/metadata/update", "id": 24, "params": {
+    "threadId": "thr_123",
+    "gitInfo": { "branch": "feature/sidebar-pr" }
+} }
+{ "id": 24, "result": {
+    "thread": {
+        "id": "thr_123",
+        "gitInfo": { "sha": null, "branch": "feature/sidebar-pr", "originUrl": null }
+    }
+} }
+
+{ "method": "thread/metadata/update", "id": 25, "params": {
+    "threadId": "thr_123",
+    "gitInfo": { "branch": null }
+} }
+{ "id": 25, "result": {
+    "thread": {
+        "id": "thr_123",
+        "gitInfo": null
+    }
 } }
 ```
 
@@ -812,6 +842,7 @@ Use `skills/list` to fetch the available skills (optionally scoped by `cwds`, wi
 You can also add `perCwdExtraUserRoots` to scan additional absolute paths as `user` scope for specific `cwd` entries.
 Entries whose `cwd` is not present in `cwds` are ignored.
 `skills/list` might reuse a cached skills result per `cwd`; setting `forceReload` to `true` refreshes the result from disk.
+The server also emits `skills/changed` notifications when watched local skill files change. Treat this as an invalidation signal and re-run `skills/list` with your current params when needed.
 
 ```json
 { "method": "skills/list", "id": 25, "params": {
@@ -845,6 +876,13 @@ Entries whose `cwd` is not present in `cwds` are ignored.
         "errors": []
     }]
 } }
+```
+
+```json
+{
+  "method": "skills/changed",
+  "params": {}
+}
 ```
 
 To enable or disable a skill by path:
