@@ -4,6 +4,15 @@ expression: rendered
 ---
 ▌ Tell us more (safety check)
 ▌
+▌ Connectivity diagnostics
+▌   - Proxy environment variables are set and may affect
+▌     connectivity.
+▌     - http_proxy = http://127.0.0.1:7890
+▌     - https_proxy = http://127.0.0.1:7890
+▌     - all_proxy = http://127.0.0.1:7890
+▌   - OPENAI_BASE_URL is set and may affect connectivity.
+▌     - OPENAI_BASE_URL = http://localhost:8317/v1
+▌
 ▌ (optional) Share what was refused and why it should have b
 
 Press enter to confirm or esc to go back

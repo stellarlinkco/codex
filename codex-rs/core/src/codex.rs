@@ -4117,7 +4117,7 @@ impl Session {
 
 async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiver<Submission>) {
     // To break out of this loop, send Op::Shutdown.
-    let mut session_end_reason = None;
+    let session_end_reason = None;
     while let Ok(sub) = rx_sub.recv().await {
         debug!(?sub, "Submission");
         let dispatch_span = submission_dispatch_span(&sub);

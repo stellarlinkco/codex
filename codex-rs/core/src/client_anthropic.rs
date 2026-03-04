@@ -972,7 +972,6 @@ impl AnthropicStreamState {
             ResponseEvent::Completed {
                 response_id,
                 token_usage: self.token_usage(),
-                can_append: false,
             },
         )
         .await
@@ -1790,14 +1789,12 @@ mod tests {
             ResponseEvent::Completed {
                 response_id,
                 token_usage: Some(token_usage),
-                can_append,
             } => {
                 assert_eq!(response_id, "resp_1");
                 assert_eq!(token_usage.input_tokens, 7);
                 assert_eq!(token_usage.cached_input_tokens, 2);
                 assert_eq!(token_usage.output_tokens, 5);
                 assert_eq!(token_usage.total_tokens, 12);
-                assert!(!can_append);
             }
             other => panic!("unexpected completion event: {other:?}"),
         }
@@ -2033,7 +2030,6 @@ mod tests {
             ResponseEvent::Completed {
                 response_id: _,
                 token_usage: Some(_),
-                can_append: false
             }
         ));
     }
@@ -2121,14 +2117,12 @@ mod tests {
             ResponseEvent::Completed {
                 response_id,
                 token_usage: Some(token_usage),
-                can_append,
             } => {
                 assert_eq!(response_id, "resp_3");
                 assert_eq!(token_usage.input_tokens, 3);
                 assert_eq!(token_usage.cached_input_tokens, 1);
                 assert_eq!(token_usage.output_tokens, 2);
                 assert_eq!(token_usage.total_tokens, 5);
-                assert!(!can_append);
             }
             other => panic!("unexpected completion event: {other:?}"),
         }
@@ -2495,6 +2489,7 @@ mod tests {
             },
             FunctionCallOutputContentItem::InputImage {
                 image_url: "data:image/png;base64,AAA".to_string(),
+                detail: None,
             },
             FunctionCallOutputContentItem::InputText {
                 text: "line 2".to_string(),
