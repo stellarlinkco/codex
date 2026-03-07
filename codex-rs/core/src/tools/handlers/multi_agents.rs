@@ -977,11 +977,6 @@ fn insert_team_record(
             "team `{team_id}` already exists"
         )));
     }
-    if !teams.is_empty() {
-        return Err(FunctionCallError::RespondToModel(
-            "one team per session: clean up the current team before starting a new one".to_string(),
-        ));
-    }
     teams.insert(team_id, record);
     Ok(())
 }
