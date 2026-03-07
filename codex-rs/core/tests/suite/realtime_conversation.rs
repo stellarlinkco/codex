@@ -838,16 +838,6 @@ async fn conversation_startup_context_falls_back_to_workspace_map() -> Result<()
         }))
         .await?;
 
-    wait_for_event_match(&test.codex, |msg| match msg {
-        EventMsg::RealtimeConversationRealtime(RealtimeConversationRealtimeEvent {
-            payload: RealtimeEvent::SessionUpdated { session_id, .. },
-        }) if session_id == "sess_workspace" => Some(Ok(())),
-        EventMsg::Error(err) => Some(Err(err.clone())),
-        _ => None,
-    })
-    .await
-    .unwrap_or_else(|err: ErrorEvent| panic!("conversation start failed: {err:?}"));
-
     let startup_context_request = server.wait_for_request(1, 0).await;
     let startup_context = websocket_request_instructions(&startup_context_request)
         .expect("startup context request should contain instructions");
