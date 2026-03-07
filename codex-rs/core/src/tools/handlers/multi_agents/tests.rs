@@ -2392,26 +2392,36 @@ async fn team_cleanup_fails_when_teammate_is_active() {
 }
 
 #[test]
-fn insert_team_record_enforces_one_team_per_session() {
+fn insert_team_record_allows_multiple_teams_per_session() {
     let lead_thread_id = ThreadId::new();
-    let member_thread_id = ThreadId::new();
-    let record = TeamRecord {
+    let first_record = TeamRecord {
         members: vec![TeamMember {
             name: "worker".to_string(),
-            agent_id: member_thread_id,
+            agent_id: ThreadId::new(),
             agent_type: None,
         }],
         created_at: 0,
     };
-    insert_team_record(lead_thread_id, "team-1".to_string(), record.clone())
-        .expect("first insert should succeed");
-    let err = insert_team_record(lead_thread_id, "team-2".to_string(), record)
-        .expect_err("second insert should fail");
-    let FunctionCallError::RespondToModel(message) = err else {
-        panic!("expected RespondToModel error");
+    let second_record = TeamRecord {
+        members: vec![TeamMember {
+            name: "reviewer".to_string(),
+            agent_id: ThreadId::new(),
+            agent_type: None,
+        }],
+        created_at: 0,
     };
-    assert!(message.contains("one team per session"));
+    insert_team_record(lead_thread_id, "team-1".to_string(), first_record)
+        .expect("first insert should succeed");
+    insert_team_record(lead_thread_id, "team-2".to_string(), second_record.clone())
+        .expect("second insert should succeed");
+    let err = insert_team_record(lead_thread_id, "team-2".to_string(), second_record)
+        .expect_err("duplicate team id should fail");
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel("team `team-2` already exists".to_string())
+    );
     remove_team_record(lead_thread_id, "team-1").expect("cleanup should succeed");
+    remove_team_record(lead_thread_id, "team-2").expect("cleanup should succeed");
 }
 
 #[tokio::test]
@@ -2818,6 +2828,193 @@ async fn wait_team_any_includes_non_final_member_statuses_in_events() {
         .expect("shutdown worker");
     remove_team_record(session.conversation_id, &spawn_result.team_id)
         .expect("team record should be removed");
+}
+
+#[tokio::test]
+async fn team_cleanup_only_removes_requested_team_when_multiple_teams_exist() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let spawn_team_a_output = MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_team",
+            function_payload(json!({
+                "team_id": "team-a",
+                "members": [{"name": "planner", "task": "plan"}]
+            })),
+        ))
+        .await
+        .expect("spawn_team team-a should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(spawn_team_a_content),
+        ..
+    } = spawn_team_a_output
+    else {
+        panic!("expected function output");
+    };
+    let spawn_team_a_result: SpawnTeamResult =
+        serde_json::from_str(&spawn_team_a_content).expect("spawn_team result should be json");
+    let team_a_member_id = spawn_team_a_result
+        .members
+        .first()
+        .expect("team-a member")
+        .agent_id
+        .as_str();
+    let team_a_member_id = agent_id(team_a_member_id).expect("valid team-a member id");
+
+    let spawn_team_b_output = MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_team",
+            function_payload(json!({
+                "team_id": "team-b",
+                "members": [{"name": "worker", "task": "work"}]
+            })),
+        ))
+        .await
+        .expect("spawn_team team-b should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(spawn_team_b_content),
+        ..
+    } = spawn_team_b_output
+    else {
+        panic!("expected function output");
+    };
+    let spawn_team_b_result: SpawnTeamResult =
+        serde_json::from_str(&spawn_team_b_content).expect("spawn_team result should be json");
+    let team_b_member_id = spawn_team_b_result
+        .members
+        .first()
+        .expect("team-b member")
+        .agent_id
+        .as_str();
+    let team_b_member_id = agent_id(team_b_member_id).expect("valid team-b member id");
+
+    manager
+        .agent_control()
+        .shutdown_agent(team_a_member_id)
+        .await
+        .expect("shutdown team-a member should succeed");
+
+    MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({"team_id": spawn_team_a_result.team_id})),
+        ))
+        .await
+        .expect("close_team team-a should succeed");
+    MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "team_cleanup",
+            function_payload(json!({"team_id": spawn_team_a_result.team_id})),
+        ))
+        .await
+        .expect("team_cleanup team-a should succeed");
+
+    let team_a_dir_exists = tokio::fs::metadata(team_dir(
+        turn.config.codex_home.as_path(),
+        &spawn_team_a_result.team_id,
+    ))
+    .await
+    .is_ok();
+    let team_b_dir_exists = tokio::fs::metadata(team_dir(
+        turn.config.codex_home.as_path(),
+        &spawn_team_b_result.team_id,
+    ))
+    .await
+    .is_ok();
+    assert_eq!(team_a_dir_exists, false);
+    assert_eq!(team_b_dir_exists, true);
+    let team_b_tasks_exist = tokio::fs::metadata(team_tasks_dir(
+        turn.config.codex_home.as_path(),
+        &spawn_team_b_result.team_id,
+    ))
+    .await
+    .is_ok();
+    assert_eq!(team_b_tasks_exist, true);
+
+    let wait_team_a_invocation = invocation(
+        session.clone(),
+        turn.clone(),
+        "wait_team",
+        function_payload(json!({"team_id": spawn_team_a_result.team_id})),
+    );
+    let Err(err) = MultiAgentHandler.handle(wait_team_a_invocation).await else {
+        panic!("wait_team should fail after team-a cleanup removed the team");
+    };
+    assert_eq!(
+        err,
+        FunctionCallError::RespondToModel(format!(
+            "team `{}` not found",
+            spawn_team_a_result.team_id
+        ))
+    );
+
+    manager
+        .agent_control()
+        .shutdown_agent(team_b_member_id)
+        .await
+        .expect("shutdown team-b member should succeed");
+
+    let wait_team_b_output = MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "wait_team",
+            function_payload(json!({
+                "team_id": spawn_team_b_result.team_id,
+                "mode": "all",
+                "timeout_ms": 1_000
+            })),
+        ))
+        .await
+        .expect("wait_team team-b should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(wait_team_b_content),
+        success: wait_team_b_success,
+        ..
+    } = wait_team_b_output
+    else {
+        panic!("expected function output");
+    };
+    let wait_team_b_result: WaitTeamResult =
+        serde_json::from_str(&wait_team_b_content).expect("wait_team result should be json");
+    assert_eq!(wait_team_b_success, Some(true));
+    assert_eq!(wait_team_b_result.completed, true);
+    assert_eq!(wait_team_b_result.member_statuses.len(), 1);
+    assert!(matches!(
+        wait_team_b_result.member_statuses[0].state,
+        AgentStatus::NotFound | AgentStatus::Shutdown
+    ));
+
+    MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({"team_id": spawn_team_b_result.team_id})),
+        ))
+        .await
+        .expect("close_team team-b should succeed");
+    MultiAgentHandler
+        .handle(invocation(
+            session,
+            turn,
+            "team_cleanup",
+            function_payload(json!({"team_id": spawn_team_b_result.team_id})),
+        ))
+        .await
+        .expect("team_cleanup team-b should succeed");
 }
 
 #[tokio::test]
@@ -4248,6 +4445,175 @@ async fn team_message_and_team_broadcast_send_inputs() {
         ))
         .await
         .expect("team_cleanup should succeed");
+}
+
+#[tokio::test]
+async fn team_message_uses_team_id_when_member_names_overlap() {
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let session = Arc::new(session);
+    let turn = Arc::new(turn);
+
+    let spawn_team_a_output = MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_team",
+            function_payload(json!({
+                "team_id": "team-a",
+                "members": [{"name": "worker", "task": "plan"}]
+            })),
+        ))
+        .await
+        .expect("spawn_team team-a should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(spawn_team_a_content),
+        ..
+    } = spawn_team_a_output
+    else {
+        panic!("expected function output");
+    };
+    let spawn_team_a_result: SpawnTeamResult =
+        serde_json::from_str(&spawn_team_a_content).expect("spawn_team result should be json");
+    let team_a_member_id = spawn_team_a_result
+        .members
+        .first()
+        .expect("team-a member")
+        .agent_id
+        .clone();
+
+    let spawn_team_b_output = MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_team",
+            function_payload(json!({
+                "team_id": "team-b",
+                "members": [{"name": "worker", "task": "execute"}]
+            })),
+        ))
+        .await
+        .expect("spawn_team team-b should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(spawn_team_b_content),
+        ..
+    } = spawn_team_b_output
+    else {
+        panic!("expected function output");
+    };
+    let spawn_team_b_result: SpawnTeamResult =
+        serde_json::from_str(&spawn_team_b_content).expect("spawn_team result should be json");
+    let team_b_member_id = spawn_team_b_result
+        .members
+        .first()
+        .expect("team-b member")
+        .agent_id
+        .clone();
+
+    let message_team_a_output = MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "team_message",
+            function_payload(json!({
+                "team_id": spawn_team_a_result.team_id,
+                "member_name": "worker",
+                "message": "plan now"
+            })),
+        ))
+        .await
+        .expect("team_message team-a should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(message_team_a_content),
+        ..
+    } = message_team_a_output
+    else {
+        panic!("expected function output");
+    };
+    let message_team_a_result: TeamMessageResult =
+        serde_json::from_str(&message_team_a_content).expect("team_message result should be json");
+    assert_eq!(message_team_a_result.agent_id, team_a_member_id);
+
+    let message_team_b_output = MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "team_message",
+            function_payload(json!({
+                "team_id": spawn_team_b_result.team_id,
+                "member_name": "worker",
+                "message": "execute now"
+            })),
+        ))
+        .await
+        .expect("team_message team-b should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(message_team_b_content),
+        ..
+    } = message_team_b_output
+    else {
+        panic!("expected function output");
+    };
+    let message_team_b_result: TeamMessageResult =
+        serde_json::from_str(&message_team_b_content).expect("team_message result should be json");
+    assert_eq!(message_team_b_result.agent_id, team_b_member_id);
+
+    let team_a_user_input_count = manager
+        .captured_ops()
+        .iter()
+        .filter(|(id, op)| {
+            *id == agent_id(&team_a_member_id).expect("valid team-a member id")
+                && matches!(op, Op::UserInput { .. })
+        })
+        .count();
+    let team_b_user_input_count = manager
+        .captured_ops()
+        .iter()
+        .filter(|(id, op)| {
+            *id == agent_id(&team_b_member_id).expect("valid team-b member id")
+                && matches!(op, Op::UserInput { .. })
+        })
+        .count();
+    assert_eq!(team_a_user_input_count > 0, true);
+    assert_eq!(team_b_user_input_count > 0, true);
+
+    MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({"team_id": spawn_team_a_result.team_id})),
+        ))
+        .await
+        .expect("close_team team-a should succeed");
+    MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "team_cleanup",
+            function_payload(json!({"team_id": spawn_team_a_result.team_id})),
+        ))
+        .await
+        .expect("team_cleanup team-a should succeed");
+    MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({"team_id": spawn_team_b_result.team_id})),
+        ))
+        .await
+        .expect("close_team team-b should succeed");
+    MultiAgentHandler
+        .handle(invocation(
+            session,
+            turn,
+            "team_cleanup",
+            function_payload(json!({"team_id": spawn_team_b_result.team_id})),
+        ))
+        .await
+        .expect("team_cleanup team-b should succeed");
 }
 
 #[tokio::test]
