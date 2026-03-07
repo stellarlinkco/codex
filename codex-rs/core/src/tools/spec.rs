@@ -1300,7 +1300,7 @@ fn create_spawn_team_tool(config: &ToolsConfig) -> ToolSpec {
 
     ToolSpec::Function(ResponsesApiTool {
         name: "spawn_team".to_string(),
-        description: "Spawn a group of sub-agents for parallel task execution and register them under a team id. Limitations: one team per session; teammates cannot spawn nested teams.".to_string(),
+        description: "Spawn a group of sub-agents for parallel task execution and register them under a team id. Limitations: teammates cannot spawn nested teams.".to_string(),
         strict: false,
         parameters: JsonSchema::Object {
             properties,
