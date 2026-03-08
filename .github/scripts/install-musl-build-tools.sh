@@ -252,9 +252,17 @@ target_cxx_var="CXX_${TARGET}"
 target_cxx_var="${target_cxx_var//-/_}"
 echo "${target_cxx_var}=${cxx}" >> "$GITHUB_ENV"
 
+cargo_linker_wrapper="${tool_root}/cargo-linker"
+cat >"${cargo_linker_wrapper}" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+exec "${musl_linker}" "\$@" -lm -lgcc_eh
+EOF
+chmod +x "${cargo_linker_wrapper}"
+
 cargo_linker_var="CARGO_TARGET_${TARGET^^}_LINKER"
 cargo_linker_var="${cargo_linker_var//-/_}"
-echo "${cargo_linker_var}=${musl_linker}" >> "$GITHUB_ENV"
+echo "${cargo_linker_var}=${cargo_linker_wrapper}" >> "$GITHUB_ENV"
 
 echo "CMAKE_C_COMPILER=${cc}" >> "$GITHUB_ENV"
 echo "CMAKE_CXX_COMPILER=${cxx}" >> "$GITHUB_ENV"

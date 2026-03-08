@@ -67,8 +67,11 @@ pub async fn handle(
             .into(),
         )
         .await;
-    let thread_spawn_session_source =
-        Some(thread_spawn_source(session.conversation_id, child_depth));
+    let thread_spawn_session_source = Some(thread_spawn_source_with_role(
+        session.conversation_id,
+        child_depth,
+        role_name.map(str::to_owned),
+    ));
     let mut config = build_agent_spawn_config(
         &session.get_base_instructions().await,
         turn.as_ref(),
@@ -130,7 +133,11 @@ pub async fn handle(
                     .agent_control
                     .spawn_agent_thread(
                         config,
-                        Some(thread_spawn_source(session.conversation_id, child_depth)),
+                        Some(thread_spawn_source_with_role(
+                            session.conversation_id,
+                            child_depth,
+                            role_name.map(str::to_owned),
+                        )),
                     )
                     .await
             }

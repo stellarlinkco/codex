@@ -9,3 +9,9 @@ rustflags = ["-C", "link-arg=/STACK:8388608", "-C", "link-arg=/arm64hazardfree"]
 
 [target.'cfg(all(windows, target_env = "gnu"))']
 rustflags = ["-C", "link-arg=-Wl,--stack,8388608"]
+
+[target.x86_64-unknown-linux-musl]
+rustflags = ["-C", "link-arg=-lm", "-C", "link-arg=-lgcc_eh"]
+
+[target.aarch64-unknown-linux-musl]
+rustflags = ["-C", "link-arg=-lm", "-C", "link-arg=-lgcc_eh"]

@@ -7,6 +7,7 @@ mod user_shell;
 
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use async_trait::async_trait;
 use tokio::select;
@@ -14,7 +15,7 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 use tracing::Instrument;
-use tracing::Span;
+use tracing::info_span;
 use tracing::trace;
 use tracing::warn;
 
@@ -25,6 +26,7 @@ use crate::contextual_user_message::TURN_ABORTED_OPEN_TAG;
 use crate::event_mapping::parse_turn_item;
 use crate::models_manager::manager::ModelsManager;
 use crate::protocol::EventMsg;
+use crate::protocol::TokenUsage;
 use crate::protocol::TurnAbortReason;
 use crate::protocol::TurnAbortedEvent;
 use crate::protocol::TurnCompleteEvent;
@@ -88,6 +90,9 @@ pub(crate) trait SessionTask: Send + Sync + 'static {
     /// surface it in telemetry and UI.
     fn kind(&self) -> TaskKind;
 
+    /// Returns the tracing name for a spawned task span.
+    fn span_name(&self) -> &'static str;
+
     /// Executes the task until completion or cancellation.
     ///
     /// Implementations typically stream protocol events using `session` and
@@ -126,9 +131,21 @@ impl Session {
 
         let task: Arc<dyn SessionTask> = Arc::new(task);
         let task_kind = task.kind();
+        let span_name = task.span_name();
+        let started_at = Instant::now();
+        turn_context
+            .turn_timing_state
+            .mark_turn_started(started_at)
+            .await;
+        let token_usage_at_turn_start = self.total_token_usage().await.unwrap_or_default();
 
         let cancellation_token = CancellationToken::new();
         let done = Arc::new(Notify::new());
+
+        let timer = turn_context
+            .session_telemetry
+            .start_timer("codex.turn.e2e_duration_ms", &[])
+            .ok();
 
         let done_clone = Arc::clone(&done);
         let handle = {
@@ -136,7 +153,15 @@ impl Session {
             let ctx = Arc::clone(&turn_context);
             let task_for_run = Arc::clone(&task);
             let task_cancellation_token = cancellation_token.child_token();
-            let session_span = Span::current();
+            // Task-owned turn spans keep a core-owned span open for the
+            // full task lifecycle after the submission dispatch span ends.
+            let task_span = info_span!(
+                "turn",
+                otel.name = span_name,
+                thread.id = %self.conversation_id,
+                turn.id = %turn_context.sub_id,
+                model = %turn_context.model_info.slug,
+            );
             tokio::spawn(
                 async move {
                     let ctx_for_finish = Arc::clone(&ctx);
@@ -157,14 +182,9 @@ impl Session {
                     }
                     done_clone.notify_waiters();
                 }
-                .instrument(session_span),
+                .instrument(task_span),
             )
         };
-
-        let timer = turn_context
-            .otel_manager
-            .start_timer("codex.turn.e2e_duration_ms", &[])
-            .ok();
 
         let running_task = RunningTask {
             done,
@@ -175,7 +195,8 @@ impl Session {
             turn_context: Arc::clone(&turn_context),
             _timer: timer,
         };
-        self.register_new_active_task(running_task).await;
+        self.register_new_active_task(running_task, token_usage_at_turn_start)
+            .await;
     }
 
     pub async fn abort_all_tasks(self: &Arc<Self>, reason: TurnAbortReason) {
@@ -242,9 +263,16 @@ impl Session {
         self.send_event(turn_context.as_ref(), event).await;
     }
 
-    async fn register_new_active_task(&self, task: RunningTask) {
+    async fn register_new_active_task(
+        &self,
+        task: RunningTask,
+        token_usage_at_turn_start: TokenUsage,
+    ) {
         let mut active = self.active_turn.lock().await;
         let mut turn = ActiveTurn::default();
+        let mut turn_state = turn.turn_state.lock().await;
+        turn_state.token_usage_at_turn_start = token_usage_at_turn_start;
+        drop(turn_state);
         turn.add_task(task);
         *active = Some(turn);
     }

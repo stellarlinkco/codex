@@ -434,8 +434,9 @@ ON CONFLICT(thread_id, position) DO NOTHING
         &self,
         builder: &ThreadMetadataBuilder,
         items: &[RolloutItem],
-        otel: Option<&OtelManager>,
+        otel: Option<&SessionTelemetry>,
         new_thread_memory_mode: Option<&str>,
+        _updated_at_override: Option<DateTime<Utc>>,
     ) -> anyhow::Result<()> {
         if items.is_empty() {
             return Ok(());
@@ -735,7 +736,7 @@ mod tests {
         })];
 
         runtime
-            .apply_rollout_items(&builder, &items, None, None)
+            .apply_rollout_items(&builder, &items, None, None, None)
             .await
             .expect("apply_rollout_items should succeed");
 
@@ -793,7 +794,7 @@ mod tests {
         })];
 
         runtime
-            .apply_rollout_items(&builder, &items, None, None)
+            .apply_rollout_items(&builder, &items, None, None, None)
             .await
             .expect("apply_rollout_items should succeed");
 

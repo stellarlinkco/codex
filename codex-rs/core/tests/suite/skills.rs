@@ -214,19 +214,21 @@ async fn list_skills_includes_system_cache_entries() -> Result<()> {
     let skill = skills
         .iter()
         .find(|skill| {
-            skill
-                .path
-                .to_string_lossy()
-                .replace('\\', "/")
-                .ends_with(&expected_path_suffix)
+            skill.name == SYSTEM_SKILL_NAME
+                && skill.scope == codex_protocol::protocol::SkillScope::System
         })
-        .expect("expected system skill cache entry to be present");
-    assert_eq!(skill.scope, codex_protocol::protocol::SkillScope::System);
+        .expect("expected system skill to be present");
     let path_str = skill.path.to_string_lossy().replace('\\', "/");
     assert!(
         path_str.ends_with(&expected_path_suffix),
         "unexpected skill path: {path_str}"
     );
+
+    test.codex.submit(Op::Shutdown).await?;
+    core_test_support::wait_for_event(test.codex.as_ref(), |ev| {
+        matches!(ev, codex_protocol::protocol::EventMsg::ShutdownComplete)
+    })
+    .await;
 
     Ok(())
 }

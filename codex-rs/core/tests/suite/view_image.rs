@@ -299,7 +299,7 @@ async fn view_image_tool_can_preserve_original_resolution_on_gpt5_3_codex() -> a
     let mut builder = test_codex()
         .with_model("gpt-5.3-codex")
         .with_config(|config| {
-            config.features.enable(Feature::ImageDetailOriginal);
+            let _ = config.features.enable(Feature::ImageDetailOriginal);
         });
     let TestCodex {
         codex,
@@ -398,7 +398,7 @@ async fn view_image_tool_keeps_legacy_behavior_below_gpt5_3_codex() -> anyhow::R
 
     let server = start_mock_server().await;
     let mut builder = test_codex().with_model("gpt-5.2").with_config(|config| {
-        config.features.enable(Feature::ImageDetailOriginal);
+        let _ = config.features.enable(Feature::ImageDetailOriginal);
     });
     let TestCodex {
         codex,
@@ -499,7 +499,10 @@ async fn js_repl_emit_image_attaches_local_image() -> anyhow::Result<()> {
 
     let server = start_mock_server().await;
     let mut builder = test_codex().with_config(|config| {
-        config.features.enable(Feature::JsRepl);
+        config
+            .features
+            .enable(Feature::JsRepl)
+            .expect("test config should allow feature update");
     });
     let TestCodex {
         codex,
@@ -614,7 +617,7 @@ async fn js_repl_view_image_requires_explicit_emit() -> anyhow::Result<()> {
 
     let server = start_mock_server().await;
     let mut builder = test_codex().with_config(|config| {
-        config.features.enable(Feature::JsRepl);
+        let _ = config.features.enable(Feature::JsRepl);
     });
     let TestCodex {
         codex,
@@ -990,6 +993,7 @@ async fn view_image_tool_returns_unsupported_message_for_text_only_model() -> an
         default_verbosity: None,
         availability_nux: None,
         apply_patch_tool_type: None,
+        web_search_tool_type: Default::default(),
         truncation_policy: TruncationPolicyConfig::bytes(10_000),
         supports_parallel_tool_calls: false,
         supports_image_detail_original: false,

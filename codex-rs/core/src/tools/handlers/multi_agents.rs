@@ -1714,11 +1714,19 @@ fn collab_agent_error(agent_id: ThreadId, err: CodexErr) -> FunctionCallError {
 }
 
 fn thread_spawn_source(parent_thread_id: ThreadId, depth: i32) -> SessionSource {
+    thread_spawn_source_with_role(parent_thread_id, depth, None)
+}
+
+fn thread_spawn_source_with_role(
+    parent_thread_id: ThreadId,
+    depth: i32,
+    agent_role: Option<String>,
+) -> SessionSource {
     SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id,
         depth,
         agent_nickname: None,
-        agent_role: None,
+        agent_role,
     })
 }
 
@@ -1848,7 +1856,7 @@ fn apply_spawn_agent_runtime_overrides(
 
 fn apply_spawn_agent_overrides(config: &mut Config, child_depth: i32) {
     if child_depth >= config.agent_max_depth {
-        config.features.disable(Feature::Collab);
+        let _ = config.features.disable(Feature::Collab);
     }
 }
 

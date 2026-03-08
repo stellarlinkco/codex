@@ -65,7 +65,9 @@ jobs:
       run:
         working-directory: codex-rs
     env:
-      CARGO_PROFILE_RELEASE_LTO: ${{ contains(github.ref_name, '-alpha') && 'thin' || 'fat' }}
+      # 2026-03-04: temporarily change releases to use thin LTO because
+      # Ubuntu ARM is timing out at 60 minutes.
+      CARGO_PROFILE_RELEASE_LTO: ${{ contains(github.ref_name, '-alpha') && 'thin' || 'thin' }}
 
     strategy:
       fail-fast: false
@@ -200,8 +202,9 @@ jobs:
           echo "CARGO_BUILD_RUSTFLAGS=" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=" >> "$GITHUB_ENV"
+          musl_rustflags="-C link-arg=-lm -C link-arg=-lgcc_eh"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=${musl_rustflags}" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=${musl_rustflags}" >> "$GITHUB_ENV"
 
           sanitize_flags() {
             local input="$1"
@@ -219,6 +222,7 @@ jobs:
       - name: Cargo build
         shell: bash
         run: |
+          echo "CARGO_PROFILE_RELEASE_LTO: ${CARGO_PROFILE_RELEASE_LTO}"
           cargo build --target ${{ matrix.target }} --release --timings --bin codex --bin codex-responses-api-proxy
 
       - name: Upload Cargo timings
@@ -394,7 +398,7 @@ jobs:
   build-stellar:
     if: ${{ github.repository == 'stellarlinkco/codex' }}
     needs: tag-check
-    name: Build - ${{ matrix.runner }} - ${{ matrix.target }}
+    name: Build - ${{ matrix.runner }} - ${{ matrix.target }}${{ matrix.asset_suffix || '' }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
     permissions:
@@ -406,6 +410,8 @@ jobs:
     env:
       CARGO_PROFILE_RELEASE_LTO: ${{ contains(github.ref_name, '-alpha') && 'thin' || 'fat' }}
       TARGET: ${{ matrix.target }}
+      ASSET_SUFFIX: ${{ matrix.asset_suffix || '' }}
+      LEGACY_MUSL: ${{ matrix.legacy_musl || 'false' }}
 
     strategy:
       fail-fast: false
@@ -419,6 +425,10 @@ jobs:
             target: x86_64-apple-darwin
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-musl
+          - runner: ubuntu-22.04
+            target: x86_64-unknown-linux-musl
+            asset_suffix: -legacy
+            legacy_musl: "true"
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
 
@@ -542,10 +552,38 @@ jobs:
           echo "CFLAGS=${cflags}" >> "$GITHUB_ENV"
           echo "CXXFLAGS=${cxxflags}" >> "$GITHUB_ENV"
 
+      - if: ${{ env.LEGACY_MUSL == 'true' }}
+        name: Configure legacy musl release flags
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CARGO_PROFILE_RELEASE_LTO=off" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=-C target-feature=+crt-static -C relocation-model=static" >> "$GITHUB_ENV"
       - name: Cargo build
         shell: bash
         run: |
           cargo build --target "${TARGET}" --release --timings --bin codex --bin codex-responses-api-proxy
+
+      - if: ${{ env.LEGACY_MUSL == 'true' }}
+        name: Smoke-test legacy musl binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          for bin in "target/${TARGET}/release/codex" "target/${TARGET}/release/codex-responses-api-proxy"; do
+            file "$bin"
+            if file "$bin" | grep -q 'dynamically linked'; then
+              echo "❌ $bin is still dynamically linked" >&2
+              exit 1
+            fi
+            if readelf -l "$bin" | grep -q 'Requesting program interpreter'; then
+              echo "❌ $bin still has an ELF interpreter" >&2
+              exit 1
+            fi
+          done
+          target/${TARGET}/release/codex --version
+          target/${TARGET}/release/codex-responses-api-proxy --help >/dev/null
 
       - name: Verify GLIBC requirements (Ubuntu 22.04)
         if: ${{ runner.os == 'Linux' && env.TARGET == 'x86_64-unknown-linux-gnu' }}
@@ -594,7 +632,7 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
-          name: cargo-timings-rust-release-${{ env.TARGET }}
+          name: cargo-timings-rust-release-${{ env.TARGET }}${{ env.ASSET_SUFFIX }}
           path: codex-rs/target/**/cargo-timings/cargo-timing.html
           if-no-files-found: warn
 
@@ -606,15 +644,15 @@ jobs:
             ext=".exe"
           fi
 
-          dest="dist/${TARGET}"
+          dest="dist/${TARGET}${ASSET_SUFFIX}"
           mkdir -p "$dest"
-          cp "target/${TARGET}/release/codex${ext}" "$dest/codex-${TARGET}${ext}"
-          cp "target/${TARGET}/release/codex-responses-api-proxy${ext}" "$dest/codex-responses-api-proxy-${TARGET}${ext}"
+          cp "target/${TARGET}/release/codex${ext}" "$dest/codex-${TARGET}${ASSET_SUFFIX}${ext}"
+          cp "target/${TARGET}/release/codex-responses-api-proxy${ext}" "$dest/codex-responses-api-proxy-${TARGET}${ASSET_SUFFIX}${ext}"
 
       - name: Compress artifacts
         shell: bash
         run: |
-          dest="dist/${TARGET}"
+          dest="dist/${TARGET}${ASSET_SUFFIX}"
           for f in "$dest"/*; do
             base="$(basename "$f")"
             if [[ "$base" == *.tar.gz || "$base" == *.zip || "$base" == *.dmg || "$base" == *.sigstore ]]; then
@@ -635,9 +673,9 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ env.TARGET }}
+          name: ${{ env.TARGET }}${{ env.ASSET_SUFFIX }}
           path: |
-            codex-rs/dist/${{ env.TARGET }}/*
+            codex-rs/dist/${{ env.TARGET }}${{ env.ASSET_SUFFIX }}/*
 
       - name: Upload release artifacts (attempt 2)
         id: upload_release_artifacts_2
@@ -645,17 +683,17 @@ jobs:
         continue-on-error: true
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ env.TARGET }}
+          name: ${{ env.TARGET }}${{ env.ASSET_SUFFIX }}
           path: |
-            codex-rs/dist/${{ env.TARGET }}/*
+            codex-rs/dist/${{ env.TARGET }}${{ env.ASSET_SUFFIX }}/*
 
       - name: Upload release artifacts (attempt 3)
         if: steps.upload_release_artifacts_2.outcome == 'failure'
         uses: actions/upload-artifact@v6
         with:
-          name: ${{ env.TARGET }}
+          name: ${{ env.TARGET }}${{ env.ASSET_SUFFIX }}
           path: |
-            codex-rs/dist/${{ env.TARGET }}/*
+            codex-rs/dist/${{ env.TARGET }}${{ env.ASSET_SUFFIX }}/*
 
   build-windows:
     if: ${{ github.repository == 'openai/codex' }}
@@ -746,7 +784,7 @@ jobs:
 
           echo "path=${notes_path}" >> "${GITHUB_OUTPUT}"
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           path: dist
 
@@ -981,6 +1019,29 @@ jobs:
 
             exit "${publish_status}"
           done
+
+  winget:
+    name: winget
+    needs: release
+    # Only publish stable/mainline releases to WinGet; pre-releases include a
+    # '-' in the semver string (e.g., 1.2.3-alpha.1).
+    if: ${{ !contains(needs.release.outputs.version, '-') }}
+    # This job only invokes a GitHub Action to open/update the winget-pkgs PR;
+    # it does not execute Windows-only tooling, so Linux is sufficient.
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Publish to WinGet
+        uses: vedantmgoyal9/winget-releaser@19e706d4c9121098010096f9c495a70a7518b30f
+        with:
+          identifier: OpenAI.Codex
+          version: ${{ needs.release.outputs.version }}
+          release-tag: ${{ needs.release.outputs.tag }}
+          fork-user: openai-oss-forks
+          installers-regex: '^codex-(?:x86_64|aarch64)-pc-windows-msvc\.exe\.zip$'
+          token: ${{ secrets.WINGET_PUBLISH_PAT }}
 
   update-branch:
     if: ${{ github.repository == 'openai/codex' }}

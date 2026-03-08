@@ -67,9 +67,14 @@ impl TargetPath {
                 (path, name.to_string())
             }
             TargetPath::OutsideWorkspace(name) => {
-                let path = env::current_dir()
-                    .expect("current dir should be available")
-                    .join(name);
+                let outside_root = PathBuf::from(
+                    env::var_os("HOME")
+                        .expect("HOME should be available for outside-workspace tests"),
+                )
+                .join(".codex-approval-tests");
+                fs::create_dir_all(&outside_root)
+                    .expect("outside-workspace test root should be creatable");
+                let path = outside_root.join(name);
                 (path.clone(), path.display().to_string())
             }
         }
@@ -239,7 +244,7 @@ fn shell_event_with_prefix_rule(
         "command": command,
         "timeout_ms": timeout_ms,
     });
-    if sandbox_permissions.requires_additional_permissions() {
+    if sandbox_permissions.requests_sandbox_override() {
         args["sandbox_permissions"] = json!(sandbox_permissions);
     }
     if let Some(prefix_rule) = prefix_rule {
@@ -262,7 +267,7 @@ fn exec_command_event(
     if let Some(yield_time_ms) = yield_time_ms {
         args["yield_time_ms"] = json!(yield_time_ms);
     }
-    if sandbox_permissions.requires_additional_permissions() {
+    if sandbox_permissions.requests_sandbox_override() {
         args["sandbox_permissions"] = json!(sandbox_permissions);
         let reason = justification.unwrap_or(DEFAULT_UNIFIED_EXEC_JUSTIFICATION);
         args["justification"] = json!(reason);
@@ -1598,7 +1603,10 @@ async fn run_scenario(scenario: &ScenarioSpec) -> Result<()> {
         config.permissions.approval_policy = Constrained::allow_any(approval_policy);
         config.permissions.sandbox_policy = Constrained::allow_any(sandbox_policy.clone());
         for feature in features {
-            config.features.enable(feature);
+            config
+                .features
+                .enable(feature)
+                .expect("test config should allow feature update");
         }
     });
     let test = builder.build(&server).await?;
@@ -1689,8 +1697,12 @@ async fn run_scenario(scenario: &ScenarioSpec) -> Result<()> {
 
     let output_item = results_mock.single_request().function_call_output(call_id);
     let result = parse_result(&output_item);
-    scenario.expectation.verify(&test, &result)?;
+    let verify_result = scenario.expectation.verify(&test, &result);
 
+    test.codex.submit(Op::Shutdown).await?;
+    wait_for_event(&test.codex, |ev| matches!(ev, EventMsg::ShutdownComplete)).await;
+
+    verify_result?;
     Ok(())
 }
 
@@ -2231,7 +2243,12 @@ async fn denying_network_policy_amendment_persists_policy_and_skips_future_netwo
     let home = Arc::new(TempDir::new()?);
     fs::write(
         home.path().join("config.toml"),
-        r#"[permissions.network]
+        r#"default_permissions = "workspace"
+
+[permissions.workspace.filesystem]
+":minimal" = "read"
+
+[permissions.workspace.network]
 enabled = true
 mode = "limited"
 allow_local_binding = true

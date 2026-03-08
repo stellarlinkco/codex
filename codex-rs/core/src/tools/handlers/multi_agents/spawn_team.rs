@@ -168,7 +168,11 @@ pub async fn handle(
             .agent_control
             .spawn_agent_thread(
                 config.clone(),
-                Some(thread_spawn_source(session.conversation_id, child_depth)),
+                Some(thread_spawn_source_with_role(
+                    session.conversation_id,
+                    child_depth,
+                    role_name.map(str::to_owned),
+                )),
             )
             .await;
         let spawn_result = match spawn_result {
@@ -182,7 +186,11 @@ pub async fn handle(
                         .agent_control
                         .spawn_agent_thread(
                             config,
-                            Some(thread_spawn_source(session.conversation_id, child_depth)),
+                            Some(thread_spawn_source_with_role(
+                                session.conversation_id,
+                                child_depth,
+                                role_name.map(str::to_owned),
+                            )),
                         )
                         .await
                 }

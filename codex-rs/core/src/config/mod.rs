@@ -28,6 +28,7 @@ use crate::config::types::WindowsSandboxModeToml;
 use crate::config::types::WindowsToml;
 use crate::config_loader::CloudRequirementsLoader;
 use crate::config_loader::ConfigLayerStack;
+use crate::config_loader::ConfigLayerStackOrdering;
 use crate::config_loader::ConfigRequirements;
 use crate::config_loader::ConstrainedWithSource;
 use crate::config_loader::LoaderOverrides;
@@ -41,12 +42,14 @@ use crate::features::FeatureOverrides;
 use crate::features::Features;
 use crate::features::FeaturesToml;
 use crate::git_info::resolve_root_git_project_for_trust;
+use crate::memories::memory_root;
 use crate::model_provider_info::LEGACY_OLLAMA_CHAT_PROVIDER_ID;
 use crate::model_provider_info::LMSTUDIO_OSS_PROVIDER_ID;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::OLLAMA_CHAT_PROVIDER_REMOVED_ERROR;
 use crate::model_provider_info::OLLAMA_OSS_PROVIDER_ID;
 use crate::model_provider_info::built_in_model_providers;
+use crate::path_utils::normalize_for_native_workdir;
 use crate::project_doc::DEFAULT_PROJECT_DOC_FILENAME;
 use crate::project_doc::LOCAL_PROJECT_DOC_FILENAME;
 use crate::protocol::AskForApproval;
@@ -66,11 +69,15 @@ use codex_protocol::config_types::SandboxMode;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::TrustLevel;
 use codex_protocol::config_types::Verbosity;
+use codex_protocol::config_types::WebSearchConfig;
 use codex_protocol::config_types::WebSearchMode;
+use codex_protocol::config_types::WebSearchToolConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::MacOsSeatbeltProfileExtensions;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_rmcp_client::OAuthCredentialsStoreMode;
 use codex_utils_absolute_path::AbsolutePathBuf;
 use codex_utils_absolute_path::AbsolutePathBufGuard;
@@ -79,20 +86,22 @@ use serde::Deserialize;
 use serde::Serialize;
 use similar::DiffableStr;
 use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
-#[cfg(test)]
-use tempfile::tempdir;
 
-use crate::config::permissions::network_proxy_config_from_permissions;
+use crate::config::permissions::compile_permission_profile;
+use crate::config::permissions::network_proxy_config_from_profile_network;
 use crate::config::profile::ConfigProfile;
+use codex_network_proxy::NetworkProxyConfig;
 use toml::Value as TomlValue;
 use toml_edit::DocumentMut;
 
 pub mod edit;
 pub(crate) mod hooks;
+mod managed_features;
 mod network_proxy_spec;
 mod permissions;
 pub mod profile;
@@ -104,10 +113,15 @@ pub use codex_config::ConstraintError;
 pub use codex_config::ConstraintResult;
 pub use codex_network_proxy::NetworkProxyAuditMetadata;
 
+pub use managed_features::ManagedFeatures;
 pub use network_proxy_spec::NetworkProxySpec;
 pub use network_proxy_spec::StartedNetworkProxy;
+pub use permissions::FilesystemPermissionToml;
+pub use permissions::FilesystemPermissionsToml;
 pub use permissions::NetworkToml;
+pub use permissions::PermissionProfileToml;
 pub use permissions::PermissionsToml;
+pub(crate) use permissions::resolve_permission_profile;
 pub use service::ConfigService;
 pub use service::ConfigServiceError;
 
@@ -138,7 +152,7 @@ fn resolve_sqlite_home_env(resolved_cwd: &Path) -> Option<PathBuf> {
 }
 #[cfg(test)]
 pub(crate) fn test_config() -> Config {
-    let codex_home = tempdir().expect("create temp dir");
+    let codex_home = tempfile::tempdir().expect("create temp dir");
     Config::load_from_base_config_with_overrides(
         ConfigToml::default(),
         ConfigOverrides::default(),
@@ -154,6 +168,12 @@ pub struct Permissions {
     pub approval_policy: Constrained<AskForApproval>,
     /// Effective sandbox policy used for shell/unified exec.
     pub sandbox_policy: Constrained<SandboxPolicy>,
+    /// Effective filesystem sandbox policy, including entries that cannot yet
+    /// be fully represented by the legacy [`SandboxPolicy`] projection.
+    pub file_system_sandbox_policy: FileSystemSandboxPolicy,
+    /// Effective network sandbox policy split out from the legacy
+    /// [`SandboxPolicy`] projection.
+    pub network_sandbox_policy: NetworkSandboxPolicy,
     /// Effective network configuration applied to all spawned processes.
     pub network: Option<NetworkProxySpec>,
     /// Whether the model may request a login shell for shell-based tools.
@@ -216,10 +236,6 @@ pub struct Config {
     /// particular geography. HTTP clients should direct their requests
     /// using backend-specific headers or URLs to enforce this.
     pub enforce_residency: Constrained<Option<ResidencyRequirement>>,
-
-    /// True if the user passed in an override or set a value in config.toml
-    /// for either of approval_policy or sandbox_mode.
-    pub did_user_set_custom_approval_policy_or_sandbox_mode: bool,
 
     /// When `true`, `AgentReasoning` events emitted by the backend will be
     /// suppressed from the frontend output. This can reduce visual noise when
@@ -452,6 +468,10 @@ pub struct Config {
     /// websocket transport instructions (the `Op::RealtimeConversation`
     /// `/ws` session.update instructions) without changing normal prompts.
     pub experimental_realtime_ws_backend_prompt: Option<String>,
+    /// Experimental / do not use. Replaces the synthesized realtime startup
+    /// context appended to websocket session instructions. An empty string
+    /// disables startup context injection entirely.
+    pub experimental_realtime_ws_startup_context: Option<String>,
     /// When set, restricts ChatGPT login to a specific workspace identifier.
     pub forced_chatgpt_workspace_id: Option<String>,
 
@@ -466,6 +486,9 @@ pub struct Config {
     /// Explicit or feature-derived web search mode.
     pub web_search_mode: Constrained<WebSearchMode>,
 
+    /// Additional parameters for the web search tool when it is enabled.
+    pub web_search_config: Option<WebSearchConfig>,
+
     /// If set to `true`, used only the experimental unified exec tool.
     pub use_experimental_unified_exec_tool: bool,
 
@@ -477,7 +500,7 @@ pub struct Config {
     pub ghost_snapshot: GhostSnapshotConfig,
 
     /// Centralized feature flags; source of truth for feature gating.
-    pub features: Features,
+    pub features: ManagedFeatures,
 
     /// When `true`, suppress warnings about unstable (under development) features.
     pub suppress_unstable_features_warning: bool,
@@ -1049,7 +1072,11 @@ pub struct ConfigToml {
     /// Sandbox configuration to apply if `sandbox` is `WorkspaceWrite`.
     pub sandbox_workspace_write: Option<SandboxWorkspaceWrite>,
 
-    /// Nested permissions settings.
+    /// Default named permissions profile to apply from the `[permissions]`
+    /// table.
+    pub default_permissions: Option<String>,
+
+    /// Named permissions profiles.
     #[serde(default)]
     pub permissions: Option<PermissionsToml>,
 
@@ -1218,6 +1245,10 @@ pub struct ConfigToml {
     /// websocket transport instructions (the `Op::RealtimeConversation`
     /// `/ws` session.update instructions) without changing normal prompts.
     pub experimental_realtime_ws_backend_prompt: Option<String>,
+    /// Experimental / do not use. Replaces the synthesized realtime startup
+    /// context appended to websocket session instructions. An empty string
+    /// disables startup context injection entirely.
+    pub experimental_realtime_ws_startup_context: Option<String>,
     pub projects: Option<HashMap<String, ProjectConfig>>,
 
     /// Controls the web search tool mode: disabled, cached, or live.
@@ -1364,8 +1395,8 @@ pub struct RealtimeAudioToml {
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, JsonSchema)]
 #[schemars(deny_unknown_fields)]
 pub struct ToolsToml {
-    #[serde(default, alias = "web_search_request")]
-    pub web_search: Option<bool>,
+    #[serde(default)]
+    pub web_search: Option<WebSearchToolConfig>,
 
     /// Enable the `view_image` tool that lets the agent attach local images.
     #[serde(default)]
@@ -1394,6 +1425,7 @@ pub struct AgentsToml {
     /// [agents.researcher]
     /// description = "Research-focused role."
     /// config_file = "./agents/researcher.toml"
+    /// nickname_candidates = ["Herodotus", "Ibn Battuta"]
     /// ```
     #[serde(default, flatten)]
     pub roles: BTreeMap<String, AgentRoleToml>,
@@ -1405,6 +1437,8 @@ pub struct AgentRoleConfig {
     pub description: Option<String>,
     /// Path to a role-specific config layer.
     pub config_file: Option<PathBuf>,
+    /// Candidate nicknames for agents spawned with this role.
+    pub nickname_candidates: Option<Vec<String>>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
@@ -1416,12 +1450,15 @@ pub struct AgentRoleToml {
     /// Path to a role-specific config layer.
     /// Relative paths are resolved relative to the `config.toml` that defines them.
     pub config_file: Option<AbsolutePathBuf>,
+
+    /// Candidate nicknames for agents spawned with this role.
+    pub nickname_candidates: Option<Vec<String>>,
 }
 
 impl From<ToolsToml> for Tools {
     fn from(tools_toml: ToolsToml) -> Self {
         Self {
-            web_search: tools_toml.web_search,
+            web_search: tools_toml.web_search.is_some().then_some(true),
             view_image: tools_toml.view_image,
         }
     }
@@ -1567,6 +1604,78 @@ impl ConfigToml {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PermissionConfigSyntax {
+    Legacy,
+    Profiles,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct PermissionSelectionToml {
+    default_permissions: Option<String>,
+    sandbox_mode: Option<SandboxMode>,
+}
+
+fn resolve_permission_config_syntax(
+    config_layer_stack: &ConfigLayerStack,
+    cfg: &ConfigToml,
+    sandbox_mode_override: Option<SandboxMode>,
+    profile_sandbox_mode: Option<SandboxMode>,
+) -> Option<PermissionConfigSyntax> {
+    if sandbox_mode_override.is_some() || profile_sandbox_mode.is_some() {
+        return Some(PermissionConfigSyntax::Legacy);
+    }
+
+    let mut selection = None;
+    for layer in
+        config_layer_stack.get_layers(ConfigLayerStackOrdering::LowestPrecedenceFirst, false)
+    {
+        let Ok(layer_selection) = layer.config.clone().try_into::<PermissionSelectionToml>() else {
+            continue;
+        };
+
+        if layer_selection.sandbox_mode.is_some() {
+            selection = Some(PermissionConfigSyntax::Legacy);
+        }
+        if layer_selection.default_permissions.is_some() {
+            selection = Some(PermissionConfigSyntax::Profiles);
+        }
+    }
+
+    selection.or_else(|| {
+        if cfg.default_permissions.is_some() {
+            Some(PermissionConfigSyntax::Profiles)
+        } else if cfg.sandbox_mode.is_some() {
+            Some(PermissionConfigSyntax::Legacy)
+        } else {
+            None
+        }
+    })
+}
+
+fn add_additional_file_system_writes(
+    file_system_sandbox_policy: &mut FileSystemSandboxPolicy,
+    additional_writable_roots: &[AbsolutePathBuf],
+) {
+    for path in additional_writable_roots {
+        let exists = file_system_sandbox_policy.entries.iter().any(|entry| {
+            matches!(
+                &entry.path,
+                codex_protocol::permissions::FileSystemPath::Path { path: existing }
+                    if existing == path && entry.access == codex_protocol::permissions::FileSystemAccessMode::Write
+            )
+        });
+        if !exists {
+            file_system_sandbox_policy.entries.push(
+                codex_protocol::permissions::FileSystemSandboxEntry {
+                    path: codex_protocol::permissions::FileSystemPath::Path { path: path.clone() },
+                    access: codex_protocol::permissions::FileSystemAccessMode::Write,
+                },
+            );
+        }
+    }
+}
+
 /// Optional overrides for user configuration (e.g., from CLI flags).
 #[derive(Default, Debug, Clone)]
 pub struct ConfigOverrides {
@@ -1641,6 +1750,27 @@ fn resolve_web_search_mode(
     None
 }
 
+fn resolve_web_search_config(
+    config_toml: &ConfigToml,
+    config_profile: &ConfigProfile,
+) -> Option<WebSearchConfig> {
+    let base = config_toml
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.web_search.as_ref());
+    let profile = config_profile
+        .tools
+        .as_ref()
+        .and_then(|tools| tools.web_search.as_ref());
+
+    match (base, profile) {
+        (None, None) => None,
+        (Some(base), None) => Some(base.clone().into()),
+        (None, Some(profile)) => Some(profile.clone().into()),
+        (Some(base), Some(profile)) => Some(base.merge(profile).into()),
+    }
+}
+
 pub(crate) fn resolve_web_search_mode_for_turn(
     web_search_mode: &Constrained<WebSearchMode>,
     sandbox_policy: &SandboxPolicy,
@@ -1695,7 +1825,19 @@ impl Config {
         codex_home: PathBuf,
         config_layer_stack: ConfigLayerStack,
     ) -> std::io::Result<Self> {
-        let requirements = config_layer_stack.requirements().clone();
+        // Ensure that every field of ConfigRequirements is applied to the final
+        // Config.
+        let ConfigRequirements {
+            approval_policy: mut constrained_approval_policy,
+            sandbox_policy: mut constrained_sandbox_policy,
+            web_search_mode: mut constrained_web_search_mode,
+            feature_requirements,
+            mcp_servers,
+            exec_policy: _,
+            enforce_residency,
+            network: network_requirements,
+        } = config_layer_stack.requirements().clone();
+
         let user_instructions = Self::load_instructions(Some(&codex_home));
         let mut startup_warnings = Vec::new();
 
@@ -1742,17 +1884,15 @@ impl Config {
                 .clone(),
             None => ConfigProfile::default(),
         };
-        let configured_network_proxy_config =
-            network_proxy_config_from_permissions(cfg.permissions.as_ref());
-
         let feature_overrides = FeatureOverrides {
             include_apply_patch_tool: include_apply_patch_tool_override,
             web_search_request: override_tools_web_search_request,
         };
 
-        let features = Features::from_config(&cfg, &config_profile, feature_overrides);
+        let configured_features = Features::from_config(&cfg, &config_profile, feature_overrides);
+        let features = ManagedFeatures::from_configured(configured_features, feature_requirements)?;
         let windows_sandbox_mode = resolve_windows_sandbox_mode(&cfg, &config_profile);
-        let resolved_cwd = {
+        let resolved_cwd = normalize_for_native_workdir({
             use std::env;
 
             match cwd {
@@ -1769,37 +1909,121 @@ impl Config {
                     current
                 }
             }
-        };
-        let additional_writable_roots: Vec<AbsolutePathBuf> = additional_writable_roots
+        });
+        let mut additional_writable_roots: Vec<AbsolutePathBuf> = additional_writable_roots
             .into_iter()
             .map(|path| AbsolutePathBuf::resolve_path_against_base(path, &resolved_cwd))
             .collect::<Result<Vec<_>, _>>()?;
         let active_project = cfg
             .get_active_project(&resolved_cwd)
             .unwrap_or(ProjectConfig { trust_level: None });
-        let sandbox_mode_was_explicit = sandbox_mode.is_some()
-            || config_profile.sandbox_mode.is_some()
-            || cfg.sandbox_mode.is_some();
+        let permission_config_syntax = resolve_permission_config_syntax(
+            &config_layer_stack,
+            &cfg,
+            sandbox_mode,
+            config_profile.sandbox_mode,
+        );
+        let has_permission_profiles = cfg
+            .permissions
+            .as_ref()
+            .is_some_and(|profiles| !profiles.is_empty());
+        if has_permission_profiles
+            && !matches!(
+                permission_config_syntax,
+                Some(PermissionConfigSyntax::Legacy)
+            )
+            && cfg.default_permissions.is_none()
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "config defines `[permissions]` profiles but does not set `default_permissions`",
+            ));
+        }
 
         let windows_sandbox_level = match windows_sandbox_mode {
             Some(WindowsSandboxModeToml::Elevated) => WindowsSandboxLevel::Elevated,
             Some(WindowsSandboxModeToml::Unelevated) => WindowsSandboxLevel::RestrictedToken,
             None => WindowsSandboxLevel::from_features(&features),
         };
-        let mut sandbox_policy = cfg.derive_sandbox_policy(
-            sandbox_mode,
-            config_profile.sandbox_mode,
-            windows_sandbox_level,
-            &resolved_cwd,
-            Some(&requirements.sandbox_policy),
-        );
-        if let SandboxPolicy::WorkspaceWrite { writable_roots, .. } = &mut sandbox_policy {
-            for path in additional_writable_roots {
-                if !writable_roots.iter().any(|existing| existing == &path) {
-                    writable_roots.push(path);
+        let memories_root = memory_root(&codex_home);
+        std::fs::create_dir_all(&memories_root)?;
+        let memories_root = AbsolutePathBuf::from_absolute_path(&memories_root)?;
+        if !additional_writable_roots
+            .iter()
+            .any(|existing| existing == &memories_root)
+        {
+            additional_writable_roots.push(memories_root);
+        }
+
+        let profiles_are_active = matches!(
+            permission_config_syntax,
+            Some(PermissionConfigSyntax::Profiles)
+        ) || (permission_config_syntax.is_none()
+            && has_permission_profiles);
+        let (
+            configured_network_proxy_config,
+            sandbox_policy,
+            file_system_sandbox_policy,
+            network_sandbox_policy,
+        ) = if profiles_are_active {
+            let permissions = cfg.permissions.as_ref().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "default_permissions requires a `[permissions]` table",
+                )
+            })?;
+            let default_permissions = cfg.default_permissions.as_deref().ok_or_else(|| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "default_permissions requires a named permissions profile",
+                )
+            })?;
+            let profile = resolve_permission_profile(permissions, default_permissions)?;
+            let configured_network_proxy_config =
+                network_proxy_config_from_profile_network(profile.network.as_ref());
+            let (mut file_system_sandbox_policy, network_sandbox_policy) =
+                compile_permission_profile(permissions, default_permissions)?;
+            let mut sandbox_policy = file_system_sandbox_policy
+                .to_legacy_sandbox_policy(network_sandbox_policy, &resolved_cwd)?;
+            if matches!(sandbox_policy, SandboxPolicy::WorkspaceWrite { .. }) {
+                add_additional_file_system_writes(
+                    &mut file_system_sandbox_policy,
+                    &additional_writable_roots,
+                );
+                sandbox_policy = file_system_sandbox_policy
+                    .to_legacy_sandbox_policy(network_sandbox_policy, &resolved_cwd)?;
+            }
+            (
+                configured_network_proxy_config,
+                sandbox_policy,
+                file_system_sandbox_policy,
+                network_sandbox_policy,
+            )
+        } else {
+            let configured_network_proxy_config = NetworkProxyConfig::default();
+            let mut sandbox_policy = cfg.derive_sandbox_policy(
+                sandbox_mode,
+                config_profile.sandbox_mode,
+                windows_sandbox_level,
+                &resolved_cwd,
+                Some(&constrained_sandbox_policy),
+            );
+            if let SandboxPolicy::WorkspaceWrite { writable_roots, .. } = &mut sandbox_policy {
+                for path in &additional_writable_roots {
+                    if !writable_roots.iter().any(|existing| existing == path) {
+                        writable_roots.push(path.clone());
+                    }
                 }
             }
-        }
+            let file_system_sandbox_policy = FileSystemSandboxPolicy::from(&sandbox_policy);
+            let network_sandbox_policy = NetworkSandboxPolicy::from(&sandbox_policy);
+            (
+                configured_network_proxy_config,
+                sandbox_policy,
+                file_system_sandbox_policy,
+                network_sandbox_policy,
+            )
+        };
         let approval_policy_was_explicit = approval_policy_override.is_some()
             || config_profile.approval_policy.is_some()
             || cfg.approval_policy.is_some();
@@ -1816,20 +2040,17 @@ impl Config {
                 }
             });
         if !approval_policy_was_explicit
-            && let Err(err) = requirements.approval_policy.can_set(&approval_policy)
+            && let Err(err) = constrained_approval_policy.can_set(&approval_policy)
         {
             tracing::warn!(
                 error = %err,
                 "default approval policy is disallowed by requirements; falling back to required default"
             );
-            approval_policy = requirements.approval_policy.value();
+            approval_policy = constrained_approval_policy.value();
         }
         let web_search_mode = resolve_web_search_mode(&cfg, &config_profile, &features)
             .unwrap_or(WebSearchMode::Cached);
-        // TODO(dylan): We should be able to leverage ConfigLayerStack so that
-        // we can reliably check this at every config level.
-        let did_user_set_custom_approval_policy_or_sandbox_mode =
-            approval_policy_was_explicit || sandbox_mode_was_explicit;
+        let web_search_config = resolve_web_search_config(&cfg, &config_profile);
 
         let mut model_providers = built_in_model_providers();
         // Merge user-defined providers into the built-in list.
@@ -1891,11 +2112,16 @@ impl Config {
                         let config_file =
                             role.config_file.as_ref().map(AbsolutePathBuf::to_path_buf);
                         Self::validate_agent_role_config_file(name, config_file.as_deref())?;
+                        let nickname_candidates = Self::normalize_agent_role_nickname_candidates(
+                            name,
+                            role.nickname_candidates.as_deref(),
+                        )?;
                         Ok((
                             name.clone(),
                             AgentRoleConfig {
                                 description: role.description.clone(),
                                 config_file,
+                                nickname_candidates,
                             },
                         ))
                     })
@@ -1968,15 +2194,14 @@ impl Config {
         let forced_login_method = cfg.forced_login_method;
 
         let model = model.or(config_profile.model).or(cfg.model);
-        let service_tier = if features.enabled(Feature::FastMode) {
-            service_tier_override.unwrap_or_else(|| {
-                config_profile
-                    .service_tier
-                    .or(cfg.service_tier)
-                    .filter(|tier| matches!(tier, ServiceTier::Fast))
-            })
-        } else {
-            None
+        let service_tier = service_tier_override
+            .unwrap_or_else(|| config_profile.service_tier.or(cfg.service_tier));
+        let service_tier = match service_tier {
+            Some(ServiceTier::Fast) if features.enabled(Feature::FastMode) => {
+                Some(ServiceTier::Fast)
+            }
+            Some(ServiceTier::Flex) => Some(ServiceTier::Flex),
+            _ => None,
         };
 
         let compact_prompt = compact_prompt.or(cfg.compact_prompt).and_then(|value| {
@@ -2066,18 +2291,7 @@ impl Config {
             .map(AbsolutePathBuf::to_path_buf)
             .or_else(|| resolve_sqlite_home_env(&resolved_cwd))
             .unwrap_or_else(|| codex_home.to_path_buf());
-
-        // Ensure that every field of ConfigRequirements is applied to the final
-        // Config.
-        let ConfigRequirements {
-            approval_policy: mut constrained_approval_policy,
-            sandbox_policy: mut constrained_sandbox_policy,
-            web_search_mode: mut constrained_web_search_mode,
-            mcp_servers,
-            exec_policy: _,
-            enforce_residency,
-            network: network_requirements,
-        } = requirements;
+        let original_sandbox_policy = sandbox_policy.clone();
 
         apply_requirement_constrained_value(
             "approval_policy",
@@ -2109,6 +2323,7 @@ impl Config {
         let network = NetworkProxySpec::from_config_and_constraints(
             configured_network_proxy_config,
             network_requirements,
+            constrained_sandbox_policy.get(),
         )
         .map_err(|err| {
             if let Some(source) = network_requirements_source.as_ref() {
@@ -2125,6 +2340,19 @@ impl Config {
         } else {
             network.enabled().then_some(network)
         };
+        let effective_sandbox_policy = constrained_sandbox_policy.value.get().clone();
+        let effective_file_system_sandbox_policy =
+            if effective_sandbox_policy == original_sandbox_policy {
+                file_system_sandbox_policy
+            } else {
+                FileSystemSandboxPolicy::from(&effective_sandbox_policy)
+            };
+        let effective_network_sandbox_policy =
+            if effective_sandbox_policy == original_sandbox_policy {
+                network_sandbox_policy
+            } else {
+                NetworkSandboxPolicy::from(&effective_sandbox_policy)
+            };
 
         let config = Self {
             model,
@@ -2139,6 +2367,8 @@ impl Config {
             permissions: Permissions {
                 approval_policy: constrained_approval_policy.value,
                 sandbox_policy: constrained_sandbox_policy.value,
+                file_system_sandbox_policy: effective_file_system_sandbox_policy,
+                network_sandbox_policy: effective_network_sandbox_policy,
                 network,
                 allow_login_shell,
                 shell_environment_policy,
@@ -2146,7 +2376,6 @@ impl Config {
                 macos_seatbelt_profile_extensions: None,
             },
             enforce_residency: enforce_residency.value,
-            did_user_set_custom_approval_policy_or_sandbox_mode,
             notify: cfg.notify,
             user_instructions,
             base_instructions,
@@ -2227,10 +2456,12 @@ impl Config {
             experimental_realtime_ws_base_url: cfg.experimental_realtime_ws_base_url,
             experimental_realtime_ws_model: cfg.experimental_realtime_ws_model,
             experimental_realtime_ws_backend_prompt: cfg.experimental_realtime_ws_backend_prompt,
+            experimental_realtime_ws_startup_context: cfg.experimental_realtime_ws_startup_context,
             forced_chatgpt_workspace_id,
             forced_login_method,
             include_apply_patch_tool: include_apply_patch_tool_flag,
             web_search_mode: constrained_web_search_mode.value,
+            web_search_config,
             use_experimental_unified_exec_tool,
             background_terminal_max_timeout,
             ghost_snapshot,
@@ -2374,6 +2605,58 @@ impl Config {
         }
     }
 
+    fn normalize_agent_role_nickname_candidates(
+        role_name: &str,
+        nickname_candidates: Option<&[String]>,
+    ) -> std::io::Result<Option<Vec<String>>> {
+        let Some(nickname_candidates) = nickname_candidates else {
+            return Ok(None);
+        };
+
+        if nickname_candidates.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("agents.{role_name}.nickname_candidates must contain at least one name"),
+            ));
+        }
+
+        let mut normalized_candidates = Vec::with_capacity(nickname_candidates.len());
+        let mut seen_candidates = BTreeSet::new();
+
+        for nickname in nickname_candidates {
+            let normalized_nickname = nickname.trim();
+            if normalized_nickname.is_empty() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("agents.{role_name}.nickname_candidates cannot contain blank names"),
+                ));
+            }
+
+            if !seen_candidates.insert(normalized_nickname.to_owned()) {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("agents.{role_name}.nickname_candidates cannot contain duplicates"),
+                ));
+            }
+
+            if !normalized_nickname
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, ' ' | '-' | '_'))
+            {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!(
+                        "agents.{role_name}.nickname_candidates may only contain ASCII letters, digits, spaces, hyphens, and underscores"
+                    ),
+                ));
+            }
+
+            normalized_candidates.push(normalized_nickname.to_owned());
+        }
+
+        Ok(Some(normalized_candidates))
+    }
+
     pub fn set_windows_sandbox_enabled(&mut self, value: bool) {
         self.permissions.windows_sandbox_mode = if value {
             Some(WindowsSandboxModeToml::Unelevated)
@@ -2475,6 +2758,7 @@ mod tests {
     use std::collections::HashMap;
     use std::time::Duration;
     use tempfile::TempDir;
+    use tempfile::tempdir;
 
     fn stdio_mcp(command: &str) -> McpServerConfig {
         McpServerConfig {
@@ -2665,7 +2949,9 @@ phase_2_model = "gpt-5"
     #[test]
     fn config_toml_deserializes_permissions_network() {
         let toml = r#"
-[permissions.network]
+default_permissions = "default"
+
+[permissions.default.network]
 enabled = true
 proxy_url = "http://127.0.0.1:43128"
 enable_socks5 = false
@@ -2677,18 +2963,17 @@ allowed_domains = ["openai.com"]
 
         assert_eq!(
             cfg.permissions
-                .and_then(|permissions| permissions.network)
+                .and_then(|permissions| permissions.entries.get("default").cloned())
+                .and_then(|profile| profile.network)
                 .expect("permissions.network should deserialize"),
             NetworkToml {
                 enabled: Some(true),
                 proxy_url: Some("http://127.0.0.1:43128".to_string()),
-                admin_url: None,
                 enable_socks5: Some(false),
                 socks_url: None,
                 enable_socks5_udp: None,
                 allow_upstream_proxy: Some(false),
                 dangerously_allow_non_loopback_proxy: None,
-                dangerously_allow_non_loopback_admin: None,
                 dangerously_allow_all_unix_sockets: None,
                 mode: None,
                 allowed_domains: Some(vec!["openai.com".to_string()]),
@@ -2703,13 +2988,27 @@ allowed_domains = ["openai.com"]
     fn permissions_network_enabled_populates_runtime_network_proxy_spec() -> std::io::Result<()> {
         let codex_home = TempDir::new()?;
         let cfg = ConfigToml {
+            default_permissions: Some("default".to_string()),
             permissions: Some(PermissionsToml {
-                network: Some(NetworkToml {
-                    enabled: Some(true),
-                    proxy_url: Some("http://127.0.0.1:43128".to_string()),
-                    enable_socks5: Some(false),
-                    ..Default::default()
-                }),
+                entries: BTreeMap::from([(
+                    "default".to_string(),
+                    PermissionProfileToml {
+                        filesystem: Some(FilesystemPermissionsToml {
+                            entries: BTreeMap::from([(
+                                ":project_roots".to_string(),
+                                FilesystemPermissionToml::Access(
+                                    codex_protocol::permissions::FileSystemAccessMode::Read,
+                                ),
+                            )]),
+                        }),
+                        network: Some(NetworkToml {
+                            enabled: Some(true),
+                            proxy_url: Some("http://127.0.0.1:43128".to_string()),
+                            enable_socks5: Some(false),
+                            ..Default::default()
+                        }),
+                    },
+                )]),
             }),
             ..Default::default()
         };
@@ -2734,11 +3033,25 @@ allowed_domains = ["openai.com"]
     fn permissions_network_disabled_by_default_does_not_start_proxy() -> std::io::Result<()> {
         let codex_home = TempDir::new()?;
         let cfg = ConfigToml {
+            default_permissions: Some("default".to_string()),
             permissions: Some(PermissionsToml {
-                network: Some(NetworkToml {
-                    allowed_domains: Some(vec!["openai.com".to_string()]),
-                    ..Default::default()
-                }),
+                entries: BTreeMap::from([(
+                    "default".to_string(),
+                    PermissionProfileToml {
+                        filesystem: Some(FilesystemPermissionsToml {
+                            entries: BTreeMap::from([(
+                                ":project_roots".to_string(),
+                                FilesystemPermissionToml::Access(
+                                    codex_protocol::permissions::FileSystemAccessMode::Read,
+                                ),
+                            )]),
+                        }),
+                        network: Some(NetworkToml {
+                            allowed_domains: Some(vec!["openai.com".to_string()]),
+                            ..Default::default()
+                        }),
+                    },
+                )]),
             }),
             ..Default::default()
         };
@@ -3299,7 +3612,9 @@ trust_level = "trusted"
         profiles.insert(
             "work".to_string(),
             ConfigProfile {
-                tools_web_search: Some(false),
+                features: Some(crate::features::FeaturesToml {
+                    entries: BTreeMap::from([("web_search_request".to_string(), false)]),
+                }),
                 ..Default::default()
             },
         );
@@ -3394,8 +3709,6 @@ profile = "project"
             config.permissions.sandbox_policy.get(),
             &SandboxPolicy::DangerFullAccess
         ));
-        assert!(config.did_user_set_custom_approval_policy_or_sandbox_mode);
-
         Ok(())
     }
 
@@ -4690,6 +5003,7 @@ model = "gpt-5.1-codex"
                     AgentRoleToml {
                         description: Some("Research role".to_string()),
                         config_file: Some(AbsolutePathBuf::from_absolute_path(missing_path)?),
+                        nickname_candidates: None,
                     },
                 )]),
             }),
@@ -4935,6 +5249,12 @@ model_verbosity = "high"
                 permissions: Permissions {
                     approval_policy: Constrained::allow_any(AskForApproval::Never),
                     sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
+                    file_system_sandbox_policy: FileSystemSandboxPolicy::from(
+                        &SandboxPolicy::new_read_only_policy(),
+                    ),
+                    network_sandbox_policy: NetworkSandboxPolicy::from(
+                        &SandboxPolicy::new_read_only_policy(),
+                    ),
                     network: None,
                     allow_login_shell: true,
                     shell_environment_policy: ShellEnvironmentPolicy::default(),
@@ -4942,7 +5262,6 @@ model_verbosity = "high"
                     macos_seatbelt_profile_extensions: None,
                 },
                 enforce_residency: Constrained::allow_any(None),
-                did_user_set_custom_approval_policy_or_sandbox_mode: true,
                 user_instructions: None,
                 notify: None,
                 cwd: fixture.cwd(),
@@ -4987,6 +5306,7 @@ model_verbosity = "high"
                 experimental_realtime_ws_base_url: None,
                 experimental_realtime_ws_model: None,
                 experimental_realtime_ws_backend_prompt: None,
+                experimental_realtime_ws_startup_context: None,
                 base_instructions: None,
                 developer_instructions: None,
                 compact_prompt: None,
@@ -4995,10 +5315,11 @@ model_verbosity = "high"
                 forced_login_method: None,
                 include_apply_patch_tool: false,
                 web_search_mode: Constrained::allow_any(WebSearchMode::Cached),
+                web_search_config: None,
                 use_experimental_unified_exec_tool: !cfg!(windows),
                 background_terminal_max_timeout: DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS,
                 ghost_snapshot: GhostSnapshotConfig::default(),
-                features: Features::with_defaults(),
+                features: Features::with_defaults().into(),
                 suppress_unstable_features_warning: false,
                 active_profile: Some("o3".to_string()),
                 active_project: ProjectConfig { trust_level: None },
@@ -5066,6 +5387,12 @@ model_verbosity = "high"
             permissions: Permissions {
                 approval_policy: Constrained::allow_any(AskForApproval::UnlessTrusted),
                 sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
+                file_system_sandbox_policy: FileSystemSandboxPolicy::from(
+                    &SandboxPolicy::new_read_only_policy(),
+                ),
+                network_sandbox_policy: NetworkSandboxPolicy::from(
+                    &SandboxPolicy::new_read_only_policy(),
+                ),
                 network: None,
                 allow_login_shell: true,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
@@ -5073,7 +5400,6 @@ model_verbosity = "high"
                 macos_seatbelt_profile_extensions: None,
             },
             enforce_residency: Constrained::allow_any(None),
-            did_user_set_custom_approval_policy_or_sandbox_mode: true,
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
@@ -5118,6 +5444,7 @@ model_verbosity = "high"
             experimental_realtime_ws_base_url: None,
             experimental_realtime_ws_model: None,
             experimental_realtime_ws_backend_prompt: None,
+            experimental_realtime_ws_startup_context: None,
             base_instructions: None,
             developer_instructions: None,
             compact_prompt: None,
@@ -5126,10 +5453,11 @@ model_verbosity = "high"
             forced_login_method: None,
             include_apply_patch_tool: false,
             web_search_mode: Constrained::allow_any(WebSearchMode::Cached),
+            web_search_config: None,
             use_experimental_unified_exec_tool: !cfg!(windows),
             background_terminal_max_timeout: DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS,
             ghost_snapshot: GhostSnapshotConfig::default(),
-            features: Features::with_defaults(),
+            features: Features::with_defaults().into(),
             suppress_unstable_features_warning: false,
             active_profile: Some("gpt3".to_string()),
             active_project: ProjectConfig { trust_level: None },
@@ -5195,6 +5523,12 @@ model_verbosity = "high"
             permissions: Permissions {
                 approval_policy: Constrained::allow_any(AskForApproval::OnFailure),
                 sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
+                file_system_sandbox_policy: FileSystemSandboxPolicy::from(
+                    &SandboxPolicy::new_read_only_policy(),
+                ),
+                network_sandbox_policy: NetworkSandboxPolicy::from(
+                    &SandboxPolicy::new_read_only_policy(),
+                ),
                 network: None,
                 allow_login_shell: true,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
@@ -5202,7 +5536,6 @@ model_verbosity = "high"
                 macos_seatbelt_profile_extensions: None,
             },
             enforce_residency: Constrained::allow_any(None),
-            did_user_set_custom_approval_policy_or_sandbox_mode: true,
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
@@ -5247,6 +5580,7 @@ model_verbosity = "high"
             experimental_realtime_ws_base_url: None,
             experimental_realtime_ws_model: None,
             experimental_realtime_ws_backend_prompt: None,
+            experimental_realtime_ws_startup_context: None,
             base_instructions: None,
             developer_instructions: None,
             compact_prompt: None,
@@ -5255,10 +5589,11 @@ model_verbosity = "high"
             forced_login_method: None,
             include_apply_patch_tool: false,
             web_search_mode: Constrained::allow_any(WebSearchMode::Cached),
+            web_search_config: None,
             use_experimental_unified_exec_tool: !cfg!(windows),
             background_terminal_max_timeout: DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS,
             ghost_snapshot: GhostSnapshotConfig::default(),
-            features: Features::with_defaults(),
+            features: Features::with_defaults().into(),
             suppress_unstable_features_warning: false,
             active_profile: Some("zdr".to_string()),
             active_project: ProjectConfig { trust_level: None },
@@ -5310,6 +5645,12 @@ model_verbosity = "high"
             permissions: Permissions {
                 approval_policy: Constrained::allow_any(AskForApproval::OnFailure),
                 sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
+                file_system_sandbox_policy: FileSystemSandboxPolicy::from(
+                    &SandboxPolicy::new_read_only_policy(),
+                ),
+                network_sandbox_policy: NetworkSandboxPolicy::from(
+                    &SandboxPolicy::new_read_only_policy(),
+                ),
                 network: None,
                 allow_login_shell: true,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
@@ -5317,7 +5658,6 @@ model_verbosity = "high"
                 macos_seatbelt_profile_extensions: None,
             },
             enforce_residency: Constrained::allow_any(None),
-            did_user_set_custom_approval_policy_or_sandbox_mode: true,
             user_instructions: None,
             notify: None,
             cwd: fixture.cwd(),
@@ -5362,6 +5702,7 @@ model_verbosity = "high"
             experimental_realtime_ws_base_url: None,
             experimental_realtime_ws_model: None,
             experimental_realtime_ws_backend_prompt: None,
+            experimental_realtime_ws_startup_context: None,
             base_instructions: None,
             developer_instructions: None,
             compact_prompt: None,
@@ -5370,10 +5711,11 @@ model_verbosity = "high"
             forced_login_method: None,
             include_apply_patch_tool: false,
             web_search_mode: Constrained::allow_any(WebSearchMode::Cached),
+            web_search_config: None,
             use_experimental_unified_exec_tool: !cfg!(windows),
             background_terminal_max_timeout: DEFAULT_MAX_BACKGROUND_TERMINAL_TIMEOUT_MS,
             ghost_snapshot: GhostSnapshotConfig::default(),
-            features: Features::with_defaults(),
+            features: Features::with_defaults().into(),
             suppress_unstable_features_warning: false,
             active_profile: Some("gpt5".to_string()),
             active_project: ProjectConfig { trust_level: None },
@@ -5405,15 +5747,13 @@ model_verbosity = "high"
     {
         let fixture = create_test_fixture()?;
 
-        let config = Config::load_from_base_config_with_overrides(
+        let _config = Config::load_from_base_config_with_overrides(
             fixture.cfg.clone(),
             ConfigOverrides {
                 ..Default::default()
             },
             fixture.codex_home(),
         )?;
-
-        assert!(config.did_user_set_custom_approval_policy_or_sandbox_mode);
 
         Ok(())
     }
@@ -5429,6 +5769,7 @@ model_verbosity = "high"
             allowed_web_search_modes: Some(vec![
                 crate::config_loader::WebSearchModeRequirement::Cached,
             ]),
+            feature_requirements: None,
             mcp_servers: None,
             rules: None,
             enforce_residency: None,
@@ -6033,6 +6374,7 @@ mcp_oauth_callback_url = "https://example.com/callback"
                 crate::config_loader::SandboxModeRequirement::ReadOnly,
             ]),
             allowed_web_search_modes: None,
+            feature_requirements: None,
             mcp_servers: None,
             rules: None,
             enforce_residency: None,

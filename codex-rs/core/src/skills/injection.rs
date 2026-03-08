@@ -428,12 +428,14 @@ impl<'a> ToolMentions<'a> {
 pub(crate) enum ToolMentionKind {
     App,
     Mcp,
+    Plugin,
     Skill,
     Other,
 }
 
 const APP_PATH_PREFIX: &str = "app://";
 const MCP_PATH_PREFIX: &str = "mcp://";
+const PLUGIN_PATH_PREFIX: &str = "plugin://";
 const SKILL_PATH_PREFIX: &str = "skill://";
 const SKILL_FILENAME: &str = "SKILL.md";
 
@@ -442,6 +444,8 @@ pub(crate) fn tool_kind_for_path(path: &str) -> ToolMentionKind {
         ToolMentionKind::App
     } else if path.starts_with(MCP_PATH_PREFIX) {
         ToolMentionKind::Mcp
+    } else if path.starts_with(PLUGIN_PATH_PREFIX) {
+        ToolMentionKind::Plugin
     } else if path.starts_with(SKILL_PATH_PREFIX) || is_skill_filename(path) {
         ToolMentionKind::Skill
     } else {
@@ -456,6 +460,11 @@ fn is_skill_filename(path: &str) -> bool {
 
 pub(crate) fn app_id_from_path(path: &str) -> Option<&str> {
     path.strip_prefix(APP_PATH_PREFIX)
+        .filter(|value| !value.is_empty())
+}
+
+pub(crate) fn plugin_config_name_from_path(path: &str) -> Option<&str> {
+    path.strip_prefix(PLUGIN_PATH_PREFIX)
         .filter(|value| !value.is_empty())
 }
 
@@ -483,7 +492,10 @@ pub(crate) fn extract_tool_mentions(text: &str) -> ToolMentions<'_> {
         {
             if !is_common_env_var(name) {
                 let kind = tool_kind_for_path(path);
-                if !matches!(kind, ToolMentionKind::App | ToolMentionKind::Mcp) {
+                if !matches!(
+                    kind,
+                    ToolMentionKind::App | ToolMentionKind::Mcp | ToolMentionKind::Plugin
+                ) {
                     mentioned_names.insert(name);
                 }
                 mentioned_paths.insert(path);

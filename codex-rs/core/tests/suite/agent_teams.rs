@@ -248,7 +248,7 @@ async fn agent_teams_tool_flow_persists_and_cleans_up() -> Result<()> {
 
     let server = start_mock_server().await;
     let mut builder = test_codex().with_config(|config| {
-        config.features.enable(Feature::Collab);
+        let _ = config.features.enable(Feature::Collab);
     });
     let test = builder.build(&server).await?;
 
@@ -393,7 +393,7 @@ async fn agent_teams_message_and_broadcast_flow() -> Result<()> {
 
     let server = start_mock_server().await;
     let mut builder = test_codex().with_config(|config| {
-        config.features.enable(Feature::Collab);
+        let _ = config.features.enable(Feature::Collab);
     });
     let test = builder.build(&server).await?;
 
@@ -549,7 +549,7 @@ async fn spawn_agent_worktree_create_and_close_cleanup() -> Result<()> {
 
     let server = start_mock_server().await;
     let mut builder = test_codex().with_config(|config| {
-        config.features.enable(Feature::Collab);
+        let _ = config.features.enable(Feature::Collab);
     });
     let test = builder.build(&server).await?;
     init_git_repo(test.cwd_path())?;
@@ -625,7 +625,7 @@ async fn spawn_team_worktree_members_create_and_cleanup() -> Result<()> {
 
     let server = start_mock_server().await;
     let mut builder = test_codex().with_config(|config| {
-        config.features.enable(Feature::Collab);
+        let _ = config.features.enable(Feature::Collab);
     });
     let test = builder.build(&server).await?;
     init_git_repo(test.cwd_path())?;

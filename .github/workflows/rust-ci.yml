@@ -88,7 +88,7 @@ jobs:
 
   # --- CI to validate on different os/targets --------------------------------
   lint_build:
-    name: Lint/Build — ${{ matrix.runner }} - ${{ matrix.target }}${{ matrix.profile == 'release' && ' (release)' || '' }}
+    name: Lint/Build — ${{ matrix.runner }} - ${{ matrix.target }}${{ matrix.asset_suffix || '' }}${{ matrix.profile == 'release' && ' (release)' || '' }}
     runs-on: ${{ matrix.runs_on || matrix.runner }}
     timeout-minutes: 30
     needs: changed
@@ -102,6 +102,8 @@ jobs:
       USE_SCCACHE: ${{ startsWith(matrix.runner, 'windows') && 'false' || 'true' }}
       CARGO_INCREMENTAL: "0"
       SCCACHE_CACHE_SIZE: 10G
+      MATRIX_VARIANT: ${{ matrix.asset_suffix || 'default' }}
+      LEGACY_MUSL: ${{ matrix.legacy_musl || 'false' }}
       # In rust-ci, representative release-profile checks use thin LTO for faster feedback.
       CARGO_PROFILE_RELEASE_LTO: ${{ matrix.profile == 'release' && 'thin' || 'fat' }}
 
@@ -118,6 +120,11 @@ jobs:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             profile: release
+          - runner: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            profile: release
+            asset_suffix: -legacy
+            legacy_musl: "true"
 
     steps:
       - uses: actions/checkout@v6
@@ -174,9 +181,9 @@ jobs:
             ${{ github.workspace }}/.cargo-home/registry/index/
             ${{ github.workspace }}/.cargo-home/registry/cache/
             ${{ github.workspace }}/.cargo-home/git/db/
-          key: cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
+          key: cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ env.MATRIX_VARIANT }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
           restore-keys: |
-            cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-
+            cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ env.MATRIX_VARIANT }}-
 
       # Install and restore sccache cache
       - name: Install sccache
@@ -210,10 +217,10 @@ jobs:
         uses: actions/cache/restore@v5
         with:
           path: ${{ github.workspace }}/.sccache/
-          key: sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
+          key: sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ env.MATRIX_VARIANT }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
           restore-keys: |
-            sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-
-            sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-
+            sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ env.MATRIX_VARIANT }}-${{ steps.lockhash.outputs.hash }}-
+            sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ env.MATRIX_VARIANT }}-
 
       - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
         name: Disable sccache wrapper (musl)
@@ -238,7 +245,7 @@ jobs:
         with:
           path: |
             /var/cache/apt
-          key: apt-${{ matrix.runner }}-${{ matrix.target }}-v1
+          key: apt-${{ matrix.runner }}-${{ matrix.target }}-${{ env.MATRIX_VARIANT }}-v1
 
       - if: ${{ matrix.target == 'x86_64-unknown-linux-musl' || matrix.target == 'aarch64-unknown-linux-musl'}}
         name: Install Zig
@@ -308,6 +315,16 @@ jobs:
           echo "CFLAGS=${cflags}" >> "$GITHUB_ENV"
           echo "CXXFLAGS=${cxxflags}" >> "$GITHUB_ENV"
 
+      - if: ${{ env.LEGACY_MUSL == 'true' }}
+        name: Configure legacy musl release flags
+        shell: bash
+        run: |
+          set -euo pipefail
+          echo "CARGO_PROFILE_RELEASE_LTO=off" >> "$GITHUB_ENV"
+          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" >> "$GITHUB_ENV"
+          echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=-C target-feature=+crt-static -C relocation-model=static" >> "$GITHUB_ENV"
+
       - name: Install cargo-chef
         if: ${{ matrix.profile == 'release' }}
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2
@@ -326,11 +343,31 @@ jobs:
       - name: cargo clippy
         run: cargo clippy --target ${{ matrix.target }} --all-features --tests --profile ${{ matrix.profile }} --timings -- -D warnings
 
+      - if: ${{ env.LEGACY_MUSL == 'true' }}
+        name: Build and smoke-test legacy musl binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --target ${{ matrix.target }} --release --timings --bin codex --bin codex-responses-api-proxy
+          for bin in target/${{ matrix.target }}/release/codex target/${{ matrix.target }}/release/codex-responses-api-proxy; do
+            file "$bin"
+            if file "$bin" | grep -q 'dynamically linked'; then
+              echo "❌ $bin is still dynamically linked" >&2
+              exit 1
+            fi
+            if readelf -l "$bin" | grep -q 'Requesting program interpreter'; then
+              echo "❌ $bin still has an ELF interpreter" >&2
+              exit 1
+            fi
+          done
+          target/${{ matrix.target }}/release/codex --version
+          target/${{ matrix.target }}/release/codex-responses-api-proxy --help >/dev/null
+
       - name: Upload Cargo timings (clippy)
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
-          name: cargo-timings-rust-ci-clippy-${{ matrix.target }}-${{ matrix.profile }}
+          name: cargo-timings-rust-ci-clippy-${{ matrix.target }}-${{ matrix.profile }}-${{ env.MATRIX_VARIANT }}
           path: codex-rs/target/**/cargo-timings/cargo-timing.html
           if-no-files-found: warn
 
@@ -350,7 +387,7 @@ jobs:
             ${{ github.workspace }}/.cargo-home/registry/index/
             ${{ github.workspace }}/.cargo-home/registry/cache/
             ${{ github.workspace }}/.cargo-home/git/db/
-          key: cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
+          key: cargo-home-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ env.MATRIX_VARIANT }}-${{ steps.lockhash.outputs.hash }}-${{ steps.lockhash.outputs.toolchain_hash }}
 
       - name: Save sccache cache (fallback)
         if: always() && !cancelled() && env.USE_SCCACHE == 'true' && env.SCCACHE_GHA_ENABLED != 'true'
@@ -358,7 +395,7 @@ jobs:
         uses: actions/cache/save@v5
         with:
           path: ${{ github.workspace }}/.sccache/
-          key: sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
+          key: sccache-${{ matrix.runner }}-${{ matrix.target }}-${{ matrix.profile }}-${{ env.MATRIX_VARIANT }}-${{ steps.lockhash.outputs.hash }}-${{ github.run_id }}
 
       - name: sccache stats
         if: always() && env.USE_SCCACHE == 'true'
@@ -384,7 +421,7 @@ jobs:
         with:
           path: |
             /var/cache/apt
-          key: apt-${{ matrix.runner }}-${{ matrix.target }}-v1
+          key: apt-${{ matrix.runner }}-${{ matrix.target }}-${{ env.MATRIX_VARIANT }}-v1
 
   tests:
     name: Tests — ${{ matrix.runner }} - ${{ matrix.target }}
@@ -539,7 +576,7 @@ jobs:
 
       - name: Upload Cargo timings (nextest)
         if: always()
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: cargo-timings-rust-ci-nextest-${{ matrix.target }}-${{ matrix.profile }}
           path: codex-rs/target/**/cargo-timings/cargo-timing.html

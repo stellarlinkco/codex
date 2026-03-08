@@ -81,7 +81,7 @@ impl ToolRegistry {
     ) -> Result<ResponseInputItem, FunctionCallError> {
         let tool_name = invocation.tool_name.clone();
         let call_id_owned = invocation.call_id.clone();
-        let otel = invocation.turn.otel_manager.clone();
+        let otel = invocation.turn.session_telemetry.clone();
         let initial_log_payload = invocation.payload.log_payload();
         let metric_tags = [
             (

@@ -265,8 +265,7 @@ permissions:
     Ok(())
 }
 
-/// Look for `additional_permissions == None`, then verify that both the first
-/// run and the cached session-approval rerun stay inside the turn sandbox.
+/// Permissionless skills should inherit the turn sandbox without prompting.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shell_zsh_fork_skill_without_permissions_inherits_turn_sandbox() -> Result<()> {
@@ -307,7 +306,7 @@ async fn shell_zsh_fork_skill_without_permissions_inherits_turn_sandbox() -> Res
     )
     .await?;
 
-    let (script_path_str, command) = skill_script_command(&test, "sandboxed.sh")?;
+    let (_, command) = skill_script_command(&test, "sandboxed.sh")?;
 
     let first_call_id = "zsh-fork-skill-permissions-1";
     let first_arguments = shell_command_arguments(&command)?;
@@ -327,24 +326,11 @@ async fn shell_zsh_fork_skill_without_permissions_inherits_turn_sandbox() -> Res
     )
     .await?;
 
-    let maybe_approval = wait_for_exec_approval_request(&test).await;
-    let approval = match maybe_approval {
-        Some(approval) => approval,
-        None => panic!("expected exec approval request before completion"),
-    };
-    assert_eq!(approval.call_id, first_call_id);
-    assert_eq!(approval.command, vec![script_path_str.clone()]);
-    assert_eq!(approval.additional_permissions, None);
-
-    test.codex
-        .submit(Op::ExecApproval {
-            id: approval.effective_approval_id(),
-            turn_id: None,
-            decision: ReviewDecision::ApprovedForSession,
-        })
-        .await?;
-
-    wait_for_turn_complete(&test).await;
+    let first_approval = wait_for_exec_approval_request(&test).await;
+    assert!(
+        first_approval.is_none(),
+        "expected permissionless skill script to skip exec approval"
+    );
 
     let first_output = first_mocks
         .completion
@@ -383,7 +369,7 @@ async fn shell_zsh_fork_skill_without_permissions_inherits_turn_sandbox() -> Res
     let cached_approval = wait_for_exec_approval_request(&test).await;
     assert!(
         cached_approval.is_none(),
-        "expected second run to reuse the cached session approval"
+        "expected permissionless skill rerun to continue skipping exec approval"
     );
 
     let second_output = second_mocks
@@ -447,7 +433,7 @@ async fn shell_zsh_fork_skill_with_empty_permissions_inherits_turn_sandbox() -> 
     )
     .await?;
 
-    let (script_path_str, command) = skill_script_command(&test, "sandboxed.sh")?;
+    let (_script_path_str, command) = skill_script_command(&test, "sandboxed.sh")?;
 
     let first_call_id = "zsh-fork-skill-empty-permissions-1";
     let first_arguments = shell_command_arguments(&command)?;
@@ -467,22 +453,11 @@ async fn shell_zsh_fork_skill_with_empty_permissions_inherits_turn_sandbox() -> 
     )
     .await?;
 
-    let approval = wait_for_exec_approval_request(&test)
-        .await
-        .expect("expected exec approval request before completion");
-    assert_eq!(approval.call_id, first_call_id);
-    assert_eq!(approval.command, vec![script_path_str.clone()]);
-    assert_eq!(approval.additional_permissions, None);
-
-    test.codex
-        .submit(Op::ExecApproval {
-            id: approval.effective_approval_id(),
-            turn_id: None,
-            decision: ReviewDecision::ApprovedForSession,
-        })
-        .await?;
-
-    wait_for_turn_complete(&test).await;
+    let approval = wait_for_exec_approval_request(&test).await;
+    assert!(
+        approval.is_none(),
+        "expected empty-permissions skill to inherit the full-access turn sandbox without prompting"
+    );
 
     let first_output = first_mocks
         .completion

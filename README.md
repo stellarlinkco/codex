@@ -26,7 +26,7 @@
 curl -fsSL https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/install.sh | bash
 ```
 
-The Linux install script prefers `musl` release assets when available and falls back to `gnu`; `gnu` builds require glibc >= 2.35 (Ubuntu 22.04+).
+The shell install command above prefers `legacy-musl` release assets when available, then `musl`, then `gnu`; `gnu` builds require glibc >= 2.35 (Ubuntu 22.04+).
 
 **Windows PowerShell:**
 
@@ -34,7 +34,7 @@ The Linux install script prefers `musl` release assets when available and falls 
 irm https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/install.ps1 | iex
 ```
 
-Copy/paste either command above to download the latest Release binary for your OS/arch and install it to `~/.local/bin`.
+Copy/paste the command for your platform above to download the latest Release binary for your OS/arch. The shell command installs `codex` to `~/.local/bin` and prints a PATH reminder.
 
 ### Run
 
@@ -47,7 +47,6 @@ codex serve
 
 - [**Contributing**](./docs/contributing.md)
 - [**Installing & building**](./docs/install.md)
-- [**GitHub webhook mode**](./codex-rs/docs/github-webhook.md)
 - [**Open source fund**](./docs/open-source-fund.md)
 
 ## Acknowledgements

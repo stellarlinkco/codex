@@ -668,6 +668,12 @@ fn tool_spec_to_anthropic_tool(spec: &ToolSpec) -> Option<Value> {
                 "additionalProperties": false,
             },
         })),
+        ToolSpec::ImageGeneration { output_format } => {
+            tracing::warn!(
+                "ignoring unsupported anthropic tool spec image_generation with output_format={output_format}"
+            );
+            None
+        }
         ToolSpec::WebSearch { .. } => Some(json!({
             "name": "web_search",
             "description": "Searches the web for public information.",

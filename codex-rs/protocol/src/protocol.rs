@@ -331,6 +331,12 @@ pub enum Op {
         request_id: RequestId,
         /// User's decision for the request.
         decision: ElicitationAction,
+        /// Structured user input supplied for accepted elicitations.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        content: Option<Value>,
+        /// Optional client metadata associated with the elicitation response.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        meta: Option<Value>,
     },
 
     /// Resolve a request_user_input tool call.
@@ -626,6 +632,11 @@ pub enum SandboxPolicy {
             skip_serializing_if = "ReadOnlyAccess::has_full_disk_read_access"
         )]
         access: ReadOnlyAccess,
+
+        /// When set to `true`, outbound network access is allowed. `false` by
+        /// default.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        network_access: bool,
     },
 
     /// Indicates the process is already in an external sandbox. Allows full
@@ -715,6 +726,7 @@ impl SandboxPolicy {
     pub fn new_read_only_policy() -> Self {
         SandboxPolicy::ReadOnly {
             access: ReadOnlyAccess::FullAccess,
+            network_access: false,
         }
     }
 
@@ -735,7 +747,7 @@ impl SandboxPolicy {
         match self {
             SandboxPolicy::DangerFullAccess => true,
             SandboxPolicy::ExternalSandbox { .. } => true,
-            SandboxPolicy::ReadOnly { access } => access.has_full_disk_read_access(),
+            SandboxPolicy::ReadOnly { access, .. } => access.has_full_disk_read_access(),
             SandboxPolicy::WorkspaceWrite {
                 read_only_access, ..
             } => read_only_access.has_full_disk_read_access(),
@@ -755,7 +767,7 @@ impl SandboxPolicy {
         match self {
             SandboxPolicy::DangerFullAccess => true,
             SandboxPolicy::ExternalSandbox { network_access } => network_access.is_enabled(),
-            SandboxPolicy::ReadOnly { .. } => false,
+            SandboxPolicy::ReadOnly { network_access, .. } => *network_access,
             SandboxPolicy::WorkspaceWrite { network_access, .. } => *network_access,
         }
     }
@@ -766,7 +778,7 @@ impl SandboxPolicy {
             return false;
         }
         match self {
-            SandboxPolicy::ReadOnly { access } => access.include_platform_defaults(),
+            SandboxPolicy::ReadOnly { access, .. } => access.include_platform_defaults(),
             SandboxPolicy::WorkspaceWrite {
                 read_only_access, ..
             } => read_only_access.include_platform_defaults(),
@@ -782,7 +794,7 @@ impl SandboxPolicy {
     pub fn get_readable_roots_with_cwd(&self, cwd: &Path) -> Vec<AbsolutePathBuf> {
         let mut roots = match self {
             SandboxPolicy::DangerFullAccess | SandboxPolicy::ExternalSandbox { .. } => Vec::new(),
-            SandboxPolicy::ReadOnly { access } => access.get_readable_roots_with_cwd(cwd),
+            SandboxPolicy::ReadOnly { access, .. } => access.get_readable_roots_with_cwd(cwd),
             SandboxPolicy::WorkspaceWrite {
                 read_only_access, ..
             } => {
@@ -1080,6 +1092,10 @@ pub enum EventMsg {
 
     WebSearchEnd(WebSearchEndEvent),
 
+    ImageGenerationBegin(ImageGenerationBeginEvent),
+
+    ImageGenerationEnd(ImageGenerationEndEvent),
+
     /// Notification that the server is about to execute a command.
     ExecCommandBegin(ExecCommandBeginEvent),
 
@@ -1361,6 +1377,11 @@ impl HasLegacyEvent for ItemStartedEvent {
             TurnItem::WebSearch(item) => vec![EventMsg::WebSearchBegin(WebSearchBeginEvent {
                 call_id: item.id.clone(),
             })],
+            TurnItem::ImageGeneration(item) => {
+                vec![EventMsg::ImageGenerationBegin(ImageGenerationBeginEvent {
+                    call_id: item.id.clone(),
+                })]
+            }
             _ => Vec::new(),
         }
     }
@@ -1870,6 +1891,24 @@ pub struct WebSearchEndEvent {
     pub action: WebSearchAction,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct ImageGenerationBeginEvent {
+    pub call_id: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
+pub struct ImageGenerationEndEvent {
+    pub call_id: String,
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub revised_prompt: Option<String>,
+    pub result: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub saved_path: Option<String>,
+}
+
 // Conversation kept for backward compatibility.
 /// Response payload for `Op::GetHistory` containing the current session's
 /// in-memory transcript.
@@ -2187,6 +2226,8 @@ pub struct TurnContextNetworkItem {
 pub struct TurnContextItem {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub turn_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trace_id: Option<String>,
     pub cwd: PathBuf,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub current_date: Option<String>,
@@ -2767,7 +2808,6 @@ pub struct SkillsListEntry {
 pub struct SessionNetworkProxyRuntime {
     pub http_addr: String,
     pub socks_addr: String,
-    pub admin_addr: String,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
@@ -3109,8 +3149,14 @@ pub struct CollabResumeEndEvent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::items::ImageGenerationItem;
     use crate::items::UserMessageItem;
     use crate::items::WebSearchItem;
+    use crate::permissions::FileSystemAccessMode;
+    use crate::permissions::FileSystemPath;
+    use crate::permissions::FileSystemSandboxEntry;
+    use crate::permissions::FileSystemSandboxPolicy;
+    use crate::permissions::NetworkSandboxPolicy;
     use anyhow::Result;
     use pretty_assertions::assert_eq;
     use serde_json::json;
@@ -3128,6 +3174,18 @@ mod tests {
             network_access: NetworkAccess::Enabled,
         };
         assert!(enabled.has_full_disk_write_access());
+        assert!(enabled.has_full_network_access());
+    }
+
+    #[test]
+    fn read_only_reports_network_access_flags() {
+        let restricted = SandboxPolicy::new_read_only_policy();
+        assert!(!restricted.has_full_network_access());
+
+        let enabled = SandboxPolicy::ReadOnly {
+            access: ReadOnlyAccess::FullAccess,
+            network_access: true,
+        };
         assert!(enabled.has_full_network_access());
     }
 
@@ -3184,6 +3242,36 @@ mod tests {
     }
 
     #[test]
+    fn file_system_policy_rejects_legacy_bridge_for_non_workspace_writes() {
+        let cwd = if cfg!(windows) {
+            Path::new(r"C:\workspace")
+        } else {
+            Path::new("/tmp/workspace")
+        };
+        let external_write_path = if cfg!(windows) {
+            AbsolutePathBuf::from_absolute_path(r"C:\temp").expect("absolute windows temp path")
+        } else {
+            AbsolutePathBuf::from_absolute_path("/tmp").expect("absolute tmp path")
+        };
+        let policy = FileSystemSandboxPolicy::restricted(vec![FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: external_write_path,
+            },
+            access: FileSystemAccessMode::Write,
+        }]);
+
+        let err = policy
+            .to_legacy_sandbox_policy(NetworkSandboxPolicy::Restricted, cwd)
+            .expect_err("non-workspace writes should be rejected");
+
+        assert!(
+            err.to_string()
+                .contains("filesystem writes outside the workspace root"),
+            "{err}"
+        );
+    }
+
+    #[test]
     fn item_started_event_from_web_search_emits_begin_event() {
         let event = ItemStartedEvent {
             thread_id: ThreadId::new(),
@@ -3215,6 +3303,56 @@ mod tests {
         };
 
         assert!(event.as_legacy_events(false).is_empty());
+    }
+
+    #[test]
+    fn item_started_event_from_image_generation_emits_begin_event() {
+        let event = ItemStartedEvent {
+            thread_id: ThreadId::new(),
+            turn_id: "turn-1".into(),
+            item: TurnItem::ImageGeneration(ImageGenerationItem {
+                id: "ig-1".into(),
+                status: "in_progress".into(),
+                revised_prompt: None,
+                result: String::new(),
+                saved_path: None,
+            }),
+        };
+
+        let legacy_events = event.as_legacy_events(false);
+        assert_eq!(legacy_events.len(), 1);
+        match &legacy_events[0] {
+            EventMsg::ImageGenerationBegin(event) => assert_eq!(event.call_id, "ig-1"),
+            _ => panic!("expected ImageGenerationBegin event"),
+        }
+    }
+
+    #[test]
+    fn item_completed_event_from_image_generation_emits_end_event() {
+        let event = ItemCompletedEvent {
+            thread_id: ThreadId::new(),
+            turn_id: "turn-1".into(),
+            item: TurnItem::ImageGeneration(ImageGenerationItem {
+                id: "ig-1".into(),
+                status: "completed".into(),
+                revised_prompt: Some("A tiny blue square".into()),
+                result: "Zm9v".into(),
+                saved_path: Some("/tmp/ig-1.png".into()),
+            }),
+        };
+
+        let legacy_events = event.as_legacy_events(false);
+        assert_eq!(legacy_events.len(), 1);
+        match &legacy_events[0] {
+            EventMsg::ImageGenerationEnd(event) => {
+                assert_eq!(event.call_id, "ig-1");
+                assert_eq!(event.status, "completed");
+                assert_eq!(event.revised_prompt.as_deref(), Some("A tiny blue square"));
+                assert_eq!(event.result, "Zm9v");
+                assert_eq!(event.saved_path.as_deref(), Some("/tmp/ig-1.png"));
+            }
+            _ => panic!("expected ImageGenerationEnd event"),
+        }
     }
 
     #[test]
@@ -3416,6 +3554,7 @@ mod tests {
             "summary": "auto",
         }))?;
 
+        assert_eq!(item.trace_id, None);
         assert_eq!(item.network, None);
         Ok(())
     }
@@ -3424,6 +3563,7 @@ mod tests {
     fn turn_context_item_serializes_network_when_present() -> Result<()> {
         let item = TurnContextItem {
             turn_id: None,
+            trace_id: None,
             cwd: PathBuf::from("/tmp"),
             current_date: None,
             timezone: None,

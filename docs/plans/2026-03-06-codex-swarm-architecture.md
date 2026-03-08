@@ -48,7 +48,7 @@
 
 ### 3.1 Team 机制还只是进程内协作，不是通用控制面
 
-- 当前 `agent teams` 文档明确写着：`one team per session`、`no nested teams`。见 `docs/agent-teams.md:42`。
+- 当前 `agent teams` 文档明确写着：`no nested teams`。见 `docs/agent-teams.md:42`。
 - team 持久化依赖 `$CODEX_HOME/teams/<team_id>` 下的 `config.json`、`inbox/*.jsonl`、`tasks.lock` 等文件。见 `docs/agent-teams.md:48` 至 `docs/agent-teams.md:53`。
 
 这套机制对 3 到 5 个 agent 很实用。对 50 个 agent，就开始露怯了：

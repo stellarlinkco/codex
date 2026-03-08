@@ -396,6 +396,97 @@ fn for_prompt_strips_images_when_model_does_not_support_images() {
 }
 
 #[test]
+fn for_prompt_rewrites_image_generation_calls_when_images_are_supported() {
+    let history = create_history_with_items(vec![
+        ResponseItem::ImageGenerationCall {
+            id: "ig_123".to_string(),
+            status: "generating".to_string(),
+            revised_prompt: Some("lobster".to_string()),
+            result: "Zm9v".to_string(),
+        },
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hi".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        },
+    ]);
+
+    assert_eq!(
+        history.for_prompt(&default_input_modalities()),
+        vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputImage {
+                    image_url: "data:image/png;base64,Zm9v".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "hi".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            }
+        ]
+    );
+}
+
+#[test]
+fn for_prompt_rewrites_image_generation_calls_when_images_are_unsupported() {
+    let history = create_history_with_items(vec![
+        ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "generate a lobster".to_string(),
+            }],
+            end_turn: None,
+            phase: None,
+        },
+        ResponseItem::ImageGenerationCall {
+            id: "ig_123".to_string(),
+            status: "completed".to_string(),
+            revised_prompt: Some("lobster".to_string()),
+            result: "Zm9v".to_string(),
+        },
+    ]);
+
+    assert_eq!(
+        history.for_prompt(&[InputModality::Text]),
+        vec![
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "generate a lobster".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            },
+            ResponseItem::Message {
+                id: None,
+                role: "user".to_string(),
+                content: vec![ContentItem::InputText {
+                    text: "image content omitted because you do not support image input"
+                        .to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            },
+        ]
+    );
+}
+
+#[test]
 fn get_history_for_prompt_drops_ghost_commits() {
     let items = vec![ResponseItem::GhostSnapshot {
         ghost_commit: GhostCommit::new("ghost-1".to_string(), None, Vec::new(), Vec::new()),

@@ -23,10 +23,12 @@ use crate::compact::InitialContextInjection;
 use crate::compact::run_inline_auto_compact_task;
 use crate::compact::should_use_remote_compact_task;
 use crate::compact_remote::run_inline_remote_auto_compact_task;
+use crate::config::ManagedFeatures;
 use crate::connectors;
 use crate::exec_policy::ExecPolicyManager;
 use crate::features::FEATURES;
 use crate::features::Feature;
+#[cfg(test)]
 use crate::features::Features;
 use crate::features::maybe_push_unstable_features_warning;
 use crate::hooks_executor::HooksNonCommandExecutor;
@@ -56,6 +58,8 @@ use async_channel::Receiver;
 use async_channel::Sender;
 use chrono::Local;
 use chrono::Utc;
+use codex_app_server_protocol::McpServerElicitationRequest;
+use codex_app_server_protocol::McpServerElicitationRequestParams;
 use codex_artifact_presentation::PresentationArtifactError;
 use codex_artifact_presentation::PresentationArtifactExecutionRequest;
 use codex_artifact_presentation::PresentationArtifactResponse;
@@ -73,9 +77,12 @@ use codex_hooks::HooksConfig;
 use codex_network_proxy::NetworkProxy;
 use codex_network_proxy::NetworkProxyAuditMetadata;
 use codex_network_proxy::normalize_host;
+#[cfg(test)]
+use codex_otel::OtelManager;
 use codex_otel::current_span_w3c_trace_context;
 use codex_otel::set_parent_from_w3c_trace_context;
 use codex_protocol::ThreadId;
+use codex_protocol::approvals::ElicitationRequestEvent;
 use codex_protocol::approvals::ExecPolicyAmendment;
 use codex_protocol::approvals::NetworkPolicyAmendment;
 use codex_protocol::approvals::NetworkPolicyRuleAction;
@@ -221,9 +228,11 @@ use crate::memories;
 use crate::mentions::build_connector_slug_counts;
 use crate::mentions::build_skill_name_counts;
 use crate::mentions::collect_explicit_app_ids;
+use crate::mentions::collect_explicit_plugin_mentions;
 use crate::mentions::collect_tool_mentions_from_messages;
 use crate::network_policy_decision::execpolicy_network_rule_amendment;
 use crate::plugins::PluginsManager;
+use crate::plugins::build_plugin_injections;
 use crate::project_doc::get_user_instructions;
 use crate::protocol::AgentMessageContentDeltaEvent;
 use crate::protocol::AgentReasoningSectionBreakEvent;
@@ -303,12 +312,16 @@ use crate::tools::sandboxing::ApprovalStore;
 use crate::tools::spec::ToolsConfig;
 use crate::tools::spec::ToolsConfigParams;
 use crate::turn_diff_tracker::TurnDiffTracker;
+use crate::turn_timing::TurnTimingState;
+use crate::turn_timing::record_turn_ttfm_metric;
+use crate::turn_timing::record_turn_ttft_metric;
 use crate::unified_exec::UnifiedExecProcessManager;
 use crate::util::backoff;
 use crate::windows_sandbox::WindowsSandboxLevelExt;
 use codex_async_utils::OrCancelExt;
-use codex_otel::OtelManager;
+use codex_otel::SessionTelemetry;
 use codex_otel::TelemetryAuthMode;
+use codex_otel::current_span_trace_id;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
@@ -373,7 +386,7 @@ impl Codex {
         let (tx_sub, rx_sub) = async_channel::bounded(SUBMISSION_CHANNEL_CAPACITY);
         let (tx_event, rx_event) = async_channel::unbounded();
 
-        plugins_manager.plugins_for_config(&config);
+        let loaded_plugins = plugins_manager.plugins_for_config(&config);
         let loaded_skills = skills_manager.skills_for_config(&config);
 
         for err in &loaded_skills.errors {
@@ -387,25 +400,35 @@ impl Codex {
         if let SessionSource::SubAgent(SubAgentSource::ThreadSpawn { depth, .. }) = session_source
             && depth >= config.agent_max_depth
         {
-            config.features.disable(Feature::Collab);
+            let _ = config.features.disable(Feature::Collab);
         }
 
         if config.features.enabled(Feature::JsRepl)
             && let Err(err) = resolve_compatible_node(config.js_repl_node_path.as_deref()).await
         {
-            let message = format!(
-                "Disabled `js_repl` for this session because the configured Node runtime is unavailable or incompatible. {err}"
-            );
+            let _ = config.features.disable(Feature::JsRepl);
+            let _ = config.features.disable(Feature::JsReplToolsOnly);
+            let message = if config.features.enabled(Feature::JsRepl) {
+                format!(
+                    "`js_repl` remains enabled because enterprise requirements pin it on, but the configured Node runtime is unavailable or incompatible. {err}"
+                )
+            } else {
+                format!(
+                    "Disabled `js_repl` for this session because the configured Node runtime is unavailable or incompatible. {err}"
+                )
+            };
             warn!("{message}");
-            config.features.disable(Feature::JsRepl);
-            config.features.disable(Feature::JsReplToolsOnly);
             config.startup_warnings.push(message);
         }
 
         let allowed_skills_for_implicit_invocation =
             loaded_skills.allowed_skills_for_implicit_invocation();
-        let user_instructions =
-            get_user_instructions(&config, Some(&allowed_skills_for_implicit_invocation)).await;
+        let user_instructions = get_user_instructions(
+            &config,
+            Some(&allowed_skills_for_implicit_invocation),
+            Some(loaded_plugins.capability_summaries()),
+        )
+        .await;
 
         let exec_policy = ExecPolicyManager::load(&config.config_layer_stack)
             .await
@@ -441,9 +464,7 @@ impl Codex {
 
         // Respect thread-start tools. When missing (resumed/forked threads), read from the db
         // first, then fall back to rollout-file tools.
-        let persisted_tools = if dynamic_tools.is_empty()
-            && config.features.enabled(Feature::Sqlite)
-        {
+        let persisted_tools = if dynamic_tools.is_empty() {
             let thread_id = match &conversation_history {
                 InitialHistory::Resumed(resumed) => Some(resumed.conversation_id),
                 InitialHistory::Forked(_) => conversation_history.forked_from_id(),
@@ -520,7 +541,7 @@ impl Codex {
             session_source_clone,
             skills_manager,
             plugins_manager,
-            mcp_manager,
+            mcp_manager.clone(),
             file_watcher,
             agent_control,
         )
@@ -634,7 +655,7 @@ pub(crate) struct Session {
     state: Mutex<SessionState>,
     /// The set of enabled features should be invariant for the lifetime of the
     /// session.
-    features: Features,
+    features: ManagedFeatures,
     pending_mcp_server_refresh_config: Mutex<Option<McpServerRefreshConfig>>,
     pub(crate) conversation: Arc<RealtimeConversationManager>,
     pub(crate) active_turn: Mutex<Option<ActiveTurn>>,
@@ -661,11 +682,12 @@ impl TurnSkillsContext {
 #[derive(Debug)]
 pub(crate) struct TurnContext {
     pub(crate) sub_id: String,
+    pub(crate) trace_id: Option<String>,
     pub(crate) realtime_active: bool,
     pub(crate) config: Arc<Config>,
     pub(crate) auth_manager: Option<Arc<AuthManager>>,
     pub(crate) model_info: ModelInfo,
-    pub(crate) otel_manager: OtelManager,
+    pub(crate) session_telemetry: SessionTelemetry,
     pub(crate) provider: ModelProviderInfo,
     pub(crate) reasoning_effort: Option<ReasoningEffortConfig>,
     pub(crate) reasoning_summary: ReasoningSummaryConfig,
@@ -688,7 +710,7 @@ pub(crate) struct TurnContext {
     pub(crate) windows_sandbox_level: WindowsSandboxLevel,
     pub(crate) shell_environment_policy: ShellEnvironmentPolicy,
     pub(crate) tools_config: ToolsConfig,
-    pub(crate) features: Features,
+    pub(crate) features: ManagedFeatures,
     pub(crate) ghost_snapshot: GhostSnapshotConfig,
     pub(crate) final_output_json_schema: Option<Value>,
     pub(crate) codex_linux_sandbox_exe: Option<PathBuf>,
@@ -698,6 +720,7 @@ pub(crate) struct TurnContext {
     pub(crate) dynamic_tools: Vec<DynamicToolSpec>,
     pub(crate) turn_metadata_state: Arc<TurnMetadataState>,
     pub(crate) turn_skills: TurnSkillsContext,
+    pub(crate) turn_timing_state: Arc<TurnTimingState>,
 }
 impl TurnContext {
     pub(crate) fn model_context_window(&self) -> Option<i64> {
@@ -745,17 +768,19 @@ impl TurnContext {
             session_source: self.session_source.clone(),
             scheduled_tasks_enabled: !config.disable_cron,
         })
+        .with_web_search_config(self.tools_config.web_search_config.clone())
         .with_allow_login_shell(self.tools_config.allow_login_shell)
         .with_agent_roles(config.agent_roles.clone());
 
         Self {
             sub_id: self.sub_id.clone(),
+            trace_id: self.trace_id.clone(),
             realtime_active: self.realtime_active,
             config: Arc::new(config),
             auth_manager: self.auth_manager.clone(),
             model_info: model_info.clone(),
-            otel_manager: self
-                .otel_manager
+            session_telemetry: self
+                .session_telemetry
                 .clone()
                 .with_model(model.as_str(), model_info.slug.as_str()),
             provider: self.provider.clone(),
@@ -787,6 +812,7 @@ impl TurnContext {
             dynamic_tools: self.dynamic_tools.clone(),
             turn_metadata_state: self.turn_metadata_state.clone(),
             turn_skills: self.turn_skills.clone(),
+            turn_timing_state: Arc::clone(&self.turn_timing_state),
         }
     }
 
@@ -805,6 +831,7 @@ impl TurnContext {
     pub(crate) fn to_turn_context_item(&self) -> TurnContextItem {
         TurnContextItem {
             turn_id: Some(self.sub_id.clone()),
+            trace_id: self.trace_id.clone(),
             cwd: self.cwd.clone(),
             current_date: self.current_date.clone(),
             timezone: self.timezone.clone(),
@@ -1029,7 +1056,6 @@ impl Session {
             SessionNetworkProxyRuntime {
                 http_addr: proxy.http_addr().to_string(),
                 socks_addr: proxy.socks_addr().to_string(),
-                admin_addr: proxy.admin_addr().to_string(),
             }
         };
         Ok((network_proxy, session_network_proxy))
@@ -1191,7 +1217,7 @@ impl Session {
     #[allow(clippy::too_many_arguments)]
     fn make_turn_context(
         auth_manager: Option<Arc<AuthManager>>,
-        otel_manager: &OtelManager,
+        session_telemetry: &SessionTelemetry,
         provider: ModelProviderInfo,
         session_configuration: &SessionConfiguration,
         per_turn_config: Config,
@@ -1205,14 +1231,14 @@ impl Session {
         let reasoning_summary = session_configuration
             .model_reasoning_summary
             .unwrap_or(model_info.default_reasoning_summary);
-        let otel_manager = otel_manager.clone().with_model(
+        let session_telemetry = session_telemetry.clone().with_model(
             session_configuration.collaboration_mode.model(),
             model_info.slug.as_str(),
         );
         let session_source = session_configuration.session_source.clone();
         let auth_manager_for_context = auth_manager;
         let provider_for_context = provider;
-        let otel_manager_for_context = otel_manager;
+        let session_telemetry_for_context = session_telemetry;
         let per_turn_config = Arc::new(per_turn_config);
 
         let tools_config = ToolsConfig::new(&ToolsConfigParams {
@@ -1222,6 +1248,7 @@ impl Session {
             session_source: session_source.clone(),
             scheduled_tasks_enabled: !per_turn_config.disable_cron,
         })
+        .with_web_search_config(per_turn_config.web_search_config.clone())
         .with_allow_login_shell(per_turn_config.permissions.allow_login_shell)
         .with_agent_roles(per_turn_config.agent_roles.clone());
 
@@ -1238,11 +1265,12 @@ impl Session {
         let (current_date, timezone) = local_time_context();
         TurnContext {
             sub_id,
+            trace_id: current_span_trace_id(),
             realtime_active: false,
             config: per_turn_config.clone(),
             auth_manager: auth_manager_for_context,
             model_info: model_info.clone(),
-            otel_manager: otel_manager_for_context,
+            session_telemetry: session_telemetry_for_context,
             provider: provider_for_context,
             reasoning_effort,
             reasoning_summary,
@@ -1272,6 +1300,7 @@ impl Session {
             dynamic_tools: session_configuration.dynamic_tools.clone(),
             turn_metadata_state,
             turn_skills: TurnSkillsContext::new(skills_outcome),
+            turn_timing_state: Arc::new(TurnTimingState::default()),
         }
     }
 
@@ -1356,7 +1385,7 @@ impl Session {
             if config.ephemeral {
                 Ok::<_, anyhow::Error>((None, None))
             } else {
-                let state_db_ctx = state_db::init_if_enabled(&config, None).await;
+                let state_db_ctx = state_db::init(&config, None).await;
                 let rollout_recorder = RolloutRecorder::new(
                     &config,
                     rollout_params,
@@ -1456,7 +1485,7 @@ impl Session {
         let originator = crate::default_client::originator().value;
         let terminal_type = terminal::user_agent();
         let session_model = session_configuration.collaboration_mode.model().to_string();
-        let mut otel_manager = OtelManager::new(
+        let mut session_telemetry = SessionTelemetry::new(
             conversation_id,
             session_model.as_str(),
             session_model.as_str(),
@@ -1469,8 +1498,9 @@ impl Session {
             session_configuration.session_source.clone(),
         );
         if let Some(service_name) = session_configuration.metrics_service_name.as_deref() {
-            otel_manager = otel_manager.with_metrics_service_name(service_name);
+            session_telemetry = session_telemetry.with_metrics_service_name(service_name);
         }
+        let otel_manager = session_telemetry.clone();
         let network_proxy_audit_metadata = NetworkProxyAuditMetadata {
             conversation_id: Some(conversation_id.to_string()),
             app_version: Some(env!("CARGO_PKG_VERSION").to_string()),
@@ -1482,8 +1512,8 @@ impl Session {
             model: Some(session_model.clone()),
             slug: Some(session_model),
         };
-        config.features.emit_metrics(&otel_manager);
-        otel_manager.counter(
+        config.features.emit_metrics(&session_telemetry);
+        session_telemetry.counter(
             "codex.thread.started",
             1,
             &[(
@@ -1496,7 +1526,7 @@ impl Session {
             )],
         );
 
-        otel_manager.conversation_starts(
+        session_telemetry.conversation_starts(
             config.model_provider.name.as_str(),
             session_configuration.collaboration_mode.reasoning_effort(),
             config
@@ -1659,13 +1689,13 @@ impl Session {
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
             exec_policy,
             auth_manager: Arc::clone(&auth_manager),
-            otel_manager,
+            session_telemetry,
             models_manager: Arc::clone(&models_manager),
             tool_approvals: Mutex::new(ApprovalStore::default()),
             execve_session_approvals: RwLock::new(HashMap::new()),
             skills_manager,
-            plugins_manager,
-            mcp_manager,
+            plugins_manager: Arc::clone(&plugins_manager),
+            mcp_manager: Arc::clone(&mcp_manager),
             file_watcher,
             agent_control,
             network_proxy,
@@ -1743,6 +1773,7 @@ impl Session {
             .map(|(name, _)| name.clone())
             .collect();
         required_mcp_servers.sort();
+        let tool_plugin_provenance = mcp_manager.tool_plugin_provenance(config.as_ref());
         {
             let mut cancel_guard = sess.services.mcp_startup_cancellation_token.lock().await;
             cancel_guard.cancel();
@@ -1757,6 +1788,7 @@ impl Session {
             sandbox_state,
             config.codex_home.clone(),
             codex_apps_tools_cache_key(auth),
+            tool_plugin_provenance,
         )
         .await;
         {
@@ -1856,7 +1888,7 @@ impl Session {
         self.services.state_db.clone()
     }
 
-    /// Ensure all rollout writes are durably flushed.
+    /// Ensure rollout file writes are durably flushed.
     pub(crate) async fn flush_rollout(&self) {
         let recorder = {
             let guard = self.services.rollout.lock().await;
@@ -2235,7 +2267,7 @@ impl Session {
             next_cwd.to_path_buf(),
             self.services.user_shell.as_ref().clone(),
             self.services.shell_snapshot_tx.clone(),
-            self.services.otel_manager.clone(),
+            self.services.session_telemetry.clone(),
         );
     }
 
@@ -2382,7 +2414,7 @@ impl Session {
         );
         let mut turn_context: TurnContext = Self::make_turn_context(
             Some(Arc::clone(&self.services.auth_manager)),
-            &self.services.otel_manager,
+            &self.services.session_telemetry,
             session_configuration.provider.clone(),
             &session_configuration,
             per_turn_config,
@@ -2674,6 +2706,7 @@ impl Session {
         turn_context: &TurnContext,
         item: TurnItem,
     ) {
+        record_turn_ttfm_metric(turn_context, &item).await;
         self.send_event(
             turn_context,
             EventMsg::ItemCompleted(ItemCompletedEvent {
@@ -3173,6 +3206,85 @@ impl Session {
         rx_response.await.ok()
     }
 
+    pub async fn request_mcp_server_elicitation(
+        &self,
+        turn_context: &TurnContext,
+        request_id: RequestId,
+        params: McpServerElicitationRequestParams,
+    ) -> Option<ElicitationResponse> {
+        let server_name = params.server_name.clone();
+        let request = match params.request {
+            McpServerElicitationRequest::Form {
+                meta,
+                message,
+                requested_schema,
+            } => {
+                let requested_schema = match serde_json::to_value(requested_schema) {
+                    Ok(requested_schema) => requested_schema,
+                    Err(err) => {
+                        warn!(
+                            "failed to serialize MCP elicitation schema for server_name: {server_name}, request_id: {request_id}: {err:#}"
+                        );
+                        return None;
+                    }
+                };
+                codex_protocol::approvals::ElicitationRequest::Form {
+                    meta,
+                    message,
+                    requested_schema,
+                }
+            }
+            McpServerElicitationRequest::Url {
+                meta,
+                message,
+                url,
+                elicitation_id,
+            } => codex_protocol::approvals::ElicitationRequest::Url {
+                meta,
+                message,
+                url,
+                elicitation_id,
+            },
+        };
+
+        let (tx_response, rx_response) = oneshot::channel();
+        let prev_entry = {
+            let mut active = self.active_turn.lock().await;
+            match active.as_mut() {
+                Some(at) => {
+                    let mut ts = at.turn_state.lock().await;
+                    ts.insert_pending_elicitation(
+                        server_name.clone(),
+                        request_id.clone(),
+                        tx_response,
+                    )
+                }
+                None => None,
+            }
+        };
+        if prev_entry.is_some() {
+            warn!(
+                "Overwriting existing pending elicitation for server_name: {server_name}, request_id: {request_id}"
+            );
+        }
+        let id = match request_id {
+            rmcp::model::NumberOrString::String(value) => {
+                codex_protocol::mcp::RequestId::String(value.to_string())
+            }
+            rmcp::model::NumberOrString::Number(value) => {
+                codex_protocol::mcp::RequestId::Integer(value)
+            }
+        };
+        let event = EventMsg::ElicitationRequest(ElicitationRequestEvent {
+            turn_id: params.turn_id,
+            server_name,
+            id,
+            request,
+        });
+        self.send_event(turn_context, event).await;
+        rx_response.await.ok()
+    }
+
     pub async fn notify_user_input_response(
         &self,
         sub_id: &str,
@@ -3246,6 +3358,23 @@ impl Session {
         id: RequestId,
         response: ElicitationResponse,
     ) -> anyhow::Result<()> {
+        let entry = {
+            let mut active = self.active_turn.lock().await;
+            match active.as_mut() {
+                Some(at) => {
+                    let mut ts = at.turn_state.lock().await;
+                    ts.remove_pending_elicitation(&server_name, &id)
+                }
+                None => None,
+            }
+        };
+        if let Some(tx_response) = entry {
+            tx_response
+                .send(response)
+                .map_err(|e| anyhow::anyhow!("failed to send elicitation response: {e:?}"))?;
+            return Ok(());
+        }
+
         self.services
             .mcp_connection_manager
             .read()
@@ -3278,7 +3407,7 @@ impl Session {
 
     pub(crate) async fn record_model_warning(&self, message: impl Into<String>, ctx: &TurnContext) {
         self.services
-            .otel_manager
+            .session_telemetry
             .counter("codex.model_warning", 1, &[]);
         let item = ResponseItem::Message {
             id: None,
@@ -3373,7 +3502,7 @@ impl Session {
         self.features.enabled(feature)
     }
 
-    pub(crate) fn features(&self) -> Features {
+    pub(crate) fn features(&self) -> ManagedFeatures {
         self.features.clone()
     }
 
@@ -3590,12 +3719,9 @@ impl Session {
         turn_context: &TurnContext,
         token_usage: Option<&TokenUsage>,
     ) {
-        {
+        if let Some(token_usage) = token_usage {
             let mut state = self.state.lock().await;
-            if let Some(token_usage) = token_usage {
-                state
-                    .update_token_info_from_usage(token_usage, turn_context.model_context_window());
-            }
+            state.update_token_info_from_usage(token_usage, turn_context.model_context_window());
         }
         self.send_token_count_event(turn_context).await;
     }
@@ -4069,6 +4195,10 @@ impl Session {
     ) {
         let auth = self.services.auth_manager.auth().await;
         let config = self.get_config().await;
+        let tool_plugin_provenance = self
+            .services
+            .mcp_manager
+            .tool_plugin_provenance(config.as_ref());
         let mcp_servers = with_codex_apps_mcp(
             mcp_servers,
             self.features.enabled(Feature::Apps),
@@ -4096,6 +4226,7 @@ impl Session {
             sandbox_state,
             config.codex_home.clone(),
             codex_apps_tools_cache_key(auth.as_ref()),
+            tool_plugin_provenance,
         )
         .await;
         {
@@ -4369,8 +4500,18 @@ async fn submission_loop(sess: Arc<Session>, config: Arc<Config>, rx_sub: Receiv
                     server_name,
                     request_id,
                     decision,
+                    content,
+                    meta,
                 } => {
-                    handlers::resolve_elicitation(&sess, server_name, request_id, decision).await;
+                    handlers::resolve_elicitation(
+                        &sess,
+                        server_name,
+                        request_id,
+                        decision,
+                        content,
+                        meta,
+                    )
+                    .await;
                     false
                 }
                 Op::Shutdown => handlers::shutdown(&sess, sub.id.clone()).await,
@@ -4455,6 +4596,7 @@ mod handlers {
     use crate::mcp::auth::compute_auth_statuses;
     use crate::mcp::collect_mcp_snapshot_from_manager;
     use crate::review_prompts::resolve_review_request;
+    use crate::rollout::RolloutRecorder;
     use crate::rollout::session_index;
     use crate::tasks::CompactTask;
     use crate::tasks::UndoTask;
@@ -4477,6 +4619,7 @@ mod handlers {
     use codex_protocol::protocol::RemoteSkillSummary;
     use codex_protocol::protocol::ReviewDecision;
     use codex_protocol::protocol::ReviewRequest;
+    use codex_protocol::protocol::RolloutItem;
     use codex_protocol::protocol::SkillsListEntry;
     use codex_protocol::protocol::ThreadNameUpdatedEvent;
     use codex_protocol::protocol::ThreadRolledBackEvent;
@@ -4493,6 +4636,7 @@ mod handlers {
     use codex_protocol::user_input::UserInput;
     use codex_rmcp_client::ElicitationAction;
     use codex_rmcp_client::ElicitationResponse;
+    use serde_json::Value;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tracing::info;
@@ -4594,7 +4738,7 @@ mod handlers {
             .await;
             return;
         }
-        current_context.otel_manager.user_prompt(&items);
+        current_context.session_telemetry.user_prompt(&items);
 
         // Attempt to inject input into current task.
         if let Err(SteerInputError::NoActiveTurn(items)) = sess.steer_input(items, None).await {
@@ -4638,19 +4782,24 @@ mod handlers {
         server_name: String,
         request_id: ProtocolRequestId,
         decision: codex_protocol::approvals::ElicitationAction,
+        content: Option<Value>,
+        meta: Option<Value>,
     ) {
         let action = match decision {
             codex_protocol::approvals::ElicitationAction::Accept => ElicitationAction::Accept,
             codex_protocol::approvals::ElicitationAction::Decline => ElicitationAction::Decline,
             codex_protocol::approvals::ElicitationAction::Cancel => ElicitationAction::Cancel,
         };
-        // When accepting, send an empty object as content to satisfy MCP servers
-        // that expect non-null content on Accept. For Decline/Cancel, content is None.
         let content = match action {
-            ElicitationAction::Accept => Some(serde_json::json!({})),
+            // Preserve the legacy fallback for clients that only send an action.
+            ElicitationAction::Accept => Some(content.unwrap_or_else(|| serde_json::json!({}))),
             ElicitationAction::Decline | ElicitationAction::Cancel => None,
         };
-        let response = ElicitationResponse { action, content };
+        let response = ElicitationResponse {
+            action,
+            content,
+            meta,
+        };
         let request_id = match request_id {
             ProtocolRequestId::String(value) => {
                 rmcp::model::NumberOrString::String(std::sync::Arc::from(value))
@@ -4988,11 +5137,9 @@ mod handlers {
         }
 
         let memory_root = crate::memories::memory_root(&config.codex_home);
-        if let Err(err) = tokio::fs::remove_dir_all(&memory_root).await
-            && err.kind() != std::io::ErrorKind::NotFound
-        {
+        if let Err(err) = crate::memories::clear_memory_root_contents(&memory_root).await {
             errors.push(format!(
-                "failed removing memory directory {}: {err}",
+                "failed clearing memory directory {}: {err}",
                 memory_root.display()
             ));
         }
@@ -5065,25 +5212,86 @@ mod handlers {
         }
 
         let turn_context = sess.new_default_turn_with_sub_id(sub_id).await;
+        let rollout_path = {
+            let recorder = {
+                let guard = sess.services.rollout.lock().await;
+                guard.clone()
+            };
+            let Some(recorder) = recorder else {
+                sess.send_event_raw(Event {
+                    id: turn_context.sub_id.clone(),
+                    msg: EventMsg::Error(ErrorEvent {
+                        message: "thread rollback requires a persisted rollout path".to_string(),
+                        codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+                    }),
+                })
+                .await;
+                return;
+            };
+            recorder.rollout_path().to_path_buf()
+        };
+        if let Some(recorder) = {
+            let guard = sess.services.rollout.lock().await;
+            guard.clone()
+        } && let Err(err) = recorder.flush().await
+        {
+            sess.send_event_raw(Event {
+                id: turn_context.sub_id.clone(),
+                msg: EventMsg::Error(ErrorEvent {
+                    message: format!(
+                        "failed to flush rollout `{}` for rollback replay: {err}",
+                        rollout_path.display()
+                    ),
+                    codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+                }),
+            })
+            .await;
+            return;
+        }
 
-        let mut history = sess.clone_history().await;
-        // TODO(ccunningham): Fix rollback/backtracking baseline handling.
-        // We clear `reference_context_item` here, but should restore the
-        // post-rollback baseline from the surviving history/rollout instead.
-        // Truncating history should also invalidate/recompute `previous_turn_settings`
-        // so the next regular turn replays any dropped model/realtime
-        // instructions.
-        history.drop_last_n_user_turns(num_turns);
+        let initial_history =
+            match RolloutRecorder::get_rollout_history(rollout_path.as_path()).await {
+                Ok(history) => history,
+                Err(err) => {
+                    sess.send_event_raw(Event {
+                        id: turn_context.sub_id.clone(),
+                        msg: EventMsg::Error(ErrorEvent {
+                            message: format!(
+                                "failed to load rollout `{}` for rollback replay: {err}",
+                                rollout_path.display()
+                            ),
+                            codex_error_info: Some(CodexErrorInfo::ThreadRollbackFailed),
+                        }),
+                    })
+                    .await;
+                    return;
+                }
+            };
 
-        // Replace with the raw items. We don't want to replace with a normalized
-        // version of the history.
-        sess.replace_history(history.raw_items().to_vec(), None)
+        let rollback_event = ThreadRolledBackEvent { num_turns };
+        let replay_items = initial_history
+            .get_rollout_items()
+            .into_iter()
+            .chain(std::iter::once(RolloutItem::EventMsg(
+                EventMsg::ThreadRolledBack(rollback_event.clone()),
+            )))
+            .collect::<Vec<_>>();
+
+        let reconstructed = sess
+            .reconstruct_history_from_rollout(turn_context.as_ref(), replay_items.as_slice())
+            .await;
+        sess.replace_history(
+            reconstructed.history,
+            reconstructed.reference_context_item.clone(),
+        )
+        .await;
+        sess.set_previous_turn_settings(reconstructed.previous_turn_settings)
             .await;
         sess.recompute_token_usage(turn_context.as_ref()).await;
 
         sess.send_event_raw_flushed(Event {
             id: turn_context.sub_id.clone(),
-            msg: EventMsg::ThreadRolledBack(ThreadRolledBackEvent { num_turns }),
+            msg: EventMsg::ThreadRolledBack(rollback_event),
         })
         .await;
     }
@@ -5168,7 +5376,7 @@ mod handlers {
             .iter()
             .filter(|item| is_user_turn_boundary(item))
             .count();
-        sess.services.otel_manager.counter(
+        sess.services.session_telemetry.counter(
             "codex.conversation.turn.count",
             i64::try_from(turn_count).unwrap_or(0),
             &[],
@@ -5265,9 +5473,8 @@ async fn spawn_review_thread(
         .await;
     // For reviews, disable web_search and view_image regardless of global settings.
     let mut review_features = sess.features.clone();
-    review_features
-        .disable(crate::features::Feature::WebSearchRequest)
-        .disable(crate::features::Feature::WebSearchCached);
+    let _ = review_features.disable(crate::features::Feature::WebSearchRequest);
+    let _ = review_features.disable(crate::features::Feature::WebSearchCached);
     let review_web_search_mode = WebSearchMode::Disabled;
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_info: &review_model_info,
@@ -5276,6 +5483,7 @@ async fn spawn_review_thread(
         session_source: parent_turn_context.session_source.clone(),
         scheduled_tasks_enabled: !config.disable_cron,
     })
+    .with_web_search_config(None)
     .with_allow_login_shell(config.permissions.allow_login_shell)
     .with_agent_roles(config.agent_roles.clone());
 
@@ -5298,13 +5506,13 @@ async fn spawn_review_thread(
         );
     }
 
-    let otel_manager = parent_turn_context
-        .otel_manager
+    let session_telemetry = parent_turn_context
+        .session_telemetry
         .clone()
         .with_model(model.as_str(), review_model_info.slug.as_str());
     let auth_manager_for_context = auth_manager.clone();
     let provider_for_context = provider.clone();
-    let otel_manager_for_context = otel_manager.clone();
+    let session_telemetry_for_context = session_telemetry.clone();
     let reasoning_effort = per_turn_config.model_reasoning_effort;
     let reasoning_summary = per_turn_config
         .model_reasoning_summary
@@ -5325,11 +5533,12 @@ async fn spawn_review_thread(
 
     let review_turn_context = TurnContext {
         sub_id: review_turn_id,
+        trace_id: current_span_trace_id(),
         realtime_active: parent_turn_context.realtime_active,
         config: per_turn_config,
         auth_manager: auth_manager_for_context,
         model_info: model_info.clone(),
-        otel_manager: otel_manager_for_context,
+        session_telemetry: session_telemetry_for_context,
         provider: provider_for_context,
         reasoning_effort,
         reasoning_summary,
@@ -5359,6 +5568,7 @@ async fn spawn_review_thread(
         truncation_policy: model_info.truncation_policy.into(),
         turn_metadata_state,
         turn_skills: TurnSkillsContext::new(parent_turn_context.turn_skills.outcome.clone()),
+        turn_timing_state: Arc::new(TurnTimingState::default()),
     };
 
     // Seed the child task with the review prompt as the initial user message.
@@ -5516,25 +5726,38 @@ pub(crate) async fn run_turn(
     sess.record_context_updates_and_set_reference_context_item(turn_context.as_ref())
         .await;
 
-    let available_connectors = if turn_context.config.features.enabled(Feature::Apps) {
-        let mcp_tools = match sess
-            .services
-            .mcp_connection_manager
-            .read()
-            .await
-            .list_all_tools()
-            .or_cancel(&cancellation_token)
-            .await
-        {
-            Ok(mcp_tools) => mcp_tools,
-            Err(_) => return None,
+    let loaded_plugins = sess
+        .services
+        .plugins_manager
+        .plugins_for_config(&turn_context.config);
+    // Structured plugin:// mentions are resolved from the current session's
+    // enabled plugins, then converted into turn-scoped guidance below.
+    let mentioned_plugins =
+        collect_explicit_plugin_mentions(&input, loaded_plugins.capability_summaries());
+    let mcp_tools =
+        if turn_context.config.features.enabled(Feature::Apps) || !mentioned_plugins.is_empty() {
+            // Plugin mentions need raw MCP/app inventory even when app tools
+            // are normally hidden so we can describe the plugin's currently
+            // usable capabilities for this turn.
+            match sess
+                .services
+                .mcp_connection_manager
+                .read()
+                .await
+                .list_all_tools()
+                .or_cancel(&cancellation_token)
+                .await
+            {
+                Ok(mcp_tools) => mcp_tools,
+                Err(_) if turn_context.config.features.enabled(Feature::Apps) => return None,
+                Err(_) => HashMap::new(),
+            }
+        } else {
+            HashMap::new()
         };
-        let plugin_apps = sess
-            .services
-            .plugins_manager
-            .plugins_for_config(&turn_context.config);
+    let available_connectors = if turn_context.config.features.enabled(Feature::Apps) {
         let connectors = connectors::merge_plugin_apps_with_accessible(
-            plugin_apps.effective_apps(),
+            loaded_plugins.effective_apps(),
             connectors::accessible_connectors_from_mcp_tools(&mcp_tools),
         );
         connectors::with_app_enabled_state(connectors, &turn_context.config)
@@ -5572,7 +5795,7 @@ pub(crate) async fn run_turn(
     )
     .await;
 
-    let otel_manager = turn_context.otel_manager.clone();
+    let session_telemetry = turn_context.session_telemetry.clone();
     let thread_id = sess.conversation_id.to_string();
     let tracking = build_track_events_context(
         turn_context.model_info.slug.clone(),
@@ -5585,7 +5808,7 @@ pub(crate) async fn run_turn(
         scoped_hooks: skill_scoped_hooks,
     } = build_skill_injections(
         &mentioned_skills,
-        Some(&otel_manager),
+        Some(&session_telemetry),
         &sess.services.analytics_events_client,
         tracking.clone(),
     )
@@ -5599,12 +5822,29 @@ pub(crate) async fn run_turn(
             .await;
     }
 
+    let plugin_items =
+        build_plugin_injections(&mentioned_plugins, &mcp_tools, &available_connectors);
+
     let mut explicitly_enabled_connectors = collect_explicit_app_ids(&input);
     explicitly_enabled_connectors.extend(collect_explicit_app_ids_from_skill_items(
         &skill_items,
         &available_connectors,
         &skill_name_counts_lower,
     ));
+    // Explicit plugin mentions can make a plugin's enabled apps callable for
+    // this turn without persisting those connectors as sticky user selections.
+    let mut turn_enabled_connectors = explicitly_enabled_connectors.clone();
+    turn_enabled_connectors.extend(
+        mentioned_plugins
+            .iter()
+            .flat_map(|plugin| plugin.app_connector_ids.iter())
+            .map(|connector_id| connector_id.0.clone())
+            .filter(|connector_id| {
+                available_connectors
+                    .iter()
+                    .any(|connector| connector.is_enabled && connector.id == *connector_id)
+            }),
+    );
     let connector_names_by_id = available_connectors
         .iter()
         .map(|connector| (connector.id.as_str(), connector.name.as_str()))
@@ -5640,6 +5880,10 @@ pub(crate) async fn run_turn(
 
     if !skill_items.is_empty() {
         sess.record_conversation_items(&turn_context, &skill_items)
+            .await;
+    }
+    if !plugin_items.is_empty() {
+        sess.record_conversation_items(&turn_context, &plugin_items)
             .await;
     }
 
@@ -5711,7 +5955,7 @@ pub(crate) async fn run_turn(
             &mut client_session,
             turn_metadata_header.as_deref(),
             sampling_request_input,
-            &explicitly_enabled_connectors,
+            &turn_enabled_connectors,
             skills_outcome,
             &mut server_model_warning_emitted_for_turn,
             cancellation_token.child_token(),
@@ -6254,8 +6498,10 @@ async fn run_sampling_request(
         // Use the configured provider-specific stream retry budget.
         let max_retries = turn_context.provider.stream_max_retries();
         if retries >= max_retries
-            && client_session
-                .try_switch_fallback_transport(&turn_context.otel_manager, &turn_context.model_info)
+            && client_session.try_switch_fallback_transport(
+                &turn_context.session_telemetry,
+                &turn_context.model_info,
+            )
         {
             sess.send_event(
                 &turn_context,
@@ -6320,6 +6566,10 @@ async fn built_tools(
         .or_cancel(cancellation_token)
         .await?;
     drop(mcp_connection_manager);
+    let _loaded_plugins = sess
+        .services
+        .plugins_manager
+        .plugins_for_config(&turn_context.config);
 
     let mut effective_explicitly_enabled_connectors = explicitly_enabled_connectors.clone();
     effective_explicitly_enabled_connectors.extend(sess.get_connector_selection().await);
@@ -6341,6 +6591,8 @@ async fn built_tools(
         None
     };
 
+    // Keep the connector-grouped app view around for the router even though
+    // app tools only become prompt-visible after explicit selection/discovery.
     let app_tools = connectors.as_ref().map(|connectors| {
         filter_codex_apps_mcp_tools(&mcp_tools, connectors, &turn_context.config)
     });
@@ -6602,6 +6854,8 @@ fn realtime_text_for_event(msg: &EventMsg) -> Option<String> {
         | EventMsg::PatchApplyBegin(_)
         | EventMsg::PatchApplyEnd(_)
         | EventMsg::ViewImageToolCall(_)
+        | EventMsg::ImageGenerationBegin(_)
+        | EventMsg::ImageGenerationEnd(_)
         | EventMsg::ExecApprovalRequest(_)
         | EventMsg::RequestUserInput(_)
         | EventMsg::DynamicToolCallRequest(_)
@@ -6882,7 +7136,9 @@ async fn handle_assistant_item_done_in_plan_mode(
     {
         maybe_complete_plan_item_from_message(sess, turn_context, state, item).await;
 
-        if let Some(turn_item) = handle_non_tool_response_item(item, true) {
+        if let Some(turn_item) =
+            handle_non_tool_response_item(item, true, Some(&turn_context.cwd)).await
+        {
             emit_turn_item_in_plan_mode(
                 sess,
                 turn_context,
@@ -6952,7 +7208,7 @@ async fn try_run_sampling_request(
         .stream(
             prompt,
             &turn_context.model_info,
-            &turn_context.otel_manager,
+            &turn_context.session_telemetry,
             turn_context.reasoning_effort,
             turn_context.reasoning_summary,
             turn_context.config.service_tier,
@@ -7008,8 +7264,9 @@ async fn try_run_sampling_request(
         };
 
         sess.services
-            .otel_manager
+            .session_telemetry
             .record_responses(&handle_responses, &event);
+        record_turn_ttft_metric(&turn_context, &event).await;
 
         match event {
             ResponseEvent::Created => {}
@@ -7061,7 +7318,9 @@ async fn try_run_sampling_request(
                 needs_follow_up |= output_result.needs_follow_up;
             }
             ResponseEvent::OutputItemAdded(item) => {
-                if let Some(turn_item) = handle_non_tool_response_item(&item, plan_mode) {
+                if let Some(turn_item) =
+                    handle_non_tool_response_item(&item, plan_mode, Some(&turn_context.cwd)).await
+                {
                     let mut turn_item = turn_item;
                     let mut seeded_parsed: Option<ParsedAssistantTextDelta> = None;
                     let mut seeded_item_id: Option<String> = None;
@@ -7415,6 +7674,7 @@ mod tests {
             install_url: None,
             is_accessible: true,
             is_enabled: true,
+            plugin_display_names: Vec::new(),
         }
     }
 
@@ -7502,6 +7762,7 @@ mod tests {
             },
             connector_id: connector_id.map(str::to_string),
             connector_name: connector_name.map(str::to_string),
+            plugin_display_names: Vec::new(),
         }
     }
 
@@ -8232,6 +8493,7 @@ mod tests {
         let previous_model = "forked-rollout-model";
         let previous_context_item = TurnContextItem {
             turn_id: Some(turn_context.sub_id.clone()),
+            trace_id: turn_context.trace_id.clone(),
             cwd: turn_context.cwd.clone(),
             current_date: turn_context.current_date.clone(),
             timezone: turn_context.timezone.clone(),
@@ -8294,9 +8556,10 @@ mod tests {
     #[tokio::test]
     async fn thread_rollback_drops_last_turn_from_history() {
         let (sess, tc, rx) = make_session_and_context_with_rx().await;
+        install_test_rollout_recorder(&sess).await;
 
         let initial_context = sess.build_initial_context(tc.as_ref()).await;
-        sess.record_into_history(&initial_context, tc.as_ref())
+        sess.record_conversation_items(tc.as_ref(), &initial_context)
             .await;
 
         let turn_1 = vec![
@@ -8319,7 +8582,7 @@ mod tests {
                 phase: None,
             },
         ];
-        sess.record_into_history(&turn_1, tc.as_ref()).await;
+        sess.record_conversation_items(tc.as_ref(), &turn_1).await;
 
         let turn_2 = vec![
             ResponseItem::Message {
@@ -8341,12 +8604,18 @@ mod tests {
                 phase: None,
             },
         ];
-        sess.record_into_history(&turn_2, tc.as_ref()).await;
+        sess.record_conversation_items(tc.as_ref(), &turn_2).await;
         sess.set_previous_turn_settings(Some(PreviousTurnSettings {
             model: "previous-regular-model".to_string(),
             realtime_active: Some(tc.realtime_active),
         }))
         .await;
+        let mut previous_context_item = tc.to_turn_context_item();
+        previous_context_item.model = "previous-regular-model".to_string();
+        sess.persist_rollout_items(&[RolloutItem::TurnContext(previous_context_item)])
+            .await;
+        sess.ensure_rollout_materialized().await;
+        sess.flush_rollout().await;
 
         handlers::thread_rollback(&sess, "sub-1".to_string(), 1).await;
 
@@ -8359,21 +8628,16 @@ mod tests {
 
         let history = sess.clone_history().await;
         assert_eq!(expected, history.raw_items());
-        assert_eq!(
-            sess.previous_turn_settings().await,
-            Some(PreviousTurnSettings {
-                model: "previous-regular-model".to_string(),
-                realtime_active: Some(tc.realtime_active),
-            })
-        );
+        assert_eq!(sess.previous_turn_settings().await, None);
     }
 
     #[tokio::test]
     async fn thread_rollback_clears_history_when_num_turns_exceeds_existing_turns() {
         let (sess, tc, rx) = make_session_and_context_with_rx().await;
+        install_test_rollout_recorder(&sess).await;
 
         let initial_context = sess.build_initial_context(tc.as_ref()).await;
-        sess.record_into_history(&initial_context, tc.as_ref())
+        sess.record_conversation_items(tc.as_ref(), &initial_context)
             .await;
 
         let turn_1 = vec![ResponseItem::Message {
@@ -8385,7 +8649,9 @@ mod tests {
             end_turn: None,
             phase: None,
         }];
-        sess.record_into_history(&turn_1, tc.as_ref()).await;
+        sess.record_conversation_items(tc.as_ref(), &turn_1).await;
+        sess.ensure_rollout_materialized().await;
+        sess.flush_rollout().await;
 
         handlers::thread_rollback(&sess, "sub-1".to_string(), 99).await;
 
@@ -8774,6 +9040,27 @@ mod tests {
         assert_eq!(expected, got);
     }
 
+    async fn install_test_rollout_recorder(session: &Arc<Session>) {
+        let config = session.get_config().await;
+        let recorder = RolloutRecorder::new(
+            config.as_ref(),
+            RolloutRecorderParams::new(
+                ThreadId::default(),
+                None,
+                SessionSource::Exec,
+                BaseInstructions::default(),
+                Vec::new(),
+                EventPersistenceMode::Limited,
+            ),
+            None,
+            None,
+        )
+        .await
+        .expect("create rollout recorder");
+        let mut rollout = session.services.rollout.lock().await;
+        *rollout = Some(recorder);
+    }
+
     async fn wait_for_thread_rolled_back(
         rx: &async_channel::Receiver<Event>,
     ) -> crate::protocol::ThreadRolledBackEvent {
@@ -8903,7 +9190,7 @@ mod tests {
     async fn session_new_fails_when_zsh_fork_enabled_without_zsh_path() {
         let codex_home = tempfile::tempdir().expect("create temp dir");
         let mut config = build_test_config(codex_home.path()).await;
-        config.features.enable(Feature::ShellZshFork);
+        let _ = config.features.enable(Feature::ShellZshFork);
         config.zsh_path = None;
         let config = Arc::new(config);
 
@@ -9093,7 +9380,7 @@ mod tests {
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
             exec_policy,
             auth_manager: auth_manager.clone(),
-            otel_manager: otel_manager.clone(),
+            session_telemetry: otel_manager.clone(),
             models_manager: Arc::clone(&models_manager),
             tool_approvals: Mutex::new(ApprovalStore::default()),
             execve_session_approvals: RwLock::new(HashMap::new()),
@@ -9345,7 +9632,7 @@ mod tests {
             show_raw_agent_reasoning: config.show_raw_agent_reasoning,
             exec_policy,
             auth_manager: Arc::clone(&auth_manager),
-            otel_manager: otel_manager.clone(),
+            session_telemetry: otel_manager.clone(),
             models_manager: Arc::clone(&models_manager),
             tool_approvals: Mutex::new(ApprovalStore::default()),
             execve_session_approvals: RwLock::new(HashMap::new()),
@@ -9463,7 +9750,7 @@ mod tests {
     async fn record_model_warning_appends_user_message() {
         let (mut session, turn_context) = make_session_and_context().await;
         let features = Features::with_defaults();
-        session.features = features;
+        session.features = features.into();
 
         session
             .record_model_warning("too many unified exec processes", &turn_context)
@@ -10040,6 +10327,10 @@ mod tests {
     impl SessionTask for NeverEndingTask {
         fn kind(&self) -> TaskKind {
             self.kind
+        }
+
+        fn span_name(&self) -> &'static str {
+            "never_ending_task"
         }
 
         async fn run(

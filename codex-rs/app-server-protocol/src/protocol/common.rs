@@ -248,6 +248,10 @@ client_request_definitions! {
         params: v2::SkillsListParams,
         response: v2::SkillsListResponse,
     },
+    PluginList => "plugin/list" {
+        params: v2::PluginListParams,
+        response: v2::PluginListResponse,
+    },
     SkillsRemoteList => "skills/remote/list" {
         params: v2::SkillsRemoteReadParams,
         response: v2::SkillsRemoteReadResponse,
@@ -263,6 +267,10 @@ client_request_definitions! {
     SkillsConfigWrite => "skills/config/write" {
         params: v2::SkillsConfigWriteParams,
         response: v2::SkillsConfigWriteResponse,
+    },
+    PluginInstall => "plugin/install" {
+        params: v2::PluginInstallParams,
+        response: v2::PluginInstallResponse,
     },
     TurnStart => "turn/start" {
         params: v2::TurnStartParams,
@@ -369,10 +377,25 @@ client_request_definitions! {
         response: v2::FeedbackUploadResponse,
     },
 
-    /// Execute a command (argv vector) under the server's sandbox.
+    /// Execute a standalone command (argv vector) under the server's sandbox.
     OneOffCommandExec => "command/exec" {
         params: v2::CommandExecParams,
         response: v2::CommandExecResponse,
+    },
+    /// Write stdin bytes to a running `command/exec` session or close stdin.
+    CommandExecWrite => "command/exec/write" {
+        params: v2::CommandExecWriteParams,
+        response: v2::CommandExecWriteResponse,
+    },
+    /// Terminate a running `command/exec` session by client-supplied `processId`.
+    CommandExecTerminate => "command/exec/terminate" {
+        params: v2::CommandExecTerminateParams,
+        response: v2::CommandExecTerminateResponse,
+    },
+    /// Resize a running PTY-backed `command/exec` session by client-supplied `processId`.
+    CommandExecResize => "command/exec/resize" {
+        params: v2::CommandExecResizeParams,
+        response: v2::CommandExecResizeResponse,
     },
 
     ConfigRead => "config/read" {
@@ -646,6 +669,12 @@ server_request_definitions! {
         response: v2::ToolRequestUserInputResponse,
     },
 
+    /// Request input for an MCP server elicitation.
+    McpServerElicitationRequest => "mcpServer/elicitation/request" {
+        params: v2::McpServerElicitationRequestParams,
+        response: v2::McpServerElicitationRequestResponse,
+    },
+
     /// Execute a dynamic tool call on the client.
     DynamicToolCall => "item/tool/call" {
         params: v2::DynamicToolCallParams,
@@ -767,6 +796,8 @@ server_notification_definitions! {
     AgentMessageDelta => "item/agentMessage/delta" (v2::AgentMessageDeltaNotification),
     /// EXPERIMENTAL - proposed plan streaming deltas for plan items.
     PlanDelta => "item/plan/delta" (v2::PlanDeltaNotification),
+    /// Stream base64-encoded stdout/stderr chunks for a running `command/exec` session.
+    CommandExecOutputDelta => "command/exec/outputDelta" (v2::CommandExecOutputDeltaNotification),
     CommandExecutionOutputDelta => "item/commandExecution/outputDelta" (v2::CommandExecutionOutputDeltaNotification),
     TerminalInteraction => "item/commandExecution/terminalInteraction" (v2::TerminalInteractionNotification),
     FileChangeOutputDelta => "item/fileChange/outputDelta" (v2::FileChangeOutputDeltaNotification),
@@ -1039,6 +1070,63 @@ mod tests {
             }),
             serde_json::to_value(&request)?,
         );
+        Ok(())
+    }
+
+    #[test]
+    fn serialize_mcp_server_elicitation_request() -> Result<()> {
+        let requested_schema: v2::McpElicitationSchema = serde_json::from_value(json!({
+            "type": "object",
+            "properties": {
+                "confirmed": {
+                    "type": "boolean"
+                }
+            },
+            "required": ["confirmed"]
+        }))?;
+        let params = v2::McpServerElicitationRequestParams {
+            thread_id: "thr_123".to_string(),
+            turn_id: Some("turn_123".to_string()),
+            server_name: "codex_apps".to_string(),
+            request: v2::McpServerElicitationRequest::Form {
+                meta: None,
+                message: "Allow this request?".to_string(),
+                requested_schema,
+            },
+        };
+        let request = ServerRequest::McpServerElicitationRequest {
+            request_id: RequestId::Integer(9),
+            params: params.clone(),
+        };
+
+        assert_eq!(
+            json!({
+                "method": "mcpServer/elicitation/request",
+                "id": 9,
+                "params": {
+                    "threadId": "thr_123",
+                    "turnId": "turn_123",
+                    "serverName": "codex_apps",
+                    "mode": "form",
+                    "_meta": null,
+                    "message": "Allow this request?",
+                    "requestedSchema": {
+                        "type": "object",
+                        "properties": {
+                            "confirmed": {
+                                "type": "boolean"
+                            }
+                        },
+                        "required": ["confirmed"]
+                    }
+                }
+            }),
+            serde_json::to_value(&request)?,
+        );
+
+        let payload = ServerRequestPayload::McpServerElicitationRequest(params);
+        assert_eq!(request.id(), &RequestId::Integer(9));
+        assert_eq!(payload.request_with_id(RequestId::Integer(9)), request);
         Ok(())
     }
 

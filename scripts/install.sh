@@ -11,15 +11,15 @@ arch="$(uname -m)"
 case "$os" in
   Darwin)
     case "$arch" in
-      arm64) candidates=(aarch64-apple-darwin) ;;
-      x86_64) candidates=(x86_64-apple-darwin) ;;
+      arm64) candidates=(codex-aarch64-apple-darwin) ;;
+      x86_64) candidates=(codex-x86_64-apple-darwin) ;;
       *) echo "Unsupported macOS architecture: $arch" >&2; exit 1 ;;
     esac
     ;;
   Linux)
     case "$arch" in
-      aarch64 | arm64) candidates=(aarch64-unknown-linux-musl aarch64-unknown-linux-gnu) ;;
-      x86_64) candidates=(x86_64-unknown-linux-musl x86_64-unknown-linux-gnu) ;;
+      aarch64 | arm64) candidates=(codex-aarch64-unknown-linux-musl-legacy codex-aarch64-unknown-linux-musl codex-aarch64-unknown-linux-gnu) ;;
+      x86_64) candidates=(codex-x86_64-unknown-linux-musl-legacy codex-x86_64-unknown-linux-musl codex-x86_64-unknown-linux-gnu) ;;
       *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
     esac
     ;;
@@ -40,8 +40,7 @@ tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 
 asset=""
-for target in "${candidates[@]}"; do
-  candidate="codex-${target}"
+for candidate in "${candidates[@]}"; do
   url="${base_url}/${candidate}"
   if curl -fsSL --range 0-0 "$url" >/dev/null 2>&1; then
     asset="$candidate"

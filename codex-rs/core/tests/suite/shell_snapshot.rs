@@ -88,6 +88,23 @@ async fn wait_for_file_contents(path: &Path) -> Result<String> {
     }
 }
 
+async fn wait_for_path_removed(path: &Path) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match fs::metadata(path).await {
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(err) => return Err(err.into()),
+        }
+
+        if Instant::now() >= deadline {
+            anyhow::bail!("timed out waiting for file removal {}", path.display());
+        }
+
+        sleep(Duration::from_millis(25)).await;
+    }
+}
+
 fn policy_set_path_for_test() -> HashMap<String, String> {
     HashMap::from([("PATH".to_string(), POLICY_PATH_FOR_TEST.to_string())])
 }
@@ -119,8 +136,14 @@ async fn run_snapshot_command_with_options(
     } = options;
     let builder = test_codex().with_config(move |config| {
         config.use_experimental_unified_exec_tool = true;
-        config.features.enable(Feature::UnifiedExec);
-        config.features.enable(Feature::ShellSnapshot);
+        config
+            .features
+            .enable(Feature::UnifiedExec)
+            .expect("test config should allow feature update");
+        config
+            .features
+            .enable(Feature::ShellSnapshot)
+            .expect("test config should allow feature update");
         config.permissions.shell_environment_policy.r#set = shell_environment_set;
     });
     let harness = TestCodexHarness::with_builder(builder).await?;
@@ -207,7 +230,10 @@ async fn run_shell_command_snapshot_with_options(
         shell_environment_set,
     } = options;
     let builder = test_codex().with_config(move |config| {
-        config.features.enable(Feature::ShellSnapshot);
+        config
+            .features
+            .enable(Feature::ShellSnapshot)
+            .expect("test config should allow feature update");
         config.permissions.shell_environment_policy.r#set = shell_environment_set;
     });
     let harness = TestCodexHarness::with_builder(builder).await?;
@@ -399,7 +425,10 @@ async fn linux_shell_command_uses_shell_snapshot() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shell_command_snapshot_preserves_shell_environment_policy_set() -> Result<()> {
     let builder = test_codex().with_config(|config| {
-        config.features.enable(Feature::ShellSnapshot);
+        config
+            .features
+            .enable(Feature::ShellSnapshot)
+            .expect("test config should allow feature update");
         config.permissions.shell_environment_policy.r#set = policy_set_path_for_test();
     });
     let harness = TestCodexHarness::with_builder(builder).await?;
@@ -446,8 +475,14 @@ async fn shell_command_snapshot_preserves_shell_environment_policy_set() -> Resu
 async fn linux_unified_exec_snapshot_preserves_shell_environment_policy_set() -> Result<()> {
     let builder = test_codex().with_config(|config| {
         config.use_experimental_unified_exec_tool = true;
-        config.features.enable(Feature::UnifiedExec);
-        config.features.enable(Feature::ShellSnapshot);
+        config
+            .features
+            .enable(Feature::UnifiedExec)
+            .expect("test config should allow feature update");
+        config
+            .features
+            .enable(Feature::ShellSnapshot)
+            .expect("test config should allow feature update");
         config.permissions.shell_environment_policy.r#set = policy_set_path_for_test();
     });
     let harness = TestCodexHarness::with_builder(builder).await?;
@@ -493,7 +528,10 @@ async fn linux_unified_exec_snapshot_preserves_shell_environment_policy_set() ->
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
     let builder = test_codex().with_config(|config| {
-        config.features.enable(Feature::ShellSnapshot);
+        config
+            .features
+            .enable(Feature::ShellSnapshot)
+            .expect("test config should allow feature update");
         config.include_apply_patch_tool = true;
     });
     let harness = TestCodexHarness::with_builder(builder).await?;
@@ -562,7 +600,10 @@ async fn shell_command_snapshot_still_intercepts_apply_patch() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn shell_snapshot_deleted_after_shutdown_with_skills() -> Result<()> {
     let builder = test_codex().with_config(|config| {
-        config.features.enable(Feature::ShellSnapshot);
+        config
+            .features
+            .enable(Feature::ShellSnapshot)
+            .expect("test config should allow feature update");
     });
     let harness = TestCodexHarness::with_builder(builder).await?;
     let home = harness.test().home.clone();
@@ -577,13 +618,7 @@ async fn shell_snapshot_deleted_after_shutdown_with_skills() -> Result<()> {
 
     drop(codex);
     drop(harness);
-    sleep(Duration::from_millis(150)).await;
-
-    assert_eq!(
-        snapshot_path.exists(),
-        false,
-        "snapshot should be removed after shutdown"
-    );
+    wait_for_path_removed(&snapshot_path).await?;
 
     Ok(())
 }

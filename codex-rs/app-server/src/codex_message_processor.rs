@@ -1,4 +1,6 @@
 use crate::bespoke_event_handling::apply_bespoke_event_handling;
+use crate::command_exec::CommandExecManager;
+use crate::command_exec::StartCommandExecParams;
 use crate::error_code::INPUT_TOO_LARGE_ERROR_CODE;
 use crate::error_code::INTERNAL_ERROR_CODE;
 use crate::error_code::INVALID_PARAMS_ERROR_CODE;
@@ -22,6 +24,7 @@ use codex_app_server_protocol::AccountLoginCompletedNotification;
 use codex_app_server_protocol::AccountUpdatedNotification;
 use codex_app_server_protocol::AppInfo;
 use codex_app_server_protocol::AppListUpdatedNotification;
+use codex_app_server_protocol::AppSummary;
 use codex_app_server_protocol::AppsListParams;
 use codex_app_server_protocol::AppsListResponse;
 use codex_app_server_protocol::AskForApproval;
@@ -33,10 +36,12 @@ use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::CollaborationModeListParams;
 use codex_app_server_protocol::CollaborationModeListResponse;
 use codex_app_server_protocol::CommandExecParams;
+use codex_app_server_protocol::CommandExecResizeParams;
+use codex_app_server_protocol::CommandExecTerminateParams;
+use codex_app_server_protocol::CommandExecWriteParams;
 use codex_app_server_protocol::ConversationGitInfo;
 use codex_app_server_protocol::ConversationSummary;
 use codex_app_server_protocol::DynamicToolSpec as ApiDynamicToolSpec;
-use codex_app_server_protocol::ExecOneOffCommandResponse;
 use codex_app_server_protocol::ExperimentalFeature as ApiExperimentalFeature;
 use codex_app_server_protocol::ExperimentalFeatureListParams;
 use codex_app_server_protocol::ExperimentalFeatureListResponse;
@@ -77,6 +82,14 @@ use codex_app_server_protocol::MockExperimentalMethodParams;
 use codex_app_server_protocol::MockExperimentalMethodResponse;
 use codex_app_server_protocol::ModelListParams;
 use codex_app_server_protocol::ModelListResponse;
+use codex_app_server_protocol::PluginInstallParams;
+use codex_app_server_protocol::PluginInstallResponse;
+use codex_app_server_protocol::PluginInterface;
+use codex_app_server_protocol::PluginListParams;
+use codex_app_server_protocol::PluginListResponse;
+use codex_app_server_protocol::PluginMarketplaceEntry;
+use codex_app_server_protocol::PluginSource;
+use codex_app_server_protocol::PluginSummary;
 use codex_app_server_protocol::ProductSurface as ApiProductSurface;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewDelivery as ApiReviewDelivery;
@@ -180,8 +193,11 @@ use codex_core::config::edit::ConfigEdit;
 use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::types::McpServerTransportConfig;
 use codex_core::config_loader::CloudRequirementsLoader;
+use codex_core::connectors::filter_disallowed_connectors;
+use codex_core::connectors::merge_plugin_apps;
 use codex_core::default_client::set_default_client_residency_requirement;
 use codex_core::error::CodexErr;
+use codex_core::exec::ExecExpiration;
 use codex_core::exec::ExecParams;
 use codex_core::exec_env::create_env;
 use codex_core::features::FEATURES;
@@ -196,6 +212,12 @@ use codex_core::mcp::collect_mcp_snapshot;
 use codex_core::mcp::group_tools_by_server;
 use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_core::parse_cursor;
+use codex_core::plugins::AppConnectorId;
+use codex_core::plugins::MarketplaceError;
+use codex_core::plugins::MarketplacePluginSourceSummary;
+use codex_core::plugins::PluginInstallError as CorePluginInstallError;
+use codex_core::plugins::PluginInstallRequest;
+use codex_core::plugins::load_plugin_apps;
 use codex_core::read_head_for_summary;
 use codex_core::read_session_meta_line;
 use codex_core::rollout_date_parts;
@@ -247,6 +269,7 @@ use codex_state::StateRuntime;
 use codex_state::ThreadMetadataBuilder;
 use codex_state::log_db::LogDbLayer;
 use codex_utils_json_to_toml::json_to_toml;
+use codex_utils_pty::DEFAULT_OUTPUT_BYTES_CAP;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use std::ffi::OsStr;
@@ -265,6 +288,7 @@ use tokio::sync::Mutex;
 use tokio::sync::broadcast;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
+use tokio_util::sync::CancellationToken;
 use toml::Value as TomlValue;
 use tracing::error;
 use tracing::info;
@@ -352,6 +376,7 @@ pub(crate) struct CodexMessageProcessor {
     pending_thread_unloads: Arc<Mutex<HashSet<ThreadId>>>,
     thread_state_manager: ThreadStateManager,
     thread_watch_manager: ThreadWatchManager,
+    command_exec_manager: CommandExecManager,
     pending_fuzzy_searches: Arc<Mutex<HashMap<String, Arc<AtomicBool>>>>,
     fuzzy_search_sessions: Arc<Mutex<HashMap<String, FuzzyFileSearchSession>>>,
     feedback: CodexFeedback,
@@ -395,6 +420,21 @@ pub(crate) struct CodexMessageProcessorArgs {
 }
 
 impl CodexMessageProcessor {
+    pub(crate) fn clear_plugin_related_caches(&self) {
+        self.thread_manager.plugins_manager().clear_cache();
+        self.thread_manager.skills_manager().clear_cache();
+    }
+
+    pub(crate) async fn maybe_start_curated_repo_sync_for_latest_config(&self) {
+        match self.load_latest_config(None).await {
+            Ok(config) => self
+                .thread_manager
+                .plugins_manager()
+                .maybe_start_curated_repo_sync_for_config(&config),
+            Err(err) => warn!("failed to load latest config for curated plugin sync: {err:?}"),
+        }
+    }
+
     fn current_account_updated_notification(&self) -> AccountUpdatedNotification {
         let auth = self.auth_manager.auth_cached();
         AccountUpdatedNotification {
@@ -450,6 +490,7 @@ impl CodexMessageProcessor {
             pending_thread_unloads: Arc::new(Mutex::new(HashSet::new())),
             thread_state_manager: ThreadStateManager::new(),
             thread_watch_manager: ThreadWatchManager::new_with_outgoing(outgoing),
+            command_exec_manager: CommandExecManager::default(),
             pending_fuzzy_searches: Arc::new(Mutex::new(HashMap::new())),
             fuzzy_search_sessions: Arc::new(Mutex::new(HashMap::new())),
             feedback,
@@ -457,10 +498,14 @@ impl CodexMessageProcessor {
         }
     }
 
-    async fn load_latest_config(&self) -> Result<Config, JSONRPCErrorError> {
+    async fn load_latest_config(
+        &self,
+        fallback_cwd: Option<PathBuf>,
+    ) -> Result<Config, JSONRPCErrorError> {
         let cloud_requirements = self.current_cloud_requirements();
         let mut config = codex_core::config::ConfigBuilder::default()
             .cli_overrides(self.cli_overrides.clone())
+            .fallback_cwd(fallback_cwd)
             .cloud_requirements(cloud_requirements)
             .build()
             .await
@@ -642,6 +687,10 @@ impl CodexMessageProcessor {
                 self.skills_list(to_connection_request_id(request_id), params)
                     .await;
             }
+            ClientRequest::PluginList { request_id, params } => {
+                self.plugin_list(to_connection_request_id(request_id), params)
+                    .await;
+            }
             ClientRequest::SkillsRemoteList { request_id, params } => {
                 self.skills_remote_list(to_connection_request_id(request_id), params)
                     .await;
@@ -656,6 +705,10 @@ impl CodexMessageProcessor {
             }
             ClientRequest::SkillsConfigWrite { request_id, params } => {
                 self.skills_config_write(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::PluginInstall { request_id, params } => {
+                self.plugin_install(to_connection_request_id(request_id), params)
                     .await;
             }
             ClientRequest::TurnStart { request_id, params } => {
@@ -785,6 +838,18 @@ impl CodexMessageProcessor {
             }
             ClientRequest::OneOffCommandExec { request_id, params } => {
                 self.exec_one_off_command(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::CommandExecWrite { request_id, params } => {
+                self.command_exec_write(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::CommandExecResize { request_id, params } => {
+                self.command_exec_resize(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::CommandExecTerminate { request_id, params } => {
+                self.command_exec_terminate(to_connection_request_id(request_id), params)
                     .await;
             }
             ClientRequest::ConfigRead { .. }
@@ -1459,11 +1524,84 @@ impl CodexMessageProcessor {
             return;
         }
 
-        let cwd = params.cwd.unwrap_or_else(|| self.config.cwd.clone());
-        let env = create_env(&self.config.permissions.shell_environment_policy, None);
-        let timeout_ms = params
-            .timeout_ms
-            .and_then(|timeout_ms| u64::try_from(timeout_ms).ok());
+        let CommandExecParams {
+            command,
+            process_id,
+            tty,
+            stream_stdin,
+            stream_stdout_stderr,
+            output_bytes_cap,
+            disable_output_cap,
+            disable_timeout,
+            timeout_ms,
+            cwd,
+            env: env_overrides,
+            size,
+            sandbox_policy,
+        } = params;
+
+        if size.is_some() && !tty {
+            let error = JSONRPCErrorError {
+                code: INVALID_PARAMS_ERROR_CODE,
+                message: "command/exec size requires tty: true".to_string(),
+                data: None,
+            };
+            self.outgoing.send_error(request, error).await;
+            return;
+        }
+
+        if disable_output_cap && output_bytes_cap.is_some() {
+            let error = JSONRPCErrorError {
+                code: INVALID_PARAMS_ERROR_CODE,
+                message: "command/exec cannot set both outputBytesCap and disableOutputCap"
+                    .to_string(),
+                data: None,
+            };
+            self.outgoing.send_error(request, error).await;
+            return;
+        }
+
+        if disable_timeout && timeout_ms.is_some() {
+            let error = JSONRPCErrorError {
+                code: INVALID_PARAMS_ERROR_CODE,
+                message: "command/exec cannot set both timeoutMs and disableTimeout".to_string(),
+                data: None,
+            };
+            self.outgoing.send_error(request, error).await;
+            return;
+        }
+
+        let cwd = cwd.unwrap_or_else(|| self.config.cwd.clone());
+        let mut env = create_env(&self.config.permissions.shell_environment_policy, None);
+        if let Some(env_overrides) = env_overrides {
+            for (key, value) in env_overrides {
+                match value {
+                    Some(value) => {
+                        env.insert(key, value);
+                    }
+                    None => {
+                        env.remove(&key);
+                    }
+                }
+            }
+        }
+        let timeout_ms = match timeout_ms {
+            Some(timeout_ms) => match u64::try_from(timeout_ms) {
+                Ok(timeout_ms) => Some(timeout_ms),
+                Err(_) => {
+                    let error = JSONRPCErrorError {
+                        code: INVALID_PARAMS_ERROR_CODE,
+                        message: format!(
+                            "command/exec timeoutMs must be non-negative, got {timeout_ms}"
+                        ),
+                        data: None,
+                    };
+                    self.outgoing.send_error(request, error).await;
+                    return;
+                }
+            },
+            None => None,
+        };
         let managed_network_requirements_enabled =
             self.config.managed_network_requirements_enabled();
         let started_network_proxy = match self.config.permissions.network.as_ref() {
@@ -1491,10 +1629,23 @@ impl CodexMessageProcessor {
             None => None,
         };
         let windows_sandbox_level = WindowsSandboxLevel::from_config(&self.config);
+        let output_bytes_cap = if disable_output_cap {
+            None
+        } else {
+            Some(output_bytes_cap.unwrap_or(DEFAULT_OUTPUT_BYTES_CAP))
+        };
+        let expiration = if disable_timeout {
+            ExecExpiration::Cancellation(CancellationToken::new())
+        } else {
+            match timeout_ms {
+                Some(timeout_ms) => timeout_ms.into(),
+                None => ExecExpiration::DefaultTimeout,
+            }
+        };
         let exec_params = ExecParams {
-            command: params.command,
+            command,
             cwd,
-            expiration: timeout_ms.into(),
+            expiration,
             env,
             network: started_network_proxy
                 .as_ref()
@@ -1505,7 +1656,7 @@ impl CodexMessageProcessor {
             arg0: None,
         };
 
-        let requested_policy = params.sandbox_policy.map(|policy| policy.to_core());
+        let requested_policy = sandbox_policy.map(|policy| policy.to_core());
         let effective_policy = match requested_policy {
             Some(policy) => match self.config.permissions.sandbox_policy.can_set(&policy) {
                 Ok(()) => policy,
@@ -1524,41 +1675,100 @@ impl CodexMessageProcessor {
 
         let codex_linux_sandbox_exe = self.arg0_paths.codex_linux_sandbox_exe.clone();
         let outgoing = self.outgoing.clone();
-        let request_for_task = request;
+        let request_for_task = request.clone();
         let sandbox_cwd = self.config.cwd.clone();
         let started_network_proxy_for_task = started_network_proxy;
         let use_linux_sandbox_bwrap = self.config.features.enabled(Feature::UseLinuxSandboxBwrap);
+        let size = match size.map(crate::command_exec::terminal_size_from_protocol) {
+            Some(Ok(size)) => Some(size),
+            Some(Err(error)) => {
+                self.outgoing.send_error(request, error).await;
+                return;
+            }
+            None => None,
+        };
 
-        tokio::spawn(async move {
-            let _started_network_proxy = started_network_proxy_for_task;
-            match codex_core::exec::process_exec_tool_call(
-                exec_params,
-                &effective_policy,
-                sandbox_cwd.as_path(),
-                &codex_linux_sandbox_exe,
-                use_linux_sandbox_bwrap,
-                None,
-            )
-            .await
-            {
-                Ok(output) => {
-                    let response = ExecOneOffCommandResponse {
-                        exit_code: output.exit_code,
-                        stdout: output.stdout.text,
-                        stderr: output.stderr.text,
-                    };
-                    outgoing.send_response(request_for_task, response).await;
-                }
-                Err(err) => {
-                    let error = JSONRPCErrorError {
-                        code: INTERNAL_ERROR_CODE,
-                        message: format!("exec failed: {err}"),
-                        data: None,
-                    };
-                    outgoing.send_error(request_for_task, error).await;
+        match codex_core::exec::build_exec_request(
+            exec_params,
+            &effective_policy,
+            sandbox_cwd.as_path(),
+            &codex_linux_sandbox_exe,
+            use_linux_sandbox_bwrap,
+        ) {
+            Ok(exec_request) => {
+                if let Err(error) = self
+                    .command_exec_manager
+                    .start(StartCommandExecParams {
+                        outgoing,
+                        request_id: request_for_task,
+                        process_id,
+                        exec_request,
+                        started_network_proxy: started_network_proxy_for_task,
+                        tty,
+                        stream_stdin,
+                        stream_stdout_stderr,
+                        output_bytes_cap,
+                        size,
+                    })
+                    .await
+                {
+                    self.outgoing.send_error(request, error).await;
                 }
             }
-        });
+            Err(err) => {
+                let error = JSONRPCErrorError {
+                    code: INTERNAL_ERROR_CODE,
+                    message: format!("exec failed: {err}"),
+                    data: None,
+                };
+                self.outgoing.send_error(request, error).await;
+            }
+        }
+    }
+
+    async fn command_exec_write(
+        &self,
+        request_id: ConnectionRequestId,
+        params: CommandExecWriteParams,
+    ) {
+        match self
+            .command_exec_manager
+            .write(request_id.clone(), params)
+            .await
+        {
+            Ok(response) => self.outgoing.send_response(request_id, response).await,
+            Err(error) => self.outgoing.send_error(request_id, error).await,
+        }
+    }
+
+    async fn command_exec_resize(
+        &self,
+        request_id: ConnectionRequestId,
+        params: CommandExecResizeParams,
+    ) {
+        match self
+            .command_exec_manager
+            .resize(request_id.clone(), params)
+            .await
+        {
+            Ok(response) => self.outgoing.send_response(request_id, response).await,
+            Err(error) => self.outgoing.send_error(request_id, error).await,
+        }
+    }
+
+    async fn command_exec_terminate(
+        &self,
+        request_id: ConnectionRequestId,
+        params: CommandExecTerminateParams,
+    ) {
+        match self
+            .command_exec_manager
+            .terminate(request_id.clone(), params)
+            .await
+        {
+            Ok(response) => self.outgoing.send_response(request_id, response).await,
+            Err(error) => self.outgoing.send_error(request_id, error).await,
+        }
     }
 
     async fn thread_start(&self, request_id: ConnectionRequestId, params: ThreadStartParams) {
@@ -2693,7 +2903,13 @@ impl CodexMessageProcessor {
             }
         };
 
-        let db_summary = read_summary_from_state_db_by_thread_id(&self.config, thread_uuid).await;
+        let loaded_thread = self.thread_manager.get_thread(thread_uuid).await.ok();
+        let loaded_thread_state_db = loaded_thread.as_ref().and_then(|thread| thread.state_db());
+        let db_summary = if let Some(state_db_ctx) = loaded_thread_state_db.as_ref() {
+            read_summary_from_state_db_context_by_thread_id(Some(state_db_ctx), thread_uuid).await
+        } else {
+            read_summary_from_state_db_by_thread_id(&self.config, thread_uuid).await
+        };
         let mut rollout_path = db_summary.as_ref().map(|summary| summary.path.clone());
         if rollout_path.is_none() || include_turns {
             rollout_path =
@@ -2747,7 +2963,7 @@ impl CodexMessageProcessor {
                 }
             }
         } else {
-            let Ok(thread) = self.thread_manager.get_thread(thread_uuid).await else {
+            let Some(thread) = loaded_thread else {
                 self.send_invalid_request_error(
                     request_id,
                     format!("thread not loaded: {thread_uuid}"),
@@ -2822,6 +3038,9 @@ impl CodexMessageProcessor {
     }
 
     pub(crate) async fn connection_closed(&mut self, connection_id: ConnectionId) {
+        self.command_exec_manager
+            .connection_closed(connection_id)
+            .await;
         self.thread_state_manager
             .remove_connection(connection_id)
             .await;
@@ -2952,6 +3171,7 @@ impl CodexMessageProcessor {
         };
 
         let fallback_model_provider = config.model_provider_id.clone();
+        let response_history = thread_history.clone();
 
         match self
             .thread_manager
@@ -2965,8 +3185,8 @@ impl CodexMessageProcessor {
         {
             Ok(NewThread {
                 thread_id,
+                thread,
                 session_configured,
-                ..
             }) => {
                 let SessionConfiguredEvent { rollout_path, .. } = session_configured;
                 let Some(rollout_path) = rollout_path else {
@@ -2992,9 +3212,11 @@ impl CodexMessageProcessor {
                 );
 
                 let Some(mut thread) = self
-                    .load_thread_from_rollout_or_send_internal(
+                    .load_thread_from_resume_source_or_send_internal(
                         request_id.clone(),
                         thread_id,
+                        thread.as_ref(),
+                        &response_history,
                         rollout_path.as_path(),
                         fallback_model_provider.as_str(),
                     )
@@ -3149,6 +3371,20 @@ impl CodexMessageProcessor {
                     mismatch_details.join("; ")
                 );
             }
+            let thread_summary = match load_thread_summary_for_rollout(
+                &self.config,
+                existing_thread_id,
+                rollout_path.as_path(),
+                config_snapshot.model_provider_id.as_str(),
+            )
+            .await
+            {
+                Ok(thread) => thread,
+                Err(message) => {
+                    self.send_internal_error(request_id, message).await;
+                    return true;
+                }
+            };
 
             let listener_command_tx = {
                 let thread_state = thread_state.lock().await;
@@ -3169,8 +3405,9 @@ impl CodexMessageProcessor {
             let command = crate::thread_state::ThreadListenerCommand::SendThreadResumeResponse(
                 Box::new(crate::thread_state::PendingThreadResumeRequest {
                     request_id: request_id.clone(),
-                    rollout_path,
+                    rollout_path: rollout_path.clone(),
                     config_snapshot,
+                    thread_summary,
                 }),
             );
             if listener_command_tx.send(command).is_err() {
@@ -3268,45 +3505,61 @@ impl CodexMessageProcessor {
         }
     }
 
-    async fn load_thread_from_rollout_or_send_internal(
+    async fn load_thread_from_resume_source_or_send_internal(
         &self,
         request_id: ConnectionRequestId,
         thread_id: ThreadId,
+        thread: &CodexThread,
+        thread_history: &InitialHistory,
         rollout_path: &Path,
         fallback_provider: &str,
     ) -> Option<Thread> {
-        let mut thread = match read_summary_from_rollout(rollout_path, fallback_provider).await {
-            Ok(summary) => summary_to_thread(summary),
-            Err(err) => {
-                self.send_internal_error(
-                    request_id,
-                    format!(
-                        "failed to load rollout `{}` for thread {thread_id}: {err}",
-                        rollout_path.display()
-                    ),
+        let thread = match thread_history {
+            InitialHistory::Resumed(resumed) => {
+                load_thread_summary_for_rollout(
+                    &self.config,
+                    resumed.conversation_id,
+                    resumed.rollout_path.as_path(),
+                    fallback_provider,
                 )
-                .await;
+                .await
+            }
+            InitialHistory::Forked(items) => {
+                let config_snapshot = thread.config_snapshot().await;
+                let mut thread = build_thread_from_snapshot(
+                    thread_id,
+                    &config_snapshot,
+                    Some(rollout_path.into()),
+                );
+                thread.preview = preview_from_rollout_items(items);
+                Ok(thread)
+            }
+            InitialHistory::New => Err(format!(
+                "failed to build resume response for thread {thread_id}: initial history missing"
+            )),
+        };
+        let mut thread = match thread {
+            Ok(thread) => thread,
+            Err(message) => {
+                self.send_internal_error(request_id, message).await;
                 return None;
             }
         };
-        match read_rollout_items_from_rollout(rollout_path).await {
-            Ok(items) => {
-                thread.turns = build_turns_from_rollout_items(&items);
-                self.attach_thread_name(thread_id, &mut thread).await;
-                Some(thread)
-            }
-            Err(err) => {
-                self.send_internal_error(
-                    request_id,
-                    format!(
-                        "failed to load rollout `{}` for thread {thread_id}: {err}",
-                        rollout_path.display()
-                    ),
-                )
-                .await;
-                None
-            }
+        thread.id = thread_id.to_string();
+        thread.path = Some(rollout_path.to_path_buf());
+        let history_items = thread_history.get_rollout_items();
+        if let Err(message) = populate_resume_turns(
+            &mut thread,
+            ResumeTurnSource::HistoryItems(&history_items),
+            None,
+        )
+        .await
+        {
+            self.send_internal_error(request_id, message).await;
+            return None;
         }
+        self.attach_thread_name(thread_id, &mut thread).await;
+        Some(thread)
     }
 
     async fn attach_thread_name(&self, thread_id: ThreadId, thread: &mut Thread) {
@@ -3854,7 +4107,7 @@ impl CodexMessageProcessor {
         params: ExperimentalFeatureListParams,
     ) {
         let ExperimentalFeatureListParams { cursor, limit } = params;
-        let config = match self.load_latest_config().await {
+        let config = match self.load_latest_config(None).await {
             Ok(config) => config,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
@@ -3969,7 +4222,7 @@ impl CodexMessageProcessor {
     }
 
     async fn mcp_server_refresh(&self, request_id: ConnectionRequestId, _params: Option<()>) {
-        let config = match self.load_latest_config().await {
+        let config = match self.load_latest_config(None).await {
             Ok(config) => config,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
@@ -4028,7 +4281,7 @@ impl CodexMessageProcessor {
         request_id: ConnectionRequestId,
         params: McpServerOauthLoginParams,
     ) {
-        let config = match self.load_latest_config().await {
+        let config = match self.load_latest_config(None).await {
             Ok(config) => config,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
@@ -4134,7 +4387,7 @@ impl CodexMessageProcessor {
         let request = request_id.clone();
 
         let outgoing = Arc::clone(&self.outgoing);
-        let config = match self.load_latest_config().await {
+        let config = match self.load_latest_config(None).await {
             Ok(config) => config,
             Err(error) => {
                 self.outgoing.send_error(request, error).await;
@@ -4268,6 +4521,30 @@ impl CodexMessageProcessor {
             data: None,
         };
         self.outgoing.send_error(request_id, error).await;
+    }
+
+    async fn send_marketplace_error(
+        &self,
+        request_id: ConnectionRequestId,
+        err: MarketplaceError,
+        action: &str,
+    ) {
+        match err {
+            MarketplaceError::MarketplaceNotFound { .. } => {
+                self.send_invalid_request_error(request_id, err.to_string())
+                    .await;
+            }
+            MarketplaceError::Io { .. } => {
+                self.send_internal_error(request_id, format!("failed to {action}: {err}"))
+                    .await;
+            }
+            MarketplaceError::InvalidMarketplaceFile { .. }
+            | MarketplaceError::PluginNotFound { .. }
+            | MarketplaceError::InvalidPlugin(_) => {
+                self.send_invalid_request_error(request_id, err.to_string())
+                    .await;
+            }
+        }
     }
 
     async fn wait_for_thread_shutdown(thread: &Arc<CodexThread>) -> ThreadShutdownResult {
@@ -4533,7 +4810,7 @@ impl CodexMessageProcessor {
     }
 
     async fn apps_list(&self, request_id: ConnectionRequestId, params: AppsListParams) {
-        let mut config = match self.load_latest_config().await {
+        let mut config = match self.load_latest_config(None).await {
             Ok(config) => config,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
@@ -4550,11 +4827,9 @@ impl CodexMessageProcessor {
                 }
             };
 
-            if thread.enabled(Feature::Apps) {
-                config.features.enable(Feature::Apps);
-            } else {
-                config.features.disable(Feature::Apps);
-            }
+            let _ = config
+                .features
+                .set_enabled(Feature::Apps, thread.enabled(Feature::Apps));
         }
 
         if !config.features.enabled(Feature::Apps) {
@@ -4766,6 +5041,36 @@ impl CodexMessageProcessor {
         connectors::merge_connectors_with_accessible(all, accessible, all_connectors_loaded)
     }
 
+    fn plugin_apps_needing_auth(
+        all_connectors: &[AppInfo],
+        accessible_connectors: &[AppInfo],
+        plugin_apps: &[AppConnectorId],
+        codex_apps_ready: bool,
+    ) -> Vec<AppSummary> {
+        if !codex_apps_ready {
+            return Vec::new();
+        }
+
+        let accessible_ids = accessible_connectors
+            .iter()
+            .map(|connector| connector.id.as_str())
+            .collect::<HashSet<_>>();
+        let plugin_app_ids = plugin_apps
+            .iter()
+            .map(|connector_id| connector_id.0.as_str())
+            .collect::<HashSet<_>>();
+
+        all_connectors
+            .iter()
+            .filter(|connector| {
+                plugin_app_ids.contains(connector.id.as_str())
+                    && !accessible_ids.contains(connector.id.as_str())
+            })
+            .cloned()
+            .map(AppSummary::from)
+            .collect()
+    }
+
     fn should_send_app_list_updated_notification(
         connectors: &[AppInfo],
         accessible_loaded: bool,
@@ -4878,6 +5183,84 @@ impl CodexMessageProcessor {
             .await;
     }
 
+    async fn plugin_list(&self, request_id: ConnectionRequestId, params: PluginListParams) {
+        let plugins_manager = self.thread_manager.plugins_manager();
+        let roots = params.cwds.unwrap_or_default();
+
+        let config = match self.load_latest_config(None).await {
+            Ok(config) => config,
+            Err(err) => {
+                self.outgoing.send_error(request_id, err).await;
+                return;
+            }
+        };
+
+        let data = match tokio::task::spawn_blocking(move || {
+            let marketplaces = plugins_manager.list_marketplaces_for_config(&config, &roots)?;
+            Ok::<Vec<PluginMarketplaceEntry>, MarketplaceError>(
+                marketplaces
+                    .into_iter()
+                    .map(|marketplace| PluginMarketplaceEntry {
+                        name: marketplace.name,
+                        path: marketplace.path,
+                        plugins: marketplace
+                            .plugins
+                            .into_iter()
+                            .map(|plugin| PluginSummary {
+                                id: plugin.id,
+                                installed: plugin.installed,
+                                enabled: plugin.enabled,
+                                name: plugin.name,
+                                source: match plugin.source {
+                                    MarketplacePluginSourceSummary::Local { path } => {
+                                        PluginSource::Local { path }
+                                    }
+                                },
+                                interface: plugin.interface.map(|interface| PluginInterface {
+                                    display_name: interface.display_name,
+                                    short_description: interface.short_description,
+                                    long_description: interface.long_description,
+                                    developer_name: interface.developer_name,
+                                    category: interface.category,
+                                    capabilities: interface.capabilities,
+                                    website_url: interface.website_url,
+                                    privacy_policy_url: interface.privacy_policy_url,
+                                    terms_of_service_url: interface.terms_of_service_url,
+                                    default_prompt: interface.default_prompt,
+                                    brand_color: interface.brand_color,
+                                    composer_icon: interface.composer_icon,
+                                    logo: interface.logo,
+                                    screenshots: interface.screenshots,
+                                }),
+                            })
+                            .collect(),
+                    })
+                    .collect(),
+            )
+        })
+        .await
+        {
+            Ok(Ok(data)) => data,
+            Ok(Err(err)) => {
+                self.send_marketplace_error(request_id, err, "list marketplace plugins")
+                    .await;
+                return;
+            }
+            Err(err) => {
+                self.send_internal_error(
+                    request_id,
+                    format!("failed to list marketplace plugins: {err}"),
+                )
+                .await;
+                return;
+            }
+        };
+
+        self.outgoing
+            .send_response(request_id, PluginListResponse { marketplaces: data })
+            .await;
+    }
+
     async fn skills_remote_list(
         &self,
         request_id: ConnectionRequestId,
@@ -4982,6 +5365,137 @@ impl CodexMessageProcessor {
                     data: None,
                 };
                 self.outgoing.send_error(request_id, error).await;
+            }
+        }
+    }
+
+    async fn plugin_install(&self, request_id: ConnectionRequestId, params: PluginInstallParams) {
+        let PluginInstallParams {
+            marketplace_path,
+            plugin_name,
+        } = params;
+        let config_cwd = marketplace_path.as_path().parent().map(Path::to_path_buf);
+
+        let plugins_manager = self.thread_manager.plugins_manager();
+        let request = PluginInstallRequest {
+            plugin_name,
+            marketplace_path,
+        };
+
+        match plugins_manager.install_plugin(request).await {
+            Ok(result) => {
+                let config = match self.load_latest_config(config_cwd).await {
+                    Ok(config) => config,
+                    Err(err) => {
+                        warn!(
+                            "failed to reload config after plugin install, using current config: {err:?}"
+                        );
+                        self.config.as_ref().clone()
+                    }
+                };
+                let plugin_apps = load_plugin_apps(result.installed_path.as_path());
+                let apps_needing_auth = if plugin_apps.is_empty()
+                    || !config.features.enabled(Feature::Apps)
+                {
+                    Vec::new()
+                } else {
+                    let (all_connectors_result, accessible_connectors_result) = tokio::join!(
+                        connectors::list_all_connectors_with_options(&config, true),
+                        connectors::list_accessible_connectors_from_mcp_tools_with_options_and_status(
+                            &config, true
+                        ),
+                    );
+
+                    let all_connectors = match all_connectors_result {
+                        Ok(connectors) => filter_disallowed_connectors(merge_plugin_apps(
+                            connectors,
+                            plugin_apps.clone(),
+                        )),
+                        Err(err) => {
+                            warn!(
+                                plugin = result.plugin_id.as_key(),
+                                "failed to load app metadata after plugin install: {err:#}"
+                            );
+                            filter_disallowed_connectors(merge_plugin_apps(
+                                connectors::list_cached_all_connectors(&config)
+                                    .await
+                                    .unwrap_or_default(),
+                                plugin_apps.clone(),
+                            ))
+                        }
+                    };
+                    let (accessible_connectors, codex_apps_ready) =
+                        match accessible_connectors_result {
+                            Ok(status) => (status.connectors, status.codex_apps_ready),
+                            Err(err) => {
+                                warn!(
+                                    plugin = result.plugin_id.as_key(),
+                                    "failed to load accessible apps after plugin install: {err:#}"
+                                );
+                                (
+                                    connectors::list_cached_accessible_connectors_from_mcp_tools(
+                                        &config,
+                                    )
+                                    .await
+                                    .unwrap_or_default(),
+                                    false,
+                                )
+                            }
+                        };
+                    if !codex_apps_ready {
+                        warn!(
+                            plugin = result.plugin_id.as_key(),
+                            "codex_apps MCP not ready after plugin install; skipping appsNeedingAuth check"
+                        );
+                    }
+
+                    Self::plugin_apps_needing_auth(
+                        &all_connectors,
+                        &accessible_connectors,
+                        &plugin_apps,
+                        codex_apps_ready,
+                    )
+                };
+
+                self.clear_plugin_related_caches();
+                self.outgoing
+                    .send_response(request_id, PluginInstallResponse { apps_needing_auth })
+                    .await;
+            }
+            Err(err) => {
+                if err.is_invalid_request() {
+                    self.send_invalid_request_error(request_id, err.to_string())
+                        .await;
+                    return;
+                }
+
+                match err {
+                    CorePluginInstallError::Marketplace(err) => {
+                        self.send_marketplace_error(request_id, err, "install plugin")
+                            .await;
+                    }
+                    CorePluginInstallError::Config(err) => {
+                        self.send_internal_error(
+                            request_id,
+                            format!("failed to persist installed plugin config: {err}"),
+                        )
+                        .await;
+                    }
+                    CorePluginInstallError::Join(err) => {
+                        self.send_internal_error(
+                            request_id,
+                            format!("failed to install plugin: {err}"),
+                        )
+                        .await;
+                    }
+                    CorePluginInstallError::Store(err) => {
+                        self.send_internal_error(
+                            request_id,
+                            format!("failed to install plugin: {err}"),
+                        )
+                        .await;
+                    }
+                }
             }
         }
     }
@@ -6121,21 +6635,39 @@ impl CodexMessageProcessor {
             WindowsSandboxSetupMode::Unelevated => CoreWindowsSandboxSetupMode::Unelevated,
         };
         let config = Arc::clone(&self.config);
+        let cli_overrides = self.cli_overrides.clone();
+        let cloud_requirements = self.current_cloud_requirements();
+        let command_cwd = params.cwd.unwrap_or_else(|| config.cwd.clone());
         let outgoing = Arc::clone(&self.outgoing);
         let connection_id = request_id.connection_id;
 
         tokio::spawn(async move {
-            let setup_request = WindowsSandboxSetupRequest {
-                mode,
-                policy: config.permissions.sandbox_policy.get().clone(),
-                policy_cwd: config.cwd.clone(),
-                command_cwd: config.cwd.clone(),
-                env_map: std::env::vars().collect(),
-                codex_home: config.codex_home.clone(),
-                active_profile: config.active_profile.clone(),
+            let derived_config = derive_config_for_cwd(
+                &cli_overrides,
+                None,
+                ConfigOverrides {
+                    cwd: Some(command_cwd.clone()),
+                    ..Default::default()
+                },
+                Some(command_cwd.clone()),
+                &cloud_requirements,
+            )
+            .await;
+            let setup_result = match derived_config {
+                Ok(config) => {
+                    let setup_request = WindowsSandboxSetupRequest {
+                        mode,
+                        policy: config.permissions.sandbox_policy.get().clone(),
+                        policy_cwd: config.cwd.clone(),
+                        command_cwd,
+                        env_map: std::env::vars().collect(),
+                        codex_home: config.codex_home.clone(),
+                        active_profile: config.active_profile.clone(),
+                    };
+                    codex_core::windows_sandbox::run_windows_sandbox_setup(setup_request).await
+                }
+                Err(err) => Err(err.into()),
             };
-            let setup_result =
-                codex_core::windows_sandbox::run_windows_sandbox_setup(setup_request).await;
             let notification = WindowsSandboxSetupCompletedNotification {
                 mode: match mode {
                     CoreWindowsSandboxSetupMode::Elevated => WindowsSandboxSetupMode::Elevated,
@@ -6226,29 +6758,26 @@ async fn handle_pending_thread_resume_request(
 
     let request_id = pending.request_id;
     let connection_id = request_id.connection_id;
-    let mut thread = match load_thread_for_running_resume_response(
-        conversation_id,
-        pending.rollout_path.as_path(),
-        pending.config_snapshot.model_provider_id.as_str(),
+    let mut thread = pending.thread_summary;
+    if let Err(message) = populate_resume_turns(
+        &mut thread,
+        ResumeTurnSource::RolloutPath(pending.rollout_path.as_path()),
         active_turn.as_ref(),
     )
     .await
     {
-        Ok(thread) => thread,
-        Err(message) => {
-            outgoing
-                .send_error(
-                    request_id,
-                    JSONRPCErrorError {
-                        code: INTERNAL_ERROR_CODE,
-                        message,
-                        data: None,
-                    },
-                )
-                .await;
-            return;
-        }
-    };
+        outgoing
+            .send_error(
+                request_id,
+                JSONRPCErrorError {
+                    code: INTERNAL_ERROR_CODE,
+                    message,
+                    data: None,
+                },
+            )
+            .await;
+        return;
+    }
 
     has_in_progress_turn = has_in_progress_turn
         || thread
@@ -6298,6 +6827,38 @@ async fn handle_pending_thread_resume_request(
         .await;
 }
 
+enum ResumeTurnSource<'a> {
+    RolloutPath(&'a Path),
+    HistoryItems(&'a [RolloutItem]),
+}
+
+async fn populate_resume_turns(
+    thread: &mut Thread,
+    turn_source: ResumeTurnSource<'_>,
+    active_turn: Option<&Turn>,
+) -> std::result::Result<(), String> {
+    let mut turns = match turn_source {
+        ResumeTurnSource::RolloutPath(rollout_path) => {
+            read_rollout_items_from_rollout(rollout_path)
+                .await
+                .map(|items| build_turns_from_rollout_items(&items))
+                .map_err(|err| {
+                    format!(
+                        "failed to load rollout `{}` for thread {}: {err}",
+                        rollout_path.display(),
+                        thread.id
+                    )
+                })?
+        }
+        ResumeTurnSource::HistoryItems(items) => build_turns_from_rollout_items(items),
+    };
+    if let Some(active_turn) = active_turn {
+        merge_turn_history_with_active_turn(&mut turns, active_turn.clone());
+    }
+    thread.turns = turns;
+    Ok(())
+}
+
 async fn resolve_pending_server_request(
     conversation_id: ThreadId,
     thread_state_manager: &ThreadStateManager,
@@ -6321,38 +6882,6 @@ async fn resolve_pending_server_request(
             },
         ))
         .await;
-}
-
-async fn load_thread_for_running_resume_response(
-    conversation_id: ThreadId,
-    rollout_path: &Path,
-    fallback_provider: &str,
-    active_turn: Option<&Turn>,
-) -> std::result::Result<Thread, String> {
-    let mut thread = read_summary_from_rollout(rollout_path, fallback_provider)
-        .await
-        .map(summary_to_thread)
-        .map_err(|err| {
-            format!(
-                "failed to load rollout `{}` for thread {conversation_id}: {err}",
-                rollout_path.display()
-            )
-        })?;
-
-    let mut turns = read_rollout_items_from_rollout(rollout_path)
-        .await
-        .map(|items| build_turns_from_rollout_items(&items))
-        .map_err(|err| {
-            format!(
-                "failed to load rollout `{}` for thread {conversation_id}: {err}",
-                rollout_path.display()
-            )
-        })?;
-    if let Some(active_turn) = active_turn {
-        merge_turn_history_with_active_turn(&mut turns, active_turn.clone());
-    }
-    thread.turns = turns;
-    Ok(thread)
 }
 
 fn merge_turn_history_with_active_turn(turns: &mut Vec<Turn>, active_turn: Turn) {
@@ -6380,6 +6909,14 @@ fn collect_resume_override_mismatches(
         mismatch_details.push(format!(
             "model_provider requested={requested_provider} active={}",
             config_snapshot.model_provider_id
+        ));
+    }
+    if let Some(requested_service_tier) = request.service_tier.as_ref()
+        && requested_service_tier != &config_snapshot.service_tier
+    {
+        mismatch_details.push(format!(
+            "service_tier requested={requested_service_tier:?} active={:?}",
+            config_snapshot.service_tier
         ));
     }
     if let Some(requested_cwd) = request.cwd.as_deref() {
@@ -6952,6 +7489,48 @@ fn map_git_info(git_info: &CoreGitInfo) -> ConversationGitInfo {
     }
 }
 
+async fn load_thread_summary_for_rollout(
+    config: &Config,
+    thread_id: ThreadId,
+    rollout_path: &Path,
+    fallback_provider: &str,
+) -> std::result::Result<Thread, String> {
+    let mut thread = read_summary_from_rollout(rollout_path, fallback_provider)
+        .await
+        .map(summary_to_thread)
+        .map_err(|err| {
+            format!(
+                "failed to load rollout `{}` for thread {thread_id}: {err}",
+                rollout_path.display()
+            )
+        })?;
+    if let Some(summary) = read_summary_from_state_db_by_thread_id(config, thread_id).await {
+        merge_mutable_thread_metadata(&mut thread, summary_to_thread(summary));
+    }
+    Ok(thread)
+}
+
+fn merge_mutable_thread_metadata(thread: &mut Thread, persisted_thread: Thread) {
+    thread.git_info = persisted_thread.git_info;
+}
+
+fn preview_from_rollout_items(items: &[RolloutItem]) -> String {
+    items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::ResponseItem(item) => match codex_core::parse_turn_item(item) {
+                Some(codex_protocol::items::TurnItem::UserMessage(user)) => Some(user.message()),
+                _ => None,
+            },
+            _ => None,
+        })
+        .map(|preview| match preview.find(USER_MESSAGE_BEGIN) {
+            Some(idx) => preview[idx + USER_MESSAGE_BEGIN.len()..].trim().to_string(),
+            None => preview,
+        })
+        .unwrap_or_default()
+}
+
 fn with_thread_spawn_agent_metadata(
     source: codex_protocol::protocol::SessionSource,
     agent_nickname: Option<String>,
@@ -7104,6 +7683,72 @@ mod tests {
             input_schema: json!({"properties": {}}),
         }];
         validate_dynamic_tools(&tools).expect("valid schema");
+    }
+
+    #[test]
+    fn plugin_apps_needing_auth_returns_empty_when_codex_apps_is_not_ready() {
+        let all_connectors = vec![AppInfo {
+            id: "alpha".to_string(),
+            name: "Alpha".to_string(),
+            description: Some("Alpha connector".to_string()),
+            logo_url: None,
+            logo_url_dark: None,
+            distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
+            install_url: Some("https://chatgpt.com/apps/alpha/alpha".to_string()),
+            is_accessible: false,
+            is_enabled: true,
+            plugin_display_names: Vec::new(),
+        }];
+
+        assert_eq!(
+            CodexMessageProcessor::plugin_apps_needing_auth(
+                &all_connectors,
+                &[],
+                &[AppConnectorId("alpha".to_string())],
+                false,
+            ),
+            Vec::<AppSummary>::new()
+        );
+    }
+
+    #[test]
+    fn collect_resume_override_mismatches_includes_service_tier() {
+        let request = ThreadResumeParams {
+            thread_id: "thread-1".to_string(),
+            history: None,
+            path: None,
+            model: None,
+            model_provider: None,
+            service_tier: Some(Some(codex_protocol::config_types::ServiceTier::Fast)),
+            cwd: None,
+            approval_policy: None,
+            sandbox: None,
+            config: None,
+            base_instructions: None,
+            developer_instructions: None,
+            personality: None,
+            persist_extended_history: false,
+        };
+        let config_snapshot = ThreadConfigSnapshot {
+            model: "gpt-5".to_string(),
+            model_provider_id: "openai".to_string(),
+            service_tier: Some(codex_protocol::config_types::ServiceTier::Flex),
+            approval_policy: codex_protocol::protocol::AskForApproval::OnRequest,
+            sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+            cwd: PathBuf::from("/tmp"),
+            ephemeral: false,
+            reasoning_effort: None,
+            personality: None,
+            session_source: SessionSource::Cli,
+        };
+
+        assert_eq!(
+            collect_resume_override_mismatches(&request, &config_snapshot),
+            vec!["service_tier requested=Some(Fast) active=Some(Flex)".to_string()]
+        );
     }
 
     #[test]

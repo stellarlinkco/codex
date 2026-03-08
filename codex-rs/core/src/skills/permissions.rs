@@ -1,16 +1,14 @@
 #[cfg(any(unix, test))]
 use std::collections::HashSet;
 
-#[cfg(target_os = "macos")]
-use codex_protocol::models::MacOsAutomationValue;
-#[cfg(any(unix, test))]
-use codex_protocol::models::MacOsPermissions;
-#[cfg(target_os = "macos")]
-use codex_protocol::models::MacOsPreferencesValue;
 #[cfg(any(unix, test))]
 use codex_protocol::models::MacOsSeatbeltProfileExtensions;
 #[cfg(any(unix, test))]
 use codex_protocol::models::PermissionProfile;
+#[cfg(any(unix, test))]
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+#[cfg(any(unix, test))]
+use codex_protocol::permissions::NetworkSandboxPolicy;
 #[cfg(any(unix, test))]
 use codex_utils_absolute_path::AbsolutePathBuf;
 #[cfg(any(unix, test))]
@@ -45,6 +43,10 @@ pub(crate) fn compile_permission_profile(
         macos,
     } = permissions?;
     let file_system = file_system.unwrap_or_default();
+    let network_access = network
+        .as_ref()
+        .and_then(|value| value.enabled)
+        .unwrap_or(false);
     let fs_read = normalize_permission_paths(
         file_system.read.as_deref().unwrap_or_default(),
         "permissions.file_system.read",
@@ -64,7 +66,7 @@ pub(crate) fn compile_permission_profile(
                     readable_roots: fs_read,
                 }
             },
-            network_access: network.unwrap_or_default(),
+            network_access,
             exclude_tmpdir_env_var: false,
             exclude_slash_tmp: false,
         }
@@ -74,18 +76,25 @@ pub(crate) fn compile_permission_profile(
                 include_platform_defaults: true,
                 readable_roots: fs_read,
             },
+            network_access,
         }
     } else {
-        // Default sandbox policy
-        SandboxPolicy::new_read_only_policy()
+        SandboxPolicy::ReadOnly {
+            access: ReadOnlyAccess::FullAccess,
+            network_access,
+        }
     };
     let macos_permissions = macos.unwrap_or_default();
     let macos_seatbelt_profile_extensions =
         build_macos_seatbelt_profile_extensions(&macos_permissions);
+    let file_system_sandbox_policy = FileSystemSandboxPolicy::from(&sandbox_policy);
+    let network_sandbox_policy = NetworkSandboxPolicy::from(&sandbox_policy);
 
     Some(Permissions {
         approval_policy: Constrained::allow_any(AskForApproval::Never),
         sandbox_policy: Constrained::allow_any(sandbox_policy),
+        file_system_sandbox_policy,
+        network_sandbox_policy,
         network: None,
         allow_login_shell: true,
         shell_environment_policy: ShellEnvironmentPolicy::default(),
@@ -125,86 +134,14 @@ fn normalize_permission_path(value: &AbsolutePathBuf, field: &str) -> Option<Abs
 
 #[cfg(target_os = "macos")]
 fn build_macos_seatbelt_profile_extensions(
-    permissions: &MacOsPermissions,
+    permissions: &MacOsSeatbeltProfileExtensions,
 ) -> Option<MacOsSeatbeltProfileExtensions> {
-    let defaults = MacOsSeatbeltProfileExtensions::default();
-
-    let extensions = MacOsSeatbeltProfileExtensions {
-        macos_preferences: resolve_macos_preferences_permission(
-            permissions.preferences.as_ref(),
-            defaults.macos_preferences,
-        ),
-        macos_automation: resolve_macos_automation_permission(
-            permissions.automations.as_ref(),
-            defaults.macos_automation,
-        ),
-        macos_accessibility: permissions
-            .accessibility
-            .unwrap_or(defaults.macos_accessibility),
-        macos_calendar: permissions.calendar.unwrap_or(defaults.macos_calendar),
-    };
-    Some(extensions)
-}
-
-#[cfg(target_os = "macos")]
-fn resolve_macos_preferences_permission(
-    value: Option<&MacOsPreferencesValue>,
-    default: crate::seatbelt_permissions::MacOsPreferencesPermission,
-) -> crate::seatbelt_permissions::MacOsPreferencesPermission {
-    use crate::seatbelt_permissions::MacOsPreferencesPermission;
-
-    match value {
-        Some(MacOsPreferencesValue::Bool(true)) => MacOsPreferencesPermission::ReadOnly,
-        Some(MacOsPreferencesValue::Bool(false)) => MacOsPreferencesPermission::None,
-        Some(MacOsPreferencesValue::Mode(mode)) => {
-            let mode = mode.trim();
-            if mode.eq_ignore_ascii_case("readonly") || mode.eq_ignore_ascii_case("read-only") {
-                MacOsPreferencesPermission::ReadOnly
-            } else if mode.eq_ignore_ascii_case("readwrite")
-                || mode.eq_ignore_ascii_case("read-write")
-            {
-                MacOsPreferencesPermission::ReadWrite
-            } else {
-                warn!(
-                    "ignoring permissions.macos.preferences: expected true/false, readonly, or readwrite"
-                );
-                default
-            }
-        }
-        None => default,
-    }
-}
-
-#[cfg(target_os = "macos")]
-fn resolve_macos_automation_permission(
-    value: Option<&MacOsAutomationValue>,
-    default: crate::seatbelt_permissions::MacOsAutomationPermission,
-) -> crate::seatbelt_permissions::MacOsAutomationPermission {
-    use crate::seatbelt_permissions::MacOsAutomationPermission;
-
-    match value {
-        Some(MacOsAutomationValue::Bool(true)) => MacOsAutomationPermission::All,
-        Some(MacOsAutomationValue::Bool(false)) => MacOsAutomationPermission::None,
-        Some(MacOsAutomationValue::BundleIds(bundle_ids)) => {
-            let bundle_ids = bundle_ids
-                .iter()
-                .map(|bundle_id| bundle_id.trim())
-                .filter(|bundle_id| !bundle_id.is_empty())
-                .map(ToOwned::to_owned)
-                .collect::<Vec<String>>();
-            if bundle_ids.is_empty() {
-                MacOsAutomationPermission::None
-            } else {
-                MacOsAutomationPermission::BundleIds(bundle_ids)
-            }
-        }
-        None => default,
-    }
+    Some(permissions.clone())
 }
 
 #[cfg(all(not(target_os = "macos"), any(unix, test)))]
 fn build_macos_seatbelt_profile_extensions(
-    _: &MacOsPermissions,
+    _: &MacOsSeatbeltProfileExtensions,
 ) -> Option<MacOsSeatbeltProfileExtensions> {
     None
 }
@@ -220,12 +157,15 @@ mod tests {
     use crate::protocol::SandboxPolicy;
     use codex_protocol::models::FileSystemPermissions;
     #[cfg(target_os = "macos")]
-    use codex_protocol::models::MacOsAutomationValue;
+    use codex_protocol::models::MacOsAutomationPermission;
     #[cfg(target_os = "macos")]
-    use codex_protocol::models::MacOsPermissions;
+    use codex_protocol::models::MacOsPreferencesPermission;
     #[cfg(target_os = "macos")]
-    use codex_protocol::models::MacOsPreferencesValue;
+    use codex_protocol::models::MacOsSeatbeltProfileExtensions;
+    use codex_protocol::models::NetworkPermissions;
     use codex_protocol::models::PermissionProfile;
+    use codex_protocol::permissions::FileSystemSandboxPolicy;
+    use codex_protocol::permissions::NetworkSandboxPolicy;
     use codex_utils_absolute_path::AbsolutePathBuf;
     use pretty_assertions::assert_eq;
     use std::fs;
@@ -242,9 +182,26 @@ mod tests {
         fs::create_dir_all(skill_dir.join("scripts")).expect("skill dir");
         let read_dir = skill_dir.join("data");
         fs::create_dir_all(&read_dir).expect("read dir");
+        let expected_sandbox_policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![
+                AbsolutePathBuf::try_from(skill_dir.join("output")).expect("absolute output path"),
+            ],
+            read_only_access: ReadOnlyAccess::Restricted {
+                include_platform_defaults: true,
+                readable_roots: vec![
+                    AbsolutePathBuf::try_from(dunce::canonicalize(&read_dir).unwrap_or(read_dir))
+                        .expect("absolute read path"),
+                ],
+            },
+            network_access: true,
+            exclude_tmpdir_env_var: false,
+            exclude_slash_tmp: false,
+        };
 
         let profile = compile_permission_profile(Some(PermissionProfile {
-            network: Some(true),
+            network: Some(NetworkPermissions {
+                enabled: Some(true),
+            }),
             file_system: Some(FileSystemPermissions {
                 read: Some(vec![
                     absolute_path(&skill_dir.join("data")),
@@ -261,24 +218,9 @@ mod tests {
             profile,
             Permissions {
                 approval_policy: Constrained::allow_any(AskForApproval::Never),
-                sandbox_policy: Constrained::allow_any(SandboxPolicy::WorkspaceWrite {
-                    writable_roots: vec![
-                        AbsolutePathBuf::try_from(skill_dir.join("output"))
-                            .expect("absolute output path")
-                    ],
-                    read_only_access: ReadOnlyAccess::Restricted {
-                        include_platform_defaults: true,
-                        readable_roots: vec![
-                            AbsolutePathBuf::try_from(
-                                dunce::canonicalize(&read_dir).unwrap_or(read_dir)
-                            )
-                            .expect("absolute read path")
-                        ],
-                    },
-                    network_access: true,
-                    exclude_tmpdir_env_var: false,
-                    exclude_slash_tmp: false,
-                }),
+                sandbox_policy: Constrained::allow_any(expected_sandbox_policy.clone()),
+                file_system_sandbox_policy: FileSystemSandboxPolicy::from(&expected_sandbox_policy),
+                network_sandbox_policy: NetworkSandboxPolicy::from(&expected_sandbox_policy),
                 network: None,
                 allow_login_shell: true,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
@@ -309,9 +251,15 @@ mod tests {
         let tempdir = tempfile::tempdir().expect("tempdir");
         let skill_dir = tempdir.path().join("skill");
         fs::create_dir_all(&skill_dir).expect("skill dir");
+        let expected_sandbox_policy = SandboxPolicy::ReadOnly {
+            access: ReadOnlyAccess::FullAccess,
+            network_access: true,
+        };
 
         let profile = compile_permission_profile(Some(PermissionProfile {
-            network: Some(true),
+            network: Some(NetworkPermissions {
+                enabled: Some(true),
+            }),
             ..Default::default()
         }))
         .expect("profile");
@@ -320,7 +268,9 @@ mod tests {
             profile,
             Permissions {
                 approval_policy: Constrained::allow_any(AskForApproval::Never),
-                sandbox_policy: Constrained::allow_any(SandboxPolicy::new_read_only_policy()),
+                sandbox_policy: Constrained::allow_any(expected_sandbox_policy.clone()),
+                file_system_sandbox_policy: FileSystemSandboxPolicy::from(&expected_sandbox_policy),
+                network_sandbox_policy: NetworkSandboxPolicy::from(&expected_sandbox_policy),
                 network: None,
                 allow_login_shell: true,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
@@ -341,9 +291,21 @@ mod tests {
         let skill_dir = tempdir.path().join("skill");
         let read_dir = skill_dir.join("data");
         fs::create_dir_all(&read_dir).expect("read dir");
+        let expected_sandbox_policy = SandboxPolicy::ReadOnly {
+            access: ReadOnlyAccess::Restricted {
+                include_platform_defaults: true,
+                readable_roots: vec![
+                    AbsolutePathBuf::try_from(dunce::canonicalize(&read_dir).unwrap_or(read_dir))
+                        .expect("absolute read path"),
+                ],
+            },
+            network_access: true,
+        };
 
         let profile = compile_permission_profile(Some(PermissionProfile {
-            network: Some(true),
+            network: Some(NetworkPermissions {
+                enabled: Some(true),
+            }),
             file_system: Some(FileSystemPermissions {
                 read: Some(vec![absolute_path(&skill_dir.join("data"))]),
                 write: Some(Vec::new()),
@@ -356,17 +318,9 @@ mod tests {
             profile,
             Permissions {
                 approval_policy: Constrained::allow_any(AskForApproval::Never),
-                sandbox_policy: Constrained::allow_any(SandboxPolicy::ReadOnly {
-                    access: ReadOnlyAccess::Restricted {
-                        include_platform_defaults: true,
-                        readable_roots: vec![
-                            AbsolutePathBuf::try_from(
-                                dunce::canonicalize(&read_dir).unwrap_or(read_dir)
-                            )
-                            .expect("absolute read path")
-                        ],
-                    },
-                }),
+                sandbox_policy: Constrained::allow_any(expected_sandbox_policy.clone()),
+                file_system_sandbox_policy: FileSystemSandboxPolicy::from(&expected_sandbox_policy),
+                network_sandbox_policy: NetworkSandboxPolicy::from(&expected_sandbox_policy),
                 network: None,
                 allow_login_shell: true,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
@@ -389,13 +343,13 @@ mod tests {
         fs::create_dir_all(&skill_dir).expect("skill dir");
 
         let profile = compile_permission_profile(Some(PermissionProfile {
-            macos: Some(MacOsPermissions {
-                preferences: Some(MacOsPreferencesValue::Mode("readwrite".to_string())),
-                automations: Some(MacOsAutomationValue::BundleIds(vec![
+            macos: Some(MacOsSeatbeltProfileExtensions {
+                macos_preferences: MacOsPreferencesPermission::ReadWrite,
+                macos_automation: MacOsAutomationPermission::BundleIds(vec![
                     "com.apple.Notes".to_string(),
-                ])),
-                accessibility: Some(true),
-                calendar: Some(true),
+                ]),
+                macos_accessibility: true,
+                macos_calendar: true,
             }),
             ..Default::default()
         }))

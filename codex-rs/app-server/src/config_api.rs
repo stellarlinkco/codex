@@ -127,6 +127,9 @@ fn map_requirements_toml_to_api(requirements: ConfigRequirementsToml) -> ConfigR
             }
             normalized
         }),
+        feature_requirements: requirements
+            .feature_requirements
+            .map(|requirements| requirements.entries),
         enforce_residency: requirements
             .enforce_residency
             .map(map_residency_requirement_to_api),
@@ -160,7 +163,6 @@ fn map_network_requirements_to_api(
         socks_port: network.socks_port,
         allow_upstream_proxy: network.allow_upstream_proxy,
         dangerously_allow_non_loopback_proxy: network.dangerously_allow_non_loopback_proxy,
-        dangerously_allow_non_loopback_admin: network.dangerously_allow_non_loopback_admin,
         dangerously_allow_all_unix_sockets: network.dangerously_allow_all_unix_sockets,
         allowed_domains: network.allowed_domains,
         denied_domains: network.denied_domains,
@@ -212,6 +214,12 @@ mod tests {
             allowed_web_search_modes: Some(vec![
                 codex_core::config_loader::WebSearchModeRequirement::Cached,
             ]),
+            feature_requirements: Some(codex_core::config_loader::FeatureRequirementsToml {
+                entries: std::collections::BTreeMap::from([
+                    ("apps".to_string(), false),
+                    ("personality".to_string(), true),
+                ]),
+            }),
             mcp_servers: None,
             rules: None,
             enforce_residency: Some(CoreResidencyRequirement::Us),
@@ -221,9 +229,9 @@ mod tests {
                 socks_port: Some(1080),
                 allow_upstream_proxy: Some(false),
                 dangerously_allow_non_loopback_proxy: Some(false),
-                dangerously_allow_non_loopback_admin: Some(false),
                 dangerously_allow_all_unix_sockets: Some(true),
                 allowed_domains: Some(vec!["api.openai.com".to_string()]),
+                managed_allowed_domains_only: Some(false),
                 denied_domains: Some(vec!["example.com".to_string()]),
                 allow_unix_sockets: Some(vec!["/tmp/proxy.sock".to_string()]),
                 allow_local_binding: Some(true),
@@ -248,6 +256,13 @@ mod tests {
             Some(vec![WebSearchMode::Cached, WebSearchMode::Disabled]),
         );
         assert_eq!(
+            mapped.feature_requirements,
+            Some(std::collections::BTreeMap::from([
+                ("apps".to_string(), false),
+                ("personality".to_string(), true),
+            ])),
+        );
+        assert_eq!(
             mapped.enforce_residency,
             Some(codex_app_server_protocol::ResidencyRequirement::Us),
         );
@@ -259,7 +274,6 @@ mod tests {
                 socks_port: Some(1080),
                 allow_upstream_proxy: Some(false),
                 dangerously_allow_non_loopback_proxy: Some(false),
-                dangerously_allow_non_loopback_admin: Some(false),
                 dangerously_allow_all_unix_sockets: Some(true),
                 allowed_domains: Some(vec!["api.openai.com".to_string()]),
                 denied_domains: Some(vec!["example.com".to_string()]),
@@ -275,6 +289,7 @@ mod tests {
             allowed_approval_policies: None,
             allowed_sandbox_modes: None,
             allowed_web_search_modes: Some(Vec::new()),
+            feature_requirements: None,
             mcp_servers: None,
             rules: None,
             enforce_residency: None,
