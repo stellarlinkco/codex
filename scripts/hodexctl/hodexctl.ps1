@@ -1129,7 +1129,7 @@ function Get-ActiveHodexAlias {
     if ($state.active_runtime_aliases -is [System.Collections.IDictionary] -and $state.active_runtime_aliases.Contains("hodex")) {
         return [string]$state.active_runtime_aliases["hodex"]
     }
-    if ($state.active_runtime_aliases.PSObject.Properties.Name -contains "hodex") {
+    if (@(Get-ObjectPropertyNames -InputObject $state.active_runtime_aliases) -contains "hodex") {
         return [string]$state.active_runtime_aliases.hodex
     }
     return ""

@@ -233,6 +233,9 @@ try {
     Assert-Contains -Text $wrapperContent -Expected ('$env:HODEX_STATE_DIR = "' + $customStateDir + '"')
 
     if ($env:OS -eq "Windows_NT") {
+        $statusViaWrapper = (& $runner -NoProfile -File $wrapperPath status 2>&1 | Out-String)
+        Assert-Contains -Text $statusViaWrapper -Expected ("状态目录: " + $customStateDir)
+        Assert-Contains -Text $statusViaWrapper -Expected "正式版安装状态: 未安装"
         Write-Host "==> 检查未安装状态输出"
         $statusOutput = (& $runner -NoProfile -File $controllerPath status -StateDir $smokeStateDir 2>&1 | Out-String)
         Assert-Contains -Text $statusOutput -Expected "正式版安装状态: 未安装"
