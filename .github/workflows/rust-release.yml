@@ -202,10 +202,6 @@ jobs:
           echo "CARGO_BUILD_RUSTFLAGS=" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
           echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS=" >> "$GITHUB_ENV"
-          musl_rustflags="-C link-arg=-lm -C link-arg=-lgcc_eh"
-          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=${musl_rustflags}" >> "$GITHUB_ENV"
-          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_MUSL_RUSTFLAGS=${musl_rustflags}" >> "$GITHUB_ENV"
-
           sanitize_flags() {
             local input="$1"
             input="${input//-fsanitize=undefined/}"
