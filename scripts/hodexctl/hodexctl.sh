@@ -730,12 +730,10 @@ get_asset_candidates() {
 
   if [[ "$ARCH_NAME" == "aarch64" ]]; then
     printf '%s\n' \
-      "codex-aarch64-unknown-linux-musl-legacy" \
       "codex-aarch64-unknown-linux-musl" \
       "codex-aarch64-unknown-linux-gnu"
   else
     printf '%s\n' \
-      "codex-x86_64-unknown-linux-musl-legacy" \
       "codex-x86_64-unknown-linux-musl" \
       "codex-x86_64-unknown-linux-gnu"
   fi

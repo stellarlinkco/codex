@@ -16,7 +16,7 @@
 - WSL
 - Windows PowerShell
 
-Linux / WSL 的 release 资产选择顺序为 `legacy-musl` -> `musl` -> `gnu`。
+Linux / WSL 的 release 资产选择顺序为 `musl` -> `gnu`。
 
 ### 快速开始
 

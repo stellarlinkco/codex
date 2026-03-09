@@ -103,7 +103,6 @@ jobs:
       CARGO_INCREMENTAL: "0"
       SCCACHE_CACHE_SIZE: 10G
       MATRIX_VARIANT: ${{ matrix.asset_suffix || 'default' }}
-      LEGACY_MUSL: ${{ matrix.legacy_musl || 'false' }}
       # In rust-ci, representative release-profile checks use thin LTO for faster feedback.
       CARGO_PROFILE_RELEASE_LTO: ${{ matrix.profile == 'release' && 'thin' || 'fat' }}
 
@@ -120,11 +119,6 @@ jobs:
           - runner: ubuntu-24.04
             target: x86_64-unknown-linux-musl
             profile: release
-          - runner: ubuntu-24.04
-            target: x86_64-unknown-linux-musl
-            profile: release
-            asset_suffix: -legacy
-            legacy_musl: "true"
 
     steps:
       - uses: actions/checkout@v6
@@ -315,15 +309,6 @@ jobs:
           echo "CFLAGS=${cflags}" >> "$GITHUB_ENV"
           echo "CXXFLAGS=${cxxflags}" >> "$GITHUB_ENV"
 
-      - if: ${{ env.LEGACY_MUSL == 'true' }}
-        name: Configure legacy musl release flags
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "CARGO_PROFILE_RELEASE_LTO=off" >> "$GITHUB_ENV"
-          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" >> "$GITHUB_ENV"
-          echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
-
       - name: Install cargo-chef
         if: ${{ matrix.profile == 'release' }}
         uses: taiki-e/install-action@44c6d64aa62cd779e873306675c7a58e86d6d532 # v2
@@ -341,26 +326,6 @@ jobs:
 
       - name: cargo clippy
         run: cargo clippy --target ${{ matrix.target }} --all-features --tests --profile ${{ matrix.profile }} --timings -- -D warnings
-
-      - if: ${{ env.LEGACY_MUSL == 'true' }}
-        name: Build and smoke-test legacy musl binaries
-        shell: bash
-        run: |
-          set -euo pipefail
-          cargo build --target ${{ matrix.target }} --release --timings --bin codex --bin codex-responses-api-proxy
-          for bin in target/${{ matrix.target }}/release/codex target/${{ matrix.target }}/release/codex-responses-api-proxy; do
-            file "$bin"
-            if file "$bin" | grep -q 'dynamically linked'; then
-              echo "❌ $bin is still dynamically linked" >&2
-              exit 1
-            fi
-            if readelf -l "$bin" | grep -q 'Requesting program interpreter'; then
-              echo "❌ $bin still has an ELF interpreter" >&2
-              exit 1
-            fi
-          done
-          target/${{ matrix.target }}/release/codex --version
-          target/${{ matrix.target }}/release/codex-responses-api-proxy --help >/dev/null
 
       - name: Upload Cargo timings (clippy)
         if: always()

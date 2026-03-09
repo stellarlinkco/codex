@@ -138,7 +138,7 @@ bash -lc '
 ' >"$tmp_dir/wsl-detect.txt"
 assert_contains "$tmp_dir/wsl-detect.txt" "WSL"
 
-log_step "检查 Linux 资产候选包含 legacy-musl"
+log_step "检查 Linux 资产候选优先 musl"
 CONTROLLER_PATH_ENV="$CONTROLLER_PATH" \
 bash -lc '
   set -euo pipefail
@@ -148,7 +148,6 @@ bash -lc '
   ARCH_NAME="x86_64"
   get_asset_candidates
 ' >"$tmp_dir/linux-candidates.txt"
-assert_contains "$tmp_dir/linux-candidates.txt" "codex-x86_64-unknown-linux-musl-legacy"
 assert_contains "$tmp_dir/linux-candidates.txt" "codex-x86_64-unknown-linux-musl"
 assert_contains "$tmp_dir/linux-candidates.txt" "codex-x86_64-unknown-linux-gnu"
 

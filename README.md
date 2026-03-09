@@ -26,7 +26,7 @@
 curl -fsSL https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/install.sh | bash
 ```
 
-The shell install command above prefers `legacy-musl` release assets when available, then `musl`, then `gnu`; `gnu` builds require glibc >= 2.35 (Ubuntu 22.04+).
+The shell install command above prefers `musl` release assets when available, then `gnu`; `gnu` builds require glibc >= 2.35 (Ubuntu 22.04+).
 
 **Windows PowerShell:**
 

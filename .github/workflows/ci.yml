@@ -238,10 +238,10 @@ jobs:
               asset_name="codex-x86_64-apple-darwin"
               ;;
             Linux:aarch64|Linux:arm64)
-              asset_name="codex-aarch64-unknown-linux-musl-legacy"
+              asset_name="codex-aarch64-unknown-linux-musl"
               ;;
             Linux:x86_64|Linux:amd64)
-              asset_name="codex-x86_64-unknown-linux-musl-legacy"
+              asset_name="codex-x86_64-unknown-linux-musl"
               ;;
             *)
               echo "Unsupported runner platform: $(uname -s) $(uname -m)" >&2

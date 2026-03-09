@@ -18,8 +18,8 @@ case "$os" in
     ;;
   Linux)
     case "$arch" in
-      aarch64 | arm64) candidates=(codex-aarch64-unknown-linux-musl-legacy codex-aarch64-unknown-linux-musl codex-aarch64-unknown-linux-gnu) ;;
-      x86_64) candidates=(codex-x86_64-unknown-linux-musl-legacy codex-x86_64-unknown-linux-musl codex-x86_64-unknown-linux-gnu) ;;
+      aarch64 | arm64) candidates=(codex-aarch64-unknown-linux-musl codex-aarch64-unknown-linux-gnu) ;;
+      x86_64) candidates=(codex-x86_64-unknown-linux-musl codex-x86_64-unknown-linux-gnu) ;;
       *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
     esac
     ;;

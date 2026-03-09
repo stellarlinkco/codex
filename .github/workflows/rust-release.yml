@@ -407,7 +407,6 @@ jobs:
       CARGO_PROFILE_RELEASE_LTO: ${{ contains(github.ref_name, '-alpha') && 'thin' || 'fat' }}
       TARGET: ${{ matrix.target }}
       ASSET_SUFFIX: ${{ matrix.asset_suffix || '' }}
-      LEGACY_MUSL: ${{ matrix.legacy_musl || 'false' }}
 
     strategy:
       fail-fast: false
@@ -421,10 +420,6 @@ jobs:
             target: x86_64-apple-darwin
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-musl
-          - runner: ubuntu-22.04
-            target: x86_64-unknown-linux-musl
-            asset_suffix: -legacy
-            legacy_musl: "true"
           - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
 
@@ -545,35 +540,10 @@ jobs:
           echo "CFLAGS=${cflags}" >> "$GITHUB_ENV"
           echo "CXXFLAGS=${cxxflags}" >> "$GITHUB_ENV"
 
-      - if: ${{ env.LEGACY_MUSL == 'true' }}
-        name: Configure legacy musl release flags
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
       - name: Cargo build
         shell: bash
         run: |
           cargo build --target "${TARGET}" --release --timings --bin codex --bin codex-responses-api-proxy
-
-      - if: ${{ env.LEGACY_MUSL == 'true' }}
-        name: Smoke-test legacy musl binaries
-        shell: bash
-        run: |
-          set -euo pipefail
-          for bin in "target/${TARGET}/release/codex" "target/${TARGET}/release/codex-responses-api-proxy"; do
-            file "$bin"
-            if file "$bin" | grep -q 'dynamically linked'; then
-              echo "❌ $bin is still dynamically linked" >&2
-              exit 1
-            fi
-            if readelf -l "$bin" | grep -q 'Requesting program interpreter'; then
-              echo "❌ $bin still has an ELF interpreter" >&2
-              exit 1
-            fi
-          done
-          target/${TARGET}/release/codex --version
-          target/${TARGET}/release/codex-responses-api-proxy --help >/dev/null
 
       - name: Verify GLIBC requirements (Ubuntu 22.04)
         if: ${{ runner.os == 'Linux' && env.TARGET == 'x86_64-unknown-linux-gnu' }}
