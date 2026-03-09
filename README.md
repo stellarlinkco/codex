@@ -38,25 +38,22 @@ Copy/paste the command for your platform above to download the latest Release bi
 
 ### Optional: Hodexctl
 
-If you want to manage `hodex` separately without affecting an existing `codex` install, you can use `hodexctl`.
+Use `hodexctl` if you want to manage `hodex` separately without affecting an existing `codex` install.
 
 **macOS, Linux, WSL:**
 
 ```shell
-curl -fsSL https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/hodexctl/hodexctl.sh -o ./hodexctl.sh
-chmod +x ./hodexctl.sh
-./hodexctl.sh
+curl -fsSL https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/install-hodexctl.sh | bash
 ```
 
 **Windows PowerShell:**
 
 ```powershell
-$script = Join-Path $env:TEMP "hodexctl.ps1"
-Invoke-WebRequest https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/hodexctl/hodexctl.ps1 -OutFile $script
-& $script
+irm https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/install-hodexctl.ps1 | iex
 ```
 
-See [Hodexctl guide](./scripts/hodexctl/README.md) for details.
+After install, use `hodexctl`, `hodexctl install`, or `hodexctl list`.
+More details: [Hodexctl guide](./scripts/hodexctl/README.md).
 
 ### Run
 

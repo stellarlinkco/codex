@@ -157,6 +157,15 @@ log_step "检查未安装状态输出"
 assert_contains "$status_output" "正式版安装状态: 未安装"
 assert_contains "$status_output" "状态目录: $state_dir"
 
+log_step "检查 manager-install 包装器保留自定义状态目录"
+manager_state_dir="$tmp_dir/manager-state"
+manager_home_dir="$tmp_dir/manager-home"
+manager_status_output="$tmp_dir/manager-status.txt"
+HOME="$manager_home_dir" "$CONTROLLER_PATH" manager-install --state-dir "$manager_state_dir" --yes --no-path-update >"$tmp_dir/manager-install.txt"
+unset HODEX_STATE_DIR HODEXCTL_REPO HODEX_CONTROLLER_URL_BASE || true
+"$manager_state_dir/commands/hodexctl" status >"$manager_status_output"
+assert_contains "$manager_status_output" "状态目录: $manager_state_dir"
+
 log_step "检查源码空状态输出"
 "$CONTROLLER_PATH" source status --state-dir "$state_dir" >"$source_status_output"
 "$CONTROLLER_PATH" source list --state-dir "$state_dir" >"$source_list_output"

@@ -734,7 +734,7 @@ function Ensure-DirWritable {
 }
 
 function Normalize-Parameters {
-    $validCommands = @("install", "upgrade", "download", "downgrade", "source", "uninstall", "status", "list", "relink", "help")
+    $validCommands = @("install", "upgrade", "download", "downgrade", "source", "uninstall", "status", "list", "relink", "help", "manager-install")
 
     if ($script:InvokedWithNoArgs) {
         Show-Usage
@@ -797,6 +797,11 @@ function Normalize-Parameters {
         "relink" {
             if ($PSBoundParameters.ContainsKey("Version")) {
                 Fail "relink 不接受额外版本参数"
+            }
+        }
+        "manager-install" {
+            if ($PSBoundParameters.ContainsKey("Version")) {
+                Fail "manager-install 不接受额外版本参数"
             }
         }
     }
@@ -1081,10 +1086,12 @@ function Write-State {
     if ($state.active_runtime_aliases) {
         $payload.active_runtime_aliases = $state.active_runtime_aliases
     }
-    if (-not $payload.active_runtime_aliases.Contains("hodex")) {
+    if (-not [string]::IsNullOrWhiteSpace($BinaryPath)) {
         $payload.active_runtime_aliases.hodex = "release"
+    } elseif ($payload.active_runtime_aliases.Contains("hodex")) {
+        $payload.active_runtime_aliases.Remove("hodex")
     }
-    if ($payload.active_runtime_aliases.hodex -eq "release" -and $payload.active_runtime_aliases.Contains("hodex_stable")) {
+    if ($payload.active_runtime_aliases.Contains("hodex_stable")) {
         $payload.active_runtime_aliases.Remove("hodex_stable")
     }
 
@@ -1950,13 +1957,15 @@ if (-not (Test-Path -LiteralPath "$BinaryPath")) {
 function Generate-HodexctlCmdWrapper {
     param(
         [string]$WrapperPath,
-        [string]$ControllerPath
+        [string]$ControllerPath,
+        [string]$StateDir
     )
 
     $runner = Get-ControllerCommand
     $content = @"
 @echo off
 set "HODEX_DISPLAY_NAME=hodexctl"
+set "HODEX_STATE_DIR=$StateDir"
 if not exist "$ControllerPath" (
   echo hodexctl 管理脚本不存在，请重新安装。 1>&2
   exit /b 1
@@ -1974,13 +1983,15 @@ $runner -NoProfile -ExecutionPolicy Bypass -File "$ControllerPath" %*
 function Generate-HodexctlPs1Wrapper {
     param(
         [string]$WrapperPath,
-        [string]$ControllerPath
+        [string]$ControllerPath,
+        [string]$StateDir
     )
 
     $runner = Get-ControllerCommand
     $content = @"
 `$ErrorActionPreference = "Stop"
 `$env:HODEX_DISPLAY_NAME = "hodexctl"
+`$env:HODEX_STATE_DIR = "$StateDir"
 if (-not (Test-Path -LiteralPath "$ControllerPath")) {
     Write-Error "hodexctl 管理脚本不存在，请重新安装。"
     exit 1
@@ -2037,11 +2048,11 @@ function Sync-RuntimeWrappersFromState {
     Remove-ManagedRuntimeWrappersFromDir -CommandDir $CommandDir
 
     $releaseInstalled = -not [string]::IsNullOrWhiteSpace([string]$script:State.binary_path) -and (Test-Path -LiteralPath ([string]$script:State.binary_path))
-    $keepControllerWrapper = $releaseInstalled -or @((Get-SourceProfiles).Keys).Count -gt 0
+    $keepControllerWrapper = -not [string]::IsNullOrWhiteSpace($ControllerPath) -and $null -ne $script:State
 
     if ($keepControllerWrapper -and -not [string]::IsNullOrWhiteSpace($ControllerPath)) {
-        Generate-HodexctlCmdWrapper -WrapperPath (Join-Path $CommandDir "hodexctl.cmd") -ControllerPath $ControllerPath
-        Generate-HodexctlPs1Wrapper -WrapperPath (Join-Path $CommandDir "hodexctl.ps1") -ControllerPath $ControllerPath
+        Generate-HodexctlCmdWrapper -WrapperPath (Join-Path $CommandDir "hodexctl.cmd") -ControllerPath $ControllerPath -StateDir $script:StateRoot
+        Generate-HodexctlPs1Wrapper -WrapperPath (Join-Path $CommandDir "hodexctl.ps1") -ControllerPath $ControllerPath -StateDir $script:StateRoot
     }
 
     foreach ($profileName in (Get-SourceProfiles).Keys) {
@@ -4104,12 +4115,121 @@ function Invoke-InstallLike {
     Write-Info "管理命令: 'hodexctl status' / 'hodexctl list'"
 }
 
+function Invoke-ManagerInstall {
+    $existingState = $script:State
+    $stateLoaded = $null -ne $existingState
+
+    Write-Step "安装 hodexctl 管理器"
+    Select-CommandDir
+
+    $controllerPath = Join-Path $script:StateRoot "libexec\hodexctl.ps1"
+    Ensure-DirWritable (Split-Path -Parent $controllerPath)
+    Sync-ControllerCopy -TargetPath $controllerPath
+    if ($stateLoaded) {
+        Remove-OldWrappersIfNeeded -NewCommandDir $script:CurrentCommandDir
+    }
+
+    $installedVersion = ""
+    $releaseTag = ""
+    $releaseName = ""
+    $assetName = ""
+    $binaryPath = ""
+    $nodeChoice = ""
+    $installedAt = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ")
+
+    if ($stateLoaded) {
+        $installedVersion = [string]$existingState.installed_version
+        $releaseTag = [string]$existingState.release_tag
+        $releaseName = [string]$existingState.release_name
+        $assetName = [string]$existingState.asset_name
+        $binaryPath = [string]$existingState.binary_path
+        $nodeChoice = [string]$existingState.node_setup_choice
+        if (-not [string]::IsNullOrWhiteSpace([string]$existingState.installed_at)) {
+            $installedAt = [string]$existingState.installed_at
+        }
+    }
+
+    Write-State `
+        -InstalledVersion $installedVersion `
+        -ReleaseTag $releaseTag `
+        -ReleaseName $releaseName `
+        -AssetName $assetName `
+        -BinaryPath $binaryPath `
+        -ControllerPath $controllerPath `
+        -CurrentCommandDir $script:CurrentCommandDir `
+        -WrappersCreated @(
+            (Join-Path $script:CurrentCommandDir "hodex.cmd"),
+            (Join-Path $script:CurrentCommandDir "hodex.ps1"),
+            (Join-Path $script:CurrentCommandDir "hodexctl.cmd"),
+            (Join-Path $script:CurrentCommandDir "hodexctl.ps1")
+        ) `
+        -CurrentPathUpdateMode $script:PathUpdateMode `
+        -CurrentPathProfile $script:PathProfile `
+        -CurrentNodeSetupChoice $nodeChoice `
+        -InstalledAt $installedAt
+
+    Sync-RuntimeWrappersFromState -CommandDir $script:CurrentCommandDir -ControllerPath $controllerPath
+    Update-PathIfNeeded
+    Persist-StateRuntimeMetadata
+
+    Write-Step "hodexctl 已安装: $(Join-Path $script:CurrentCommandDir 'hodexctl.cmd')"
+    switch ($script:PathUpdateMode) {
+        "added" {
+            Write-Info "已写入用户 PATH。"
+            Write-Info "如当前终端仍未识别 hodexctl，请重新打开 PowerShell。"
+        }
+        "configured" {
+            Write-Info "已刷新用户 PATH。"
+            Write-Info "如当前终端仍未识别 hodexctl，请重新打开 PowerShell。"
+        }
+        "already" {
+            Write-Info "命令目录已在 PATH 中: $script:CurrentCommandDir"
+        }
+        "disabled" {
+            Write-WarnLine "命令目录未自动写入 PATH，请手动加入: $script:CurrentCommandDir"
+        }
+        "user-skipped" {
+            Write-WarnLine "命令目录未自动写入 PATH，请手动加入: $script:CurrentCommandDir"
+        }
+    }
+    Write-Info "下一步: 运行 'hodexctl' 查看帮助"
+    Write-Info "安装正式版: 'hodexctl install'"
+    Write-Info "查看版本列表: 'hodexctl list'"
+    Write-Info "下载源码并准备工具链: 'hodexctl source install -Repo stellarlinkco/codex -Ref main'"
+}
+
 function Invoke-Uninstall {
     if (-not $script:State) {
         Fail "未检测到 hodex 安装状态，无需卸载。"
     }
     if ([string]::IsNullOrWhiteSpace([string]$script:State.binary_path)) {
-        Fail "未检测到正式版 release 安装；如需卸载源码版，请使用 hodexctl source uninstall。"
+        if (@((Get-SourceProfiles).Keys).Count -gt 0) {
+            Fail "未检测到正式版 release 安装；如需卸载源码版，请使用 hodexctl source uninstall。"
+        }
+
+        Write-Step "卸载 hodexctl 管理器"
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:State.command_dir)) {
+            Remove-PathIfNeeded -CurrentCommandDir ([string]$script:State.command_dir) -CurrentPathUpdateMode ([string]$script:State.path_update_mode)
+        }
+        foreach ($wrapperPath in @(
+            (Join-Path ([string]$script:State.command_dir) "hodexctl.cmd"),
+            (Join-Path ([string]$script:State.command_dir) "hodexctl.ps1")
+        )) {
+            if (-not [string]::IsNullOrWhiteSpace($wrapperPath)) {
+                Remove-Item -LiteralPath $wrapperPath -Force -ErrorAction SilentlyContinue
+            }
+        }
+        Remove-Item -LiteralPath (Get-StateFilePath) -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath ([string]$script:State.controller_path) -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $script:StateRoot "list-ui-state.json") -Force -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath (Join-Path $script:StateRoot "libexec") -Force -Recurse -ErrorAction SilentlyContinue
+        if (-not [string]::IsNullOrWhiteSpace([string]$script:State.command_dir)) {
+            Remove-Item -LiteralPath ([string]$script:State.command_dir) -Force -ErrorAction SilentlyContinue
+        }
+        Remove-Item -LiteralPath (Join-Path $script:StateRoot "bin") -Force -Recurse -ErrorAction SilentlyContinue
+        Remove-Item -LiteralPath $script:StateRoot -Force -ErrorAction SilentlyContinue
+        Write-Info "已卸载 hodexctl 管理器。"
+        return
     }
 
     Write-Step "卸载正式版 Hodex"
@@ -4179,8 +4299,14 @@ function Invoke-Status {
         }
         Write-Host "Node 处理选择: $([string]$script:State.node_setup_choice)"
         Write-Host "安装时间: $([string]$script:State.installed_at)"
-        Write-Host "hodex 包装器: $(Join-Path ([string]$script:State.command_dir) 'hodex.cmd')"
-        Write-Host "hodexctl 包装器: $(Join-Path ([string]$script:State.command_dir) 'hodexctl.cmd')"
+        $hodexWrapper = Join-Path ([string]$script:State.command_dir) 'hodex.cmd'
+        $hodexctlWrapper = Join-Path ([string]$script:State.command_dir) 'hodexctl.cmd'
+        if (Test-Path -LiteralPath $hodexWrapper) {
+            Write-Host "hodex 包装器: $hodexWrapper"
+        }
+        if (Test-Path -LiteralPath $hodexctlWrapper) {
+            Write-Host "hodexctl 包装器: $hodexctlWrapper"
+        }
         Write-Host "受管 hodex 指向: $(Get-ActiveHodexAlias)"
         Write-Host "源码条目数量: $(@((Get-SourceProfiles).Keys).Count)"
         foreach ($profileName in ((Get-SourceProfiles).Keys)) {
@@ -4299,6 +4425,9 @@ if (-not $env:HODEXCTL_SKIP_MAIN) {
         }
         "relink" {
             Invoke-Relink
+        }
+        "manager-install" {
+            Invoke-ManagerInstall
         }
         default {
             Fail "未知命令: $script:RequestedCommand"

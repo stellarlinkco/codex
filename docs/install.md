@@ -4,7 +4,7 @@
 
 | Requirement                 | Details                                                                                                                                                   |
 | --------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Operating systems           | macOS 12+, Linux (the shell installer prefers `legacy-musl`/`musl` assets when available; `gnu` assets require glibc >= 2.35), or Windows 11 **via WSL2** |
+| Operating systems           | macOS 12+, Linux (the shell installer prefers `legacy-musl`/`musl` assets when available; `gnu` assets require glibc >= 2.35), Windows 11 **via WSL2** for the core workspace, or Windows PowerShell for `hodexctl` release management |
 | Git (optional, recommended) | 2.23+ for built-in PR helpers                                                                                                                             |
 | RAM                         | 4-GB minimum (8-GB recommended)                                                                                                                           |
 
@@ -12,10 +12,25 @@
 
 ### Hodexctl
 
-如果你需要直接使用本项目的 release 二进制，并把 `hodex` 与现有 npm / nvm / 全局 `codex` 隔离开，可以使用仓库内提供的 `hodexctl` 管理脚本：
+如果你想独立管理 `hodex` 的 release 版本，同时不影响现有 `codex`，可以使用 `hodexctl`。
 
-- macOS / Linux / WSL: `scripts/hodexctl/hodexctl.sh`
-- Windows PowerShell: `scripts/hodexctl/hodexctl.ps1`
+推荐首装方式：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/install-hodexctl.sh | bash
+```
+
+```powershell
+irm https://raw.githubusercontent.com/stellarlinkco/codex/main/scripts/install-hodexctl.ps1 | iex
+```
+
+安装完成后，后续统一使用：
+
+```bash
+hodexctl
+hodexctl install
+hodexctl list
+```
 
 常见用法：
 
@@ -33,12 +48,12 @@ hodexctl upgrade
 hodexctl status
 ```
 
-补充说明：
+说明：
 
-- `hodex` 固定用于 release 版本管理。
-- `hodexctl source ...` 只负责源码下载、同步和开发工具链准备，不会编译源码，也不会接管 `hodex`。
-- `hodexctl list` 的版本详情页支持 `AI总结`，会优先调用本机 `hodex`，不可用时自动回退 `codex`。
-- 更完整的交互说明、参数、环境变量覆盖和排障说明见 [../scripts/hodexctl/README.md](../scripts/hodexctl/README.md)。
+- `hodex` 只管理 release。
+- `hodexctl source ...` 只负责源码下载、同步和工具链准备。
+- `hodexctl uninstall` 不会影响原有 `codex`。
+- 详细参数和交互说明见 [../scripts/hodexctl/README.md](../scripts/hodexctl/README.md)。
 
 ### DotSlash
 
@@ -48,7 +63,7 @@ The GitHub Release also contains a [DotSlash](https://dotslash-cli.com/) file fo
 
 ```bash
 # Clone the repository and navigate to the root of the Cargo workspace.
-git clone https://github.com/openai/codex.git
+git clone https://github.com/stellarlinkco/codex.git
 cd codex/codex-rs
 
 # Install the Rust toolchain, if necessary.

@@ -40,7 +40,7 @@ jobs:
           for f in "${files[@]}"; do
             case "$f" in
               .github/workflows/ci.yml|README.md|scripts/install.ps1|scripts/install.sh) installer=true ;;
-              .github/workflows/ci.yml|README.md|docs/install.md|scripts/hodexctl/*) hodexctl=true ;;
+              .github/workflows/ci.yml|README.md|docs/install.md|scripts/install-hodexctl.ps1|scripts/install-hodexctl.sh|scripts/hodexctl/*) hodexctl=true ;;
             esac
           done
 
@@ -352,6 +352,118 @@ jobs:
             if (Test-Path (Join-Path $stateDir "bin\codex-command-runner.exe")) { throw "codex-command-runner.exe not removed" }
             if (Test-Path (Join-Path $stateDir "bin\codex-windows-sandbox-setup.exe")) { throw "codex-windows-sandbox-setup.exe not removed" }
           } finally {
+            try { if ($server -and -not $server.HasExited) { $server.Kill() } } catch {}
+            if (Test-Path $tempRoot) { Remove-Item -Recurse -Force $tempRoot }
+          }
+
+  hodexctl-bootstrap-smoke:
+    name: hodexctl-bootstrap-smoke (${{ matrix.os }})
+    needs: changed
+    if: ${{ needs.changed.outputs.hodexctl == 'true' }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Smoke test install-hodexctl.sh (local server)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tmp="$(mktemp -d)"
+          home_dir="${tmp}/home"
+          state_dir="${tmp}/state"
+          server_root="${tmp}/server"
+          repo_path="demo/repo/main/scripts/hodexctl"
+
+          mkdir -p "${home_dir}" "${server_root}/${repo_path}"
+          cp scripts/install-hodexctl.sh "${server_root}/install-hodexctl.sh"
+          cp scripts/hodexctl/hodexctl.sh "${server_root}/${repo_path}/hodexctl.sh"
+
+          port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
+          python3 -m http.server "$port" --bind 127.0.0.1 --directory "$server_root" >/dev/null 2>&1 &
+          pid=$!
+          trap 'kill "$pid" || true; rm -rf "$tmp"' EXIT
+
+          for _ in {1..50}; do
+            if curl -fsS "http://127.0.0.1:$port/" >/dev/null 2>&1; then
+              break
+            fi
+            sleep 0.1
+          done
+
+          export HOME="$home_dir"
+          export HODEX_STATE_DIR="$state_dir"
+          export HODEXCTL_REPO="demo/repo"
+          export HODEX_CONTROLLER_URL_BASE="http://127.0.0.1:$port"
+          curl -fsSL "http://127.0.0.1:$port/install-hodexctl.sh" | bash
+
+          test -f "${state_dir}/libexec/hodexctl.sh"
+          test -x "${state_dir}/commands/hodexctl"
+          unset HODEX_STATE_DIR HODEXCTL_REPO HODEX_CONTROLLER_URL_BASE
+          "${state_dir}/commands/hodexctl" status | grep -F "状态目录: ${state_dir}"
+
+      - name: Smoke test install-hodexctl.ps1 (local server)
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $ErrorActionPreference = 'Stop'
+
+          $tempRoot = Join-Path $env:RUNNER_TEMP ("hodexctl-bootstrap-" + [System.Guid]::NewGuid().ToString())
+          $homeDir = Join-Path $tempRoot 'home'
+          $stateDir = Join-Path $tempRoot 'state'
+          $serverRoot = Join-Path $tempRoot 'server'
+          $repoPath = Join-Path $serverRoot 'demo\repo\main\scripts\hodexctl'
+
+          New-Item -ItemType Directory -Path $homeDir -Force | Out-Null
+          New-Item -ItemType Directory -Path $repoPath -Force | Out-Null
+          Copy-Item scripts\install-hodexctl.ps1 (Join-Path $serverRoot 'install-hodexctl.ps1') -Force
+          Copy-Item scripts\hodexctl\hodexctl.ps1 (Join-Path $repoPath 'hodexctl.ps1') -Force
+
+          $listener = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 0)
+          $listener.Start()
+          $port = $listener.LocalEndpoint.Port
+          $listener.Stop()
+          $server = Start-Process -FilePath python -ArgumentList @("-m", "http.server", "$port", "--bind", "127.0.0.1", "--directory", "$serverRoot") -PassThru -NoNewWindow
+          try {
+            for ($i = 0; $i -lt 50; $i++) {
+              try {
+                Invoke-WebRequest -Uri "http://127.0.0.1:$port/" -UseBasicParsing | Out-Null
+                break
+              } catch {
+                Start-Sleep -Milliseconds 100
+              }
+            }
+
+            $env:HODEX_STATE_DIR = $stateDir
+            $env:HODEXCTL_REPO = 'demo/repo'
+            $env:HODEX_CONTROLLER_URL_BASE = "http://127.0.0.1:$port"
+            $env:HODEXCTL_NO_PATH_UPDATE = '1'
+
+            irm "http://127.0.0.1:$port/install-hodexctl.ps1" | iex
+
+            $controllerCopy = Join-Path $stateDir 'libexec\hodexctl.ps1'
+            $wrapper = Join-Path $stateDir 'commands\hodexctl.ps1'
+            if (!(Test-Path $controllerCopy)) { throw "hodexctl controller not installed" }
+            if (!(Test-Path $wrapper)) { throw "hodexctl wrapper not installed" }
+
+            Remove-Item Env:\HODEX_STATE_DIR -ErrorAction SilentlyContinue
+            Remove-Item Env:\HODEXCTL_REPO -ErrorAction SilentlyContinue
+            Remove-Item Env:\HODEX_CONTROLLER_URL_BASE -ErrorAction SilentlyContinue
+            Remove-Item Env:\HODEXCTL_NO_PATH_UPDATE -ErrorAction SilentlyContinue
+
+            $statusOutput = (& $wrapper status 2>&1 | Out-String)
+            if ($statusOutput -notlike "*状态目录: $stateDir*") { throw "wrapper status did not use custom state dir" }
+          } finally {
+            Remove-Item Env:\HODEX_STATE_DIR -ErrorAction SilentlyContinue
+            Remove-Item Env:\HODEXCTL_REPO -ErrorAction SilentlyContinue
+            Remove-Item Env:\HODEX_CONTROLLER_URL_BASE -ErrorAction SilentlyContinue
+            Remove-Item Env:\HODEXCTL_NO_PATH_UPDATE -ErrorAction SilentlyContinue
             try { if ($server -and -not $server.HasExited) { $server.Kill() } } catch {}
             if (Test-Path $tempRoot) { Remove-Item -Recurse -Force $tempRoot }
           }

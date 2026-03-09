@@ -170,6 +170,68 @@ try {
     }
     Assert-Contains -Text $activateOutput -Expected "源码模式不允许接管 hodex"
 
+    Write-Host "==> 检查 manager-install 状态不伪造 hodex release"
+    $env:HODEXCTL_SKIP_MAIN = "1"
+    . $controllerPath
+    Remove-Item Env:\HODEXCTL_SKIP_MAIN -ErrorAction SilentlyContinue
+    $script:StateRoot = Join-Path $tempRoot "manager-only-state"
+    $script:CurrentCommandDir = Join-Path $script:StateRoot "commands"
+    $script:PathUpdateMode = "disabled"
+    $script:PathProfile = ""
+    $script:PlatformLabel = "Windows"
+    Write-State `
+        -InstalledVersion "" `
+        -ReleaseTag "" `
+        -ReleaseName "" `
+        -AssetName "" `
+        -BinaryPath "" `
+        -ControllerPath (Join-Path $script:StateRoot "libexec\hodexctl.ps1") `
+        -CurrentCommandDir $script:CurrentCommandDir `
+        -WrappersCreated @(
+            (Join-Path $script:CurrentCommandDir "hodexctl.cmd"),
+            (Join-Path $script:CurrentCommandDir "hodexctl.ps1")
+        ) `
+        -CurrentPathUpdateMode "disabled" `
+        -CurrentPathProfile "" `
+        -CurrentNodeSetupChoice "" `
+        -InstalledAt "2026-03-09T00:00:00Z"
+    $managerOnlyState = Get-Content -LiteralPath (Join-Path $script:StateRoot "state.json") -Raw
+    if ($managerOnlyState -like '*"hodex": "release"*') {
+        throw "manager-install 不应伪造 hodex release alias"
+    }
+
+    Write-Host "==> 检查 manager-install 包装器保留自定义状态目录"
+    $customStateDir = Join-Path $tempRoot "manager-wrapper-state"
+    $customCommandDir = Join-Path $customStateDir "commands"
+    $customControllerPath = Join-Path $customStateDir "libexec\hodexctl.ps1"
+    New-Item -ItemType Directory -Path $customCommandDir -Force | Out-Null
+    New-Item -ItemType Directory -Path (Split-Path -Parent $customControllerPath) -Force | Out-Null
+    Copy-Item -LiteralPath $controllerPath -Destination $customControllerPath -Force
+    $script:StateRoot = $customStateDir
+    $script:State = [pscustomobject]@{
+        schema_version = 2
+        repo = 'stellarlinkco/codex'
+        installed_version = ''
+        release_tag = ''
+        release_name = ''
+        asset_name = ''
+        binary_path = ''
+        controller_path = $customControllerPath
+        command_dir = $customCommandDir
+        wrappers_created = @()
+        path_update_mode = 'disabled'
+        path_profile = ''
+        node_setup_choice = ''
+        installed_at = '2026-03-09T00:00:00Z'
+        source_profiles = [ordered]@{}
+        active_runtime_aliases = [ordered]@{}
+    }
+    Sync-RuntimeWrappersFromState -CommandDir $customCommandDir -ControllerPath $customControllerPath
+    $wrapperPath = Join-Path $customCommandDir 'hodexctl.ps1'
+    if (!(Test-Path $wrapperPath)) { throw 'manager-install wrapper missing' }
+    $wrapperContent = Get-Content -LiteralPath $wrapperPath -Raw
+    Assert-Contains -Text $wrapperContent -Expected ('$env:HODEX_STATE_DIR = "' + $customStateDir + '"')
+
     if ($env:OS -eq "Windows_NT") {
         Write-Host "==> 检查未安装状态输出"
         $statusOutput = (& $runner -NoProfile -File $controllerPath status -StateDir $smokeStateDir 2>&1 | Out-String)

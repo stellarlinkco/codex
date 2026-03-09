@@ -398,7 +398,7 @@ parse_args() {
   local original_argc=$#
   while (($# > 0)); do
     case "$1" in
-      install | upgrade | download | downgrade | source | uninstall | status | list | relink | help)
+      install | upgrade | download | downgrade | source | uninstall | status | list | relink | help | manager-install)
         positional+=("$1")
         shift
         ;;
@@ -506,7 +506,7 @@ parse_args() {
 
   if ((${#positional[@]} > 0)); then
     case "${positional[0]}" in
-      install | upgrade | download | downgrade | source | uninstall | status | list | relink | help)
+      install | upgrade | download | downgrade | source | uninstall | status | list | relink | help | manager-install)
         COMMAND="${positional[0]}"
         positional=("${positional[@]:1}")
         ;;
@@ -542,7 +542,7 @@ parse_args() {
         positional=("${positional[@]:1}")
       fi
       ;;
-    uninstall | status | list | relink)
+    uninstall | status | list | relink | manager-install)
       ;;
     help)
       usage
@@ -2618,6 +2618,7 @@ EOF
 generate_hodexctl_wrapper() {
   local wrapper_path="$1"
   local controller_path="$2"
+  local state_dir="$3"
   cat >"$wrapper_path" <<EOF
 #!/usr/bin/env bash
 set -euo pipefail
@@ -2626,6 +2627,7 @@ if [[ ! -f "$controller_path" ]]; then
   exit 1
 fi
 export HODEX_DISPLAY_NAME="hodexctl"
+export HODEX_STATE_DIR="$state_dir"
 if [[ "\$#" -eq 0 ]]; then
   exec "$controller_path" help
 fi
@@ -6125,11 +6127,11 @@ sync_runtime_wrappers_from_state() {
     fi
   fi
 
-  if { ((release_installed)) || [[ "$source_count" != "0" ]]; } && [[ -n "$controller_path" ]]; then
+  if [[ -f "$state_file" && -n "$controller_path" ]]; then
     keep_controller_wrapper=1
   fi
   if ((keep_controller_wrapper)); then
-    generate_hodexctl_wrapper "$command_dir/hodexctl" "$controller_path"
+    generate_hodexctl_wrapper "$command_dir/hodexctl" "$controller_path" "$STATE_DIR"
   fi
 
   while IFS=$'\t' read -r profile_name repo_input remote_url checkout_dir workspace_mode current_ref ref_kind build_workspace_root binary_path wrapper_path installed_at last_synced_at activated_as_hodex; do
@@ -6280,10 +6282,113 @@ perform_install_like() {
   rm -rf "$tmp_dir"
 }
 
+perform_manager_install() {
+  local state_file="$STATE_DIR/state.json"
+  local had_existing_state=0
+  local install_time
+  local controller_path
+
+  if [[ -f "$state_file" ]]; then
+    load_state_env "$state_file"
+    had_existing_state=1
+  fi
+
+  log_step "安装 hodexctl 管理器"
+  select_command_dir
+
+  controller_path="$STATE_DIR/libexec/hodexctl.sh"
+  ensure_dir_writable "$(dirname "$controller_path")"
+  sync_controller_copy "$controller_path"
+
+  if ((had_existing_state)); then
+    remove_old_wrappers_if_needed "$COMMAND_DIR"
+  fi
+
+  install_time="${STATE_INSTALLED_AT:-$(date -u +"%Y-%m-%dT%H:%M:%SZ")}"
+  write_state_file \
+    "$state_file" \
+    "$STATE_INSTALLED_VERSION" \
+    "$STATE_RELEASE_TAG" \
+    "$STATE_RELEASE_NAME" \
+    "$STATE_ASSET_NAME" \
+    "$STATE_BINARY_PATH" \
+    "$controller_path" \
+    "$COMMAND_DIR" \
+    "$COMMAND_DIR/hodex" \
+    "$COMMAND_DIR/hodexctl" \
+    "$PATH_UPDATE_MODE" \
+    "$PATH_PROFILE" \
+    "$STATE_NODE_SETUP_CHOICE" \
+    "$install_time"
+
+  sync_runtime_wrappers_from_state "$state_file" "$COMMAND_DIR" "$controller_path"
+  update_path_if_needed
+  write_state_file \
+    "$state_file" \
+    "$STATE_INSTALLED_VERSION" \
+    "$STATE_RELEASE_TAG" \
+    "$STATE_RELEASE_NAME" \
+    "$STATE_ASSET_NAME" \
+    "$STATE_BINARY_PATH" \
+    "$controller_path" \
+    "$COMMAND_DIR" \
+    "$COMMAND_DIR/hodex" \
+    "$COMMAND_DIR/hodexctl" \
+    "$PATH_UPDATE_MODE" \
+    "$PATH_PROFILE" \
+    "$STATE_NODE_SETUP_CHOICE" \
+    "$install_time"
+
+  log_step "hodexctl 已安装: $COMMAND_DIR/hodexctl"
+
+  case "$PATH_UPDATE_MODE" in
+    added)
+      log_info "已写入 PATH: $PATH_PROFILE"
+      ;;
+    configured)
+      log_info "已刷新 PATH 配置: $PATH_PROFILE"
+      ;;
+    already)
+      log_info "命令目录已在 PATH 中: $COMMAND_DIR"
+      ;;
+    disabled | user-skipped)
+      log_warn "命令目录未自动写入 PATH，请手动加入: $COMMAND_DIR"
+      ;;
+  esac
+
+  if [[ "$PATH_UPDATE_MODE" == "added" || "$PATH_UPDATE_MODE" == "configured" ]]; then
+    log_info "如当前终端仍未识别 hodexctl，请重新打开终端或执行: source \"$PATH_PROFILE\""
+  fi
+  log_info "下一步: 运行 'hodexctl' 查看帮助"
+  log_info "安装正式版: 'hodexctl install'"
+  log_info "查看版本列表: 'hodexctl list'"
+  log_info "下载源码并准备工具链: 'hodexctl source install --repo stellarlinkco/codex --ref main'"
+}
+
 perform_uninstall() {
   local state_file="$STATE_DIR/state.json"
   [[ -f "$state_file" ]] || die "未检测到 hodex 安装状态，无需卸载。"
-  [[ -n "$(json_get_field "$state_file" "binary_path")" ]] || die "未检测到正式版 release 安装；如需卸载源码版，请使用 hodexctl source uninstall。"
+
+  if [[ -z "$(json_get_field "$state_file" "binary_path")" ]]; then
+    if [[ "$(state_count_source_profiles "$state_file")" != "0" ]]; then
+      die "未检测到正式版 release 安装；如需卸载源码版，请使用 hodexctl source uninstall。"
+    fi
+
+    load_state_env "$state_file"
+    log_step "卸载 hodexctl 管理器"
+    if [[ -n "$STATE_PATH_PROFILE" && "$STATE_PATH_UPDATE_MODE" != "disabled" && "$STATE_PATH_UPDATE_MODE" != "user-skipped" && "$STATE_PATH_UPDATE_MODE" != "already" ]]; then
+      remove_path_blocks_for_targets "$STATE_PATH_PROFILE"
+    fi
+    rm -f "$STATE_COMMAND_DIR/hodexctl" 2>/dev/null || true
+    rm -f "$STATE_CONTROLLER_PATH" 2>/dev/null || true
+    rm -f "$state_file" 2>/dev/null || true
+    rm -f "$STATE_DIR/list-ui-state.json" 2>/dev/null || true
+    rmdir "$STATE_COMMAND_DIR" 2>/dev/null || true
+    rmdir "$STATE_DIR/libexec" 2>/dev/null || true
+    rmdir "$STATE_DIR" 2>/dev/null || true
+    log_info "已卸载 hodexctl 管理器。"
+    return
+  fi
 
   load_state_env "$state_file"
 
@@ -6469,6 +6574,9 @@ main() {
       ;;
     relink)
       perform_relink
+      ;;
+    manager-install)
+      perform_manager_install
       ;;
     *)
       die "未知命令: $COMMAND"
