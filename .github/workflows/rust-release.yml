@@ -550,8 +550,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          echo "CARGO_PROFILE_RELEASE_LTO=off" >> "$GITHUB_ENV"
-          echo "CARGO_PROFILE_RELEASE_CODEGEN_UNITS=16" >> "$GITHUB_ENV"
           echo "CARGO_BUILD_JOBS=1" >> "$GITHUB_ENV"
       - name: Cargo build
         shell: bash
