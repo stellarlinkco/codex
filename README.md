@@ -38,7 +38,7 @@ Copy/paste the command for your platform above to download the latest Release bi
 
 ### Optional: Hodexctl
 
-如果你希望独立管理 `hodex`，且不影响现有 `codex`，可以使用 `hodexctl`。
+If you want to manage `hodex` separately without affecting your existing `codex` setup, use `hodexctl`.
 
 **macOS, Linux, WSL:**
 
@@ -56,7 +56,7 @@ Invoke-WebRequest https://raw.githubusercontent.com/stellarlinkco/codex/main/scr
 & $script
 ```
 
-详细说明见 [Hodexctl 使用说明](./scripts/hodexctl/README.md)。
+For details, see the [Hodexctl guide](./scripts/hodexctl/README.md).
 
 ### Run
 
@@ -69,7 +69,7 @@ codex serve
 
 - [**Contributing**](./docs/contributing.md)
 - [**Installing & building**](./docs/install.md)
-- [**Hodexctl 使用说明**](./scripts/hodexctl/README.md)
+- [**Hodexctl guide**](./scripts/hodexctl/README.md)
 - [**Open source fund**](./docs/open-source-fund.md)
 
 ## Acknowledgements

@@ -1457,8 +1457,22 @@ function Get-AllReleases {
 function Get-AssetInfo {
     param([object]$Release)
 
+    $releaseObject = $null
+    foreach ($candidateRelease in @($Release)) {
+        if ($null -eq $candidateRelease) {
+            continue
+        }
+        if ($candidateRelease.PSObject.Properties.Name -contains "assets") {
+            $releaseObject = $candidateRelease
+            break
+        }
+    }
+    if ($null -eq $releaseObject) {
+        Fail "release 响应缺少 assets 字段。"
+    }
+
     foreach ($candidate in $script:AssetCandidates) {
-        foreach ($asset in @($Release.assets)) {
+        foreach ($asset in @($releaseObject.assets)) {
             if ([string]$asset.name -eq $candidate) {
                 if ($script:ArchitectureName -eq "aarch64" -and [string]$asset.name -like "*x86_64*") {
                     Write-WarnLine "当前 release 未提供 Windows ARM64 原生资产，将回退使用 x64 资产，依赖 Windows ARM 的 x64 仿真。"

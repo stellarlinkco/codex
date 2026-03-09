@@ -38,16 +38,32 @@ function New-FakeSummaryAgent {
 
     if ($env:OS -eq "Windows_NT") {
         $path = Join-Path $BinDir ($Name + ".cmd")
+        $scriptPath = Join-Path $BinDir ($Name + ".py")
         $content = @"
 @echo off
-if "%1"=="exec" if "%2"=="--help" (
-  $(if ($SupportsExec) { "exit /b 0" } else { "exit /b 1" })
-)
-echo %* > "$ArgsFile"
-$(if ([string]::IsNullOrWhiteSpace($PromptFile)) { "more > NUL" } else { "more > ""$PromptFile""" })
-echo {\"type\":\"item.completed\",\"item\":{\"id\":\"item_0\",\"type\":\"agent_message\",\"text\":\"$ResultText\"}}
+python "%~dp0$Name.py" %*
 "@
         Set-Content -LiteralPath $path -Value $content -Encoding ASCII
+        $scriptContent = @"
+import sys
+from pathlib import Path
+
+supports_exec = $([int]$SupportsExec)
+args_path = Path(r'''$ArgsFile''')
+prompt_path = r'''$PromptFile'''
+args = sys.argv[1:]
+
+if len(args) >= 2 and args[0] == "exec" and args[1] == "--help":
+    raise SystemExit(0 if supports_exec else 1)
+
+args_path.write_text(" ".join(args), encoding="utf-8")
+stdin_text = sys.stdin.buffer.read().decode("utf-8")
+if prompt_path:
+    Path(prompt_path).write_text(stdin_text, encoding="utf-8")
+
+print(r'''{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"$ResultText"}}''')
+"@
+        Set-Content -LiteralPath $scriptPath -Value $scriptContent -Encoding UTF8
         return
     }
 

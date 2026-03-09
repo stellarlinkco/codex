@@ -40,7 +40,7 @@ jobs:
           for f in "${files[@]}"; do
             case "$f" in
               .github/workflows/ci.yml|README.md|scripts/install.ps1|scripts/install.sh) installer=true ;;
-              .github/workflows/ci.yml|README.md|docs/install.md|scripts/hodexctl/*) hodexctl=true ;;
+              .github/workflows/ci.yml|.github/workflows/rust-release.yml|README.md|docs/install.md|scripts/hodexctl/*) hodexctl=true ;;
             esac
           done
 
