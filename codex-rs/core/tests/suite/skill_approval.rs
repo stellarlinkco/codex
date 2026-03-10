@@ -432,7 +432,7 @@ permissions:
         .function_call_output(tool_call_id);
     let output = call_output["output"].as_str().unwrap_or_default();
     assert!(
-        output.contains("Execution denied: Execution forbidden by policy"),
+        output.contains("Execution denied: approval required by policy"),
         "expected policy rejection marker in function_call_output: {output:?}"
     );
 
