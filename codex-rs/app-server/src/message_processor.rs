@@ -18,7 +18,6 @@ use codex_app_server_protocol::ChatgptAuthTokensRefreshParams;
 use codex_app_server_protocol::ChatgptAuthTokensRefreshReason;
 use codex_app_server_protocol::ChatgptAuthTokensRefreshResponse;
 use codex_app_server_protocol::ClientInfo;
-use codex_app_server_protocol::ClientNotification;
 use codex_app_server_protocol::ClientRequest;
 use codex_app_server_protocol::ConfigBatchWriteParams;
 use codex_app_server_protocol::ConfigReadParams;
@@ -291,56 +290,10 @@ impl MessageProcessor {
         .await;
     }
 
-    /// Handles a typed request path used by in-process embedders.
-    ///
-    /// This bypasses JSON request deserialization but keeps identical request
-    /// semantics by delegating to `handle_client_request`.
-    pub(crate) async fn process_client_request(
-        &mut self,
-        connection_id: ConnectionId,
-        request: ClientRequest,
-        session: &mut ConnectionSessionState,
-        outbound_initialized: &AtomicBool,
-    ) {
-        let request_span =
-            crate::app_server_tracing::typed_request_span(&request, connection_id, session);
-        async {
-            let request_id = ConnectionRequestId {
-                connection_id,
-                request_id: request.id().clone(),
-            };
-            tracing::trace!(
-                ?connection_id,
-                request_id = ?request_id.request_id,
-                "app-server typed request"
-            );
-            // In-process clients do not have the websocket transport loop that performs
-            // post-initialize bookkeeping, so they still finalize outbound readiness in
-            // the shared request handler.
-            self.handle_client_request(
-                connection_id,
-                request_id,
-                request,
-                session,
-                Some(outbound_initialized),
-            )
-            .await;
-        }
-        .instrument(request_span)
-        .await;
-    }
-
     pub(crate) async fn process_notification(&self, notification: JSONRPCNotification) {
         // Currently, we do not expect to receive any notifications from the
         // client, so we just log them.
         tracing::info!("<- notification: {:?}", notification);
-    }
-
-    /// Handles typed notifications from in-process clients.
-    pub(crate) async fn process_client_notification(&self, notification: ClientNotification) {
-        // Currently, we do not expect to receive any typed notifications from
-        // in-process clients, so we just log them.
-        tracing::info!("<- typed notification: {:?}", notification);
     }
 
     pub(crate) fn thread_created_receiver(&self) -> broadcast::Receiver<ThreadId> {
@@ -365,14 +318,6 @@ impl MessageProcessor {
         self.codex_message_processor
             .connection_initialized(connection_id)
             .await;
-    }
-
-    pub(crate) async fn send_initialize_notifications(&self) {
-        for notification in self.config_warnings.iter().cloned() {
-            self.outgoing
-                .send_server_notification(ServerNotification::ConfigWarning(notification))
-                .await;
-        }
     }
 
     pub(crate) async fn try_attach_thread_listener(
