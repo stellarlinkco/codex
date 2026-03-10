@@ -3589,6 +3589,7 @@ impl ChatComposer {
                     path: Some(skill.path_to_skills_md.to_string_lossy().into_owned()),
                     category_tag: (skill.scope == codex_protocol::protocol::SkillScope::Repo)
                         .then(|| "[Repo]".to_string()),
+                    sort_rank: 1,
                 });
             }
         }
@@ -3641,6 +3642,7 @@ impl ChatComposer {
                     path: Some(format!("plugin://{}", plugin.config_name)),
                     category_tag: (!marketplace_name.is_empty())
                         .then(|| format!("[{marketplace_name}]")),
+                    sort_rank: 0,
                 });
             }
         }
@@ -3664,6 +3666,7 @@ impl ChatComposer {
                     search_terms,
                     path: Some(format!("app://{connector_id}")),
                     category_tag: Some("[App]".to_string()),
+                    sort_rank: 1,
                 });
             }
         }
