@@ -5,6 +5,7 @@ use crate::exec::ExecExpiration;
 use crate::exec::ExecToolCallOutput;
 use crate::exec::SandboxType;
 use crate::exec::is_likely_sandbox_denied;
+use crate::exec_policy::prompt_is_rejected_by_policy;
 use crate::features::Feature;
 use crate::sandboxing::ExecRequest;
 use crate::sandboxing::SandboxPermissions;
@@ -22,6 +23,7 @@ use codex_execpolicy::Evaluation;
 use codex_execpolicy::MatchOptions;
 use codex_execpolicy::Policy;
 use codex_execpolicy::RuleMatch;
+use codex_protocol::approvals::ExecApprovalRequestSkillMetadata;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::MacOsSeatbeltProfileExtensions;
 use codex_protocol::models::PermissionProfile;
@@ -29,7 +31,6 @@ use codex_protocol::permissions::FileSystemSandboxPolicy;
 use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::NetworkPolicyRuleAction;
-use codex_protocol::protocol::RejectConfig;
 use codex_protocol::protocol::ReviewDecision;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_shell_command::bash::parse_shell_lc_plain_commands;
@@ -378,6 +379,14 @@ impl CoreShellActionProvider {
         let approval_id = Some(Uuid::new_v4().to_string());
         Ok(stopwatch
             .pause_for(async move {
+                let skill_metadata = match decision_source {
+                    DecisionSource::SkillScript { skill } => {
+                        Some(ExecApprovalRequestSkillMetadata {
+                            path_to_skills_md: skill.path_to_skills_md.clone(),
+                        })
+                    }
+                    DecisionSource::PrefixRule | DecisionSource::UnmatchedCommandFallback => None,
+                };
                 let available_decisions = vec![
                     Some(ReviewDecision::Approved),
                     // Currently, ApprovedForSession is only honored for skills,
@@ -403,7 +412,7 @@ impl CoreShellActionProvider {
                         None,
                         None,
                         additional_permissions,
-                        None,
+                        skill_metadata,
                         Some(available_decisions),
                     )
                     .await
@@ -454,12 +463,15 @@ impl CoreShellActionProvider {
                 EscalationDecision::deny(Some("Execution forbidden by policy".to_string()))
             }
             Decision::Prompt => {
-                if matches!(
-                    self.approval_policy,
-                    AskForApproval::Never
-                        | AskForApproval::Reject(RejectConfig { rules: true, .. })
-                ) {
-                    EscalationDecision::deny(Some("Execution forbidden by policy".to_string()))
+                let prompt_is_rule = match decision_source {
+                    DecisionSource::SkillScript { .. } => false,
+                    DecisionSource::PrefixRule => true,
+                    DecisionSource::UnmatchedCommandFallback => false,
+                };
+                if let Some(reason) =
+                    prompt_is_rejected_by_policy(self.approval_policy, prompt_is_rule)
+                {
+                    EscalationDecision::deny(Some(reason.to_string()))
                 } else {
                     match self
                         .prompt(
