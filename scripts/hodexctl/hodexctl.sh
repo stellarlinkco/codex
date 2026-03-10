@@ -2344,6 +2344,13 @@ PY
 
   if [[ "$JSON_BACKEND" != "jq" ]]; then
     ensure_release_only_shell_state "$state_file" "清理正式版安装状态"
+    local controller_path command_dir path_update_mode path_profile path_managed_by_hodexctl path_detected_source
+    controller_path="$(shell_json_get_top_level_string "$state_file" "controller_path")"
+    command_dir="$(shell_json_get_top_level_string "$state_file" "command_dir")"
+    path_update_mode="$(shell_json_get_top_level_string "$state_file" "path_update_mode")"
+    path_profile="$(shell_json_get_top_level_string "$state_file" "path_profile")"
+    path_managed_by_hodexctl="$(shell_json_get_top_level_bool "$state_file" "path_managed_by_hodexctl")"
+    path_detected_source="$(shell_json_get_top_level_string "$state_file" "path_detected_source")"
     {
       printf '{\n'
       printf '  "schema_version": 2,\n'
@@ -2353,13 +2360,13 @@ PY
       printf '  "release_name": "",\n'
       printf '  "asset_name": "",\n'
       printf '  "binary_path": "",\n'
-      printf '  "controller_path": %s,\n' "$(json_quote "$(shell_json_get_top_level_string "$state_file" "controller_path")")"
-      printf '  "command_dir": %s,\n' "$(json_quote "$(shell_json_get_top_level_string "$state_file" "command_dir")")"
+      printf '  "controller_path": %s,\n' "$(json_quote "$controller_path")"
+      printf '  "command_dir": %s,\n' "$(json_quote "$command_dir")"
       printf '  "wrappers_created": [],\n'
-      printf '  "path_update_mode": %s,\n' "$(json_quote "$(shell_json_get_top_level_string "$state_file" "path_update_mode")")"
-      printf '  "path_profile": %s,\n' "$(json_quote "$(shell_json_get_top_level_string "$state_file" "path_profile")")"
-      printf '  "path_managed_by_hodexctl": %s,\n' "$(if [[ "$(shell_json_get_top_level_bool "$state_file" "path_managed_by_hodexctl")" == "true" ]]; then printf 'true'; else printf 'false'; fi)"
-      printf '  "path_detected_source": %s,\n' "$(json_quote "$(shell_json_get_top_level_string "$state_file" "path_detected_source")")"
+      printf '  "path_update_mode": %s,\n' "$(json_quote "$path_update_mode")"
+      printf '  "path_profile": %s,\n' "$(json_quote "$path_profile")"
+      printf '  "path_managed_by_hodexctl": %s,\n' "$(if [[ "$path_managed_by_hodexctl" == "true" ]]; then printf 'true'; else printf 'false'; fi)"
+      printf '  "path_detected_source": %s,\n' "$(json_quote "$path_detected_source")"
       printf '  "node_setup_choice": "",\n'
       printf '  "installed_at": "",\n'
       printf '  "source_profiles": {},\n'
@@ -5471,13 +5478,13 @@ append_missing_tool() {
 array_length_safe() {
   local array_name="$1"
   local count
-  count="$(eval "set -- \${$array_name[@]-}; printf '%s' \$#")"
+  count="$(eval "set -- \${${array_name}[@]-}; printf '%s' \$#")"
   printf '%s\n' "$count"
 }
 
 array_items_safe() {
   local array_name="$1"
-  eval "printf '%s\n' \"\${$array_name[@]-}\""
+  eval "printf '%s\n' \"\${${array_name}[@]-}\""
 }
 
 detect_source_toolchain_report() {
@@ -5692,7 +5699,7 @@ auto_install_source_toolchain() {
 
 source_toolchain_snapshot_json() {
   if [[ "$JSON_BACKEND" == "python3" ]]; then
-    python3 - "$OS_NAME" "$ARCH_NAME" "$(printf '%s\n' ${SOURCE_REQUIRED_MISSING[@]-})" "$(printf '%s\n' ${SOURCE_OPTIONAL_MISSING[@]-})" <<'PY'
+    python3 - "$OS_NAME" "$ARCH_NAME" "$(printf '%s\n' "${SOURCE_REQUIRED_MISSING[@]-}")" "$(printf '%s\n' "${SOURCE_OPTIONAL_MISSING[@]-}")" <<'PY'
 import json
 import sys
 
@@ -5710,8 +5717,8 @@ PY
   fi
 
   local required optional
-  required="$(printf '%s\n' ${SOURCE_REQUIRED_MISSING[@]-} | awk 'NF' | jq -R . | jq -s .)"
-  optional="$(printf '%s\n' ${SOURCE_OPTIONAL_MISSING[@]-} | awk 'NF' | jq -R . | jq -s .)"
+  required="$(printf '%s\n' "${SOURCE_REQUIRED_MISSING[@]-}" | awk 'NF' | jq -R . | jq -s .)"
+  optional="$(printf '%s\n' "${SOURCE_OPTIONAL_MISSING[@]-}" | awk 'NF' | jq -R . | jq -s .)"
   jq -n \
     --arg os "$OS_NAME" \
     --arg arch "$ARCH_NAME" \
