@@ -426,8 +426,6 @@ permissions:
         "expected reject sandbox approval policy to skip exec approval"
     );
 
-    wait_for_turn_complete(&test).await;
-
     let call_output = mocks
         .completion
         .single_request()

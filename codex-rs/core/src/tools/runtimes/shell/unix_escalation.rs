@@ -381,9 +381,13 @@ impl CoreShellActionProvider {
             .pause_for(async move {
                 let skill_metadata = match decision_source {
                     DecisionSource::SkillScript { skill } => {
-                        Some(ExecApprovalRequestSkillMetadata {
-                            path_to_skills_md: skill.path_to_skills_md.clone(),
-                        })
+                        let path_to_skills_md = skill
+                            .path_to_skills_md
+                            .parent()
+                            .map(|skill_dir| skill_dir.join("agents").join("openai.yaml"))
+                            .filter(|metadata_path| metadata_path.exists())
+                            .unwrap_or_else(|| skill.path_to_skills_md.clone());
+                        Some(ExecApprovalRequestSkillMetadata { path_to_skills_md })
                     }
                     DecisionSource::PrefixRule | DecisionSource::UnmatchedCommandFallback => None,
                 };
