@@ -58,13 +58,6 @@ impl ApprovalStore {
         }
     }
 
-    pub fn matching_write_roots<'a, I>(&self, paths: I) -> Option<Vec<AbsolutePathBuf>>
-    where
-        I: IntoIterator<Item = &'a AbsolutePathBuf>,
-    {
-        matching_write_roots(paths, &self.approved_write_roots)
-    }
-
     pub fn approve_write_roots<I>(&mut self, roots: I)
     where
         I: IntoIterator<Item = AbsolutePathBuf>,
@@ -523,7 +516,10 @@ mod tests {
         let mut store = ApprovalStore::default();
         store.approve_write_roots(vec![root.clone()]);
 
-        assert_eq!(store.matching_write_roots([&child]), Some(vec![root]));
+        assert_eq!(
+            matching_write_roots([&child], &store.approved_write_roots),
+            Some(vec![root])
+        );
     }
 
     #[test]
@@ -534,7 +530,10 @@ mod tests {
         let mut store = ApprovalStore::default();
         store.approve_write_roots(vec![root]);
 
-        assert_eq!(store.matching_write_roots([&outside]), None);
+        assert_eq!(
+            matching_write_roots([&outside], &store.approved_write_roots),
+            None
+        );
     }
 
     #[test]

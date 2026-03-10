@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use tokio_util::task::AbortOnDropHandle;
 
 use codex_protocol::dynamic_tools::DynamicToolResponse;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputResponse;
@@ -22,8 +23,6 @@ use crate::protocol::ReviewDecision;
 use crate::protocol::TokenUsage;
 use crate::sandboxing::merge_permission_profiles;
 use crate::tasks::SessionTask;
-use codex_protocol::models::PermissionProfile;
-
 /// Metadata about the currently running turn.
 pub(crate) struct ActiveTurn {
     pub(crate) tasks: IndexMap<String, RunningTask>,
@@ -78,11 +77,16 @@ pub(crate) struct PendingApproval {
     pub(crate) approved_write_roots: Vec<AbsolutePathBuf>,
 }
 
+pub(crate) struct PendingRequestPermissions {
+    pub(crate) requested_permissions: PermissionProfile,
+    pub(crate) tx: oneshot::Sender<RequestPermissionsResponse>,
+}
+
 /// Mutable state for a single turn.
 #[derive(Default)]
 pub(crate) struct TurnState {
     pending_approvals: HashMap<String, PendingApproval>,
-    pending_request_permissions: HashMap<String, oneshot::Sender<RequestPermissionsResponse>>,
+    pending_request_permissions: HashMap<String, PendingRequestPermissions>,
     pending_user_input: HashMap<String, oneshot::Sender<RequestUserInputResponse>>,
     pending_elicitations: HashMap<(String, RequestId), oneshot::Sender<ElicitationResponse>>,
     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
@@ -124,15 +128,22 @@ impl TurnState {
     pub(crate) fn insert_pending_request_permissions(
         &mut self,
         key: String,
+        requested_permissions: PermissionProfile,
         tx: oneshot::Sender<RequestPermissionsResponse>,
-    ) -> Option<oneshot::Sender<RequestPermissionsResponse>> {
-        self.pending_request_permissions.insert(key, tx)
+    ) -> Option<PendingRequestPermissions> {
+        self.pending_request_permissions.insert(
+            key,
+            PendingRequestPermissions {
+                requested_permissions,
+                tx,
+            },
+        )
     }
 
     pub(crate) fn remove_pending_request_permissions(
         &mut self,
         key: &str,
-    ) -> Option<oneshot::Sender<RequestPermissionsResponse>> {
+    ) -> Option<PendingRequestPermissions> {
         self.pending_request_permissions.remove(key)
     }
 

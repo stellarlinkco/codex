@@ -43,6 +43,7 @@ use crate::realtime_conversation::handle_close as handle_realtime_conversation_c
 use crate::realtime_conversation::handle_start as handle_realtime_conversation_start;
 use crate::realtime_conversation::handle_text as handle_realtime_conversation_text;
 use crate::rollout::session_index;
+use crate::sandboxing::intersect_permission_profiles;
 use crate::stream_events_utils::HandleOutputCtx;
 use crate::stream_events_utils::handle_non_tool_response_item;
 use crate::stream_events_utils::handle_output_item_done;
@@ -3227,7 +3228,11 @@ impl Session {
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
-                    ts.insert_pending_request_permissions(call_id.clone(), tx_response)
+                    ts.insert_pending_request_permissions(
+                        call_id.clone(),
+                        args.permissions.clone(),
+                        tx_response,
+                    )
                 }
                 None => None,
             }
@@ -3388,19 +3393,29 @@ impl Session {
         response: RequestPermissionsResponse,
     ) {
         let mut granted_for_session = None;
+        let mut sanitized_response = response.clone();
         let entry = {
             let mut active = self.active_turn.lock().await;
             match active.as_mut() {
                 Some(at) => {
                     let mut ts = at.turn_state.lock().await;
                     let entry = ts.remove_pending_request_permissions(call_id);
-                    if entry.is_some() && !response.permissions.is_empty() {
-                        match response.scope {
-                            PermissionGrantScope::Turn => {
-                                ts.record_granted_permissions(response.permissions.clone());
-                            }
-                            PermissionGrantScope::Session => {
-                                granted_for_session = Some(response.permissions.clone());
+                    if let Some(entry) = entry.as_ref() {
+                        sanitized_response.permissions = intersect_permission_profiles(
+                            entry.requested_permissions.clone(),
+                            response.permissions.clone(),
+                        );
+                        if !sanitized_response.permissions.is_empty() {
+                            match response.scope {
+                                PermissionGrantScope::Turn => {
+                                    ts.record_granted_permissions(
+                                        sanitized_response.permissions.clone(),
+                                    );
+                                }
+                                PermissionGrantScope::Session => {
+                                    granted_for_session =
+                                        Some(sanitized_response.permissions.clone());
+                                }
                             }
                         }
                     }
@@ -3414,8 +3429,8 @@ impl Session {
             state.record_granted_permissions(permissions);
         }
         match entry {
-            Some(tx_response) => {
-                tx_response.send(response).ok();
+            Some(entry) => {
+                entry.tx.send(sanitized_response).ok();
             }
             None => {
                 warn!("No pending request_permissions found for call_id: {call_id}");

@@ -54,6 +54,28 @@ fn websocket_request_instructions(
         .map(str::to_owned)
 }
 
+async fn assert_session_updated(
+    test: &TestCodex,
+    expected_session_id: &str,
+    expected_instructions: &str,
+) {
+    let instructions = wait_for_event_match(&test.codex, |msg| match msg {
+        EventMsg::RealtimeConversationRealtime(RealtimeConversationRealtimeEvent {
+            payload:
+                RealtimeEvent::SessionUpdated {
+                    session_id,
+                    instructions,
+                },
+        }) if session_id == expected_session_id => Some(Ok(instructions.clone())),
+        EventMsg::Error(err) => Some(Err(err.clone())),
+        _ => None,
+    })
+    .await
+    .unwrap_or_else(|err: ErrorEvent| panic!("conversation start failed: {err:?}"));
+
+    assert_eq!(instructions.as_deref(), Some(expected_instructions));
+}
+
 async fn wait_for_matching_websocket_request<F>(
     server: &core_test_support::responses::WebSocketTestServer,
     description: &str,
@@ -714,6 +736,8 @@ async fn conversation_uses_experimental_realtime_ws_startup_context_override() -
         }))
         .await?;
 
+    assert_session_updated(&test, "sess_custom_context", "prompt from config").await;
+
     let startup_context_request = wait_for_matching_websocket_request(
         &realtime_server,
         "startup context request with instructions",
@@ -774,6 +798,8 @@ async fn conversation_disables_realtime_startup_context_with_empty_override() ->
         }))
         .await?;
 
+    assert_session_updated(&test, "sess_no_context", "prompt from config").await;
+
     let startup_context_request = wait_for_matching_websocket_request(
         &realtime_server,
         "startup context disable request with instructions",
@@ -826,6 +852,8 @@ async fn conversation_start_injects_startup_context_from_thread_history() -> Res
             session_id: None,
         }))
         .await?;
+
+    assert_session_updated(&test, "sess_context", "backend prompt").await;
 
     let startup_context_request = wait_for_matching_websocket_request(
         &realtime_server,
@@ -880,6 +908,8 @@ async fn conversation_startup_context_falls_back_to_workspace_map() -> Result<()
         }))
         .await?;
 
+    assert_session_updated(&test, "sess_workspace", "backend prompt").await;
+
     let startup_context_request = wait_for_matching_websocket_request(
         &realtime_server,
         "workspace-map startup context request with instructions",
@@ -913,7 +943,6 @@ async fn conversation_startup_context_is_truncated_and_sent_once_per_start() -> 
     ]])
     .await;
 
-    let oversized_summary = "recent work ".repeat(3_500);
     let mut builder = test_codex().with_config({
         let realtime_base_url = realtime_server.uri().to_string();
         move |config| {
@@ -921,8 +950,18 @@ async fn conversation_startup_context_is_truncated_and_sent_once_per_start() -> 
         }
     });
     let test = builder.build_with_websocket_server(&startup_server).await?;
-    seed_recent_thread(&test, &oversized_summary, "summary", "oversized").await?;
-    fs::write(test.workspace_path("marker.txt"), "marker")?;
+    let oversized_ask = format!("Oversized ask 00 {}", "recent work ".repeat(3_500));
+    seed_recent_thread(&test, "summary", &oversized_ask, "oversized").await?;
+    let long_name_suffix = "workspace-marker-".repeat(10);
+    for dir_idx in 0..20 {
+        let dir_name = format!("dir-{dir_idx:02}-{long_name_suffix}");
+        let dir_path = test.workspace_path(&dir_name);
+        fs::create_dir_all(&dir_path)?;
+        for file_idx in 0..20 {
+            let file_name = format!("file-{file_idx:02}-{long_name_suffix}.txt");
+            fs::write(dir_path.join(file_name), "marker")?;
+        }
+    }
 
     test.codex
         .submit(Op::RealtimeConversationStart(ConversationStartParams {
@@ -930,6 +969,8 @@ async fn conversation_startup_context_is_truncated_and_sent_once_per_start() -> 
             session_id: None,
         }))
         .await?;
+
+    assert_session_updated(&test, "sess_truncated", "backend prompt").await;
 
     let startup_context_request = wait_for_matching_websocket_request(
         &realtime_server,
@@ -940,6 +981,9 @@ async fn conversation_startup_context_is_truncated_and_sent_once_per_start() -> 
     let startup_context = websocket_request_instructions(&startup_context_request)
         .expect("startup context request should contain instructions");
     assert!(startup_context.contains(STARTUP_CONTEXT_HEADER));
+    assert!(startup_context.contains("Oversized ask 00 recent work recent work"));
+    assert!(startup_context.contains("dir-00-workspace-marker-"));
+    assert!(!startup_context.contains("dir-19-workspace-marker-"));
     assert!(startup_context.len() <= 20_500);
 
     test.codex

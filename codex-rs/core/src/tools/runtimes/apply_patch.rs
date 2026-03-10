@@ -20,7 +20,6 @@ use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::approved_write_roots;
 use crate::tools::sandboxing::matching_write_roots;
-use crate::tools::sandboxing::with_cached_approval;
 use codex_apply_patch::ApplyPatchAction;
 use codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1;
 use codex_protocol::models::FileSystemPermissions;
@@ -128,16 +127,7 @@ impl ApplyPatchRuntime {
             });
         }
 
-        let store = session.services.tool_approvals.lock().await;
-        store.matching_write_roots(file_paths.iter())?;
-        let scoped_paths = file_paths.to_vec();
-        Some(PermissionProfile {
-            file_system: Some(FileSystemPermissions {
-                read: Some(scoped_paths.clone()),
-                write: Some(scoped_paths),
-            }),
-            ..Default::default()
-        })
+        None
     }
 }
 
@@ -184,7 +174,7 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
                 return rx_approve.await.unwrap_or_default();
             }
 
-            let decision = with_cached_approval(
+            crate::tools::sandboxing::with_cached_approval(
                 &session.services,
                 "apply_patch",
                 approval_keys.clone(),
@@ -195,14 +185,7 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
                     rx_approve.await.unwrap_or_default()
                 },
             )
-            .await;
-
-            if matches!(decision, ReviewDecision::ApprovedForSession) {
-                let mut store = session.services.tool_approvals.lock().await;
-                store.approve_write_roots(approval_keys);
-            }
-
-            decision
+            .await
         })
     }
 
