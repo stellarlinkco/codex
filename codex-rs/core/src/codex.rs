@@ -11183,11 +11183,15 @@ mod tests {
 
         // Now retry the same command WITHOUT escalated permissions; should succeed.
         // Force DangerFullAccess to avoid platform sandbox dependencies in tests.
-        Arc::get_mut(&mut turn_context)
-            .expect("unique turn context Arc")
+        let turn_context_mut = Arc::get_mut(&mut turn_context).expect("unique turn context Arc");
+        turn_context_mut
             .sandbox_policy
             .set(SandboxPolicy::DangerFullAccess)
             .expect("test setup should allow updating sandbox policy");
+        turn_context_mut.file_system_sandbox_policy =
+            FileSystemSandboxPolicy::from(turn_context_mut.sandbox_policy.get());
+        turn_context_mut.network_sandbox_policy =
+            NetworkSandboxPolicy::from(turn_context_mut.sandbox_policy.get());
 
         let resp2 = handler
             .handle(ToolInvocation {
