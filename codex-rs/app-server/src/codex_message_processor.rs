@@ -90,6 +90,8 @@ use codex_app_server_protocol::PluginListResponse;
 use codex_app_server_protocol::PluginMarketplaceEntry;
 use codex_app_server_protocol::PluginSource;
 use codex_app_server_protocol::PluginSummary;
+use codex_app_server_protocol::PluginUninstallParams;
+use codex_app_server_protocol::PluginUninstallResponse;
 use codex_app_server_protocol::ProductSurface as ApiProductSurface;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ReviewDelivery as ApiReviewDelivery;
@@ -217,6 +219,7 @@ use codex_core::plugins::MarketplaceError;
 use codex_core::plugins::MarketplacePluginSourceSummary;
 use codex_core::plugins::PluginInstallError as CorePluginInstallError;
 use codex_core::plugins::PluginInstallRequest;
+use codex_core::plugins::PluginUninstallError as CorePluginUninstallError;
 use codex_core::plugins::load_plugin_apps;
 use codex_core::read_head_for_summary;
 use codex_core::read_session_meta_line;
@@ -709,6 +712,10 @@ impl CodexMessageProcessor {
             }
             ClientRequest::PluginInstall { request_id, params } => {
                 self.plugin_install(to_connection_request_id(request_id), params)
+                    .await;
+            }
+            ClientRequest::PluginUninstall { request_id, params } => {
+                self.plugin_uninstall(to_connection_request_id(request_id), params)
                     .await;
             }
             ClientRequest::TurnStart { request_id, params } => {
@@ -1657,9 +1664,19 @@ impl CodexMessageProcessor {
         };
 
         let requested_policy = sandbox_policy.map(|policy| policy.to_core());
-        let effective_policy = match requested_policy {
+        let (
+            effective_policy,
+            effective_file_system_sandbox_policy,
+            effective_network_sandbox_policy,
+        ) = match requested_policy {
             Some(policy) => match self.config.permissions.sandbox_policy.can_set(&policy) {
-                Ok(()) => policy,
+                Ok(()) => {
+                    let file_system_sandbox_policy =
+                        codex_protocol::permissions::FileSystemSandboxPolicy::from(&policy);
+                    let network_sandbox_policy =
+                        codex_protocol::permissions::NetworkSandboxPolicy::from(&policy);
+                    (policy, file_system_sandbox_policy, network_sandbox_policy)
+                }
                 Err(err) => {
                     let error = JSONRPCErrorError {
                         code: INVALID_REQUEST_ERROR_CODE,
@@ -1670,7 +1687,11 @@ impl CodexMessageProcessor {
                     return;
                 }
             },
-            None => self.config.permissions.sandbox_policy.get().clone(),
+            None => (
+                self.config.permissions.sandbox_policy.get().clone(),
+                self.config.permissions.file_system_sandbox_policy.clone(),
+                self.config.permissions.network_sandbox_policy,
+            ),
         };
 
         let codex_linux_sandbox_exe = self.arg0_paths.codex_linux_sandbox_exe.clone();
@@ -1691,6 +1712,8 @@ impl CodexMessageProcessor {
         match codex_core::exec::build_exec_request(
             exec_params,
             &effective_policy,
+            &effective_file_system_sandbox_policy,
+            effective_network_sandbox_policy,
             sandbox_cwd.as_path(),
             &codex_linux_sandbox_exe,
             use_linux_sandbox_bwrap,
@@ -2189,7 +2212,7 @@ impl CodexMessageProcessor {
         let loaded_thread = self.thread_manager.get_thread(thread_uuid).await.ok();
         let mut state_db_ctx = loaded_thread.as_ref().and_then(|thread| thread.state_db());
         if state_db_ctx.is_none() {
-            state_db_ctx = get_state_db(&self.config, None).await;
+            state_db_ctx = get_state_db(&self.config).await;
         }
         let Some(state_db_ctx) = state_db_ctx else {
             self.send_internal_error(
@@ -2490,7 +2513,7 @@ impl CodexMessageProcessor {
 
         let rollout_path_display = archived_path.display().to_string();
         let fallback_provider = self.config.model_provider_id.clone();
-        let state_db_ctx = get_state_db(&self.config, None).await;
+        let state_db_ctx = get_state_db(&self.config).await;
         let archived_folder = self
             .config
             .codex_home
@@ -3925,7 +3948,7 @@ impl CodexMessageProcessor {
         let fallback_provider = self.config.model_provider_id.clone();
         let (allowed_sources_vec, source_kind_filter) = compute_source_filters(source_kinds);
         let allowed_sources = allowed_sources_vec.as_slice();
-        let state_db_ctx = get_state_db(&self.config, None).await;
+        let state_db_ctx = get_state_db(&self.config).await;
 
         while remaining > 0 {
             let page_size = remaining.min(THREAD_LIST_MAX_LIMIT);
@@ -4781,7 +4804,7 @@ impl CodexMessageProcessor {
         self.finalize_thread_teardown(thread_id).await;
 
         if state_db_ctx.is_none() {
-            state_db_ctx = get_state_db(&self.config, None).await;
+            state_db_ctx = get_state_db(&self.config).await;
         }
 
         // Move the rollout file to archived.
@@ -5494,6 +5517,57 @@ impl CodexMessageProcessor {
                             format!("failed to install plugin: {err}"),
                         )
                         .await;
+                    }
+                }
+            }
+        }
+    }
+
+    async fn plugin_uninstall(
+        &self,
+        request_id: ConnectionRequestId,
+        params: PluginUninstallParams,
+    ) {
+        let plugins_manager = self.thread_manager.plugins_manager();
+
+        match plugins_manager.uninstall_plugin(params.plugin_id).await {
+            Ok(()) => {
+                self.clear_plugin_related_caches();
+                self.outgoing
+                    .send_response(request_id, PluginUninstallResponse {})
+                    .await;
+            }
+            Err(err) => {
+                if err.is_invalid_request() {
+                    self.send_invalid_request_error(request_id, err.to_string())
+                        .await;
+                    return;
+                }
+
+                match err {
+                    CorePluginUninstallError::Config(err) => {
+                        self.send_internal_error(
+                            request_id,
+                            format!("failed to clear plugin config: {err}"),
+                        )
+                        .await;
+                    }
+                    CorePluginUninstallError::Join(err) => {
+                        self.send_internal_error(
+                            request_id,
+                            format!("failed to uninstall plugin: {err}"),
+                        )
+                        .await;
+                    }
+                    CorePluginUninstallError::Store(err) => {
+                        self.send_internal_error(
+                            request_id,
+                            format!("failed to uninstall plugin: {err}"),
+                        )
+                        .await;
+                    }
+                    CorePluginUninstallError::InvalidPluginId(_) => {
+                        unreachable!("invalid plugin ids are handled above");
                     }
                 }
             }
@@ -6541,7 +6615,7 @@ impl CodexMessageProcessor {
             if let Some(log_db) = self.log_db.as_ref() {
                 log_db.flush().await;
             }
-            let state_db_ctx = get_state_db(&self.config, None).await;
+            let state_db_ctx = get_state_db(&self.config).await;
             match (state_db_ctx.as_ref(), conversation_id) {
                 (Some(state_db_ctx), Some(conversation_id)) => {
                     let thread_id_text = conversation_id.to_string();
@@ -6637,7 +6711,10 @@ impl CodexMessageProcessor {
         let config = Arc::clone(&self.config);
         let cli_overrides = self.cli_overrides.clone();
         let cloud_requirements = self.current_cloud_requirements();
-        let command_cwd = params.cwd.unwrap_or_else(|| config.cwd.clone());
+        let command_cwd = params
+            .cwd
+            .map(PathBuf::from)
+            .unwrap_or_else(|| config.cwd.clone());
         let outgoing = Arc::clone(&self.outgoing);
         let connection_id = request_id.connection_id;
 
@@ -7182,7 +7259,7 @@ async fn read_history_cwd_from_state_db(
     thread_id: Option<ThreadId>,
     rollout_path: &Path,
 ) -> Option<PathBuf> {
-    if let Some(state_db_ctx) = get_state_db(config, None).await
+    if let Some(state_db_ctx) = get_state_db(config).await
         && let Some(thread_id) = thread_id
         && let Ok(Some(metadata)) = state_db_ctx.get_thread(thread_id).await
     {
@@ -7203,7 +7280,7 @@ async fn read_summary_from_state_db_by_thread_id(
     config: &Config,
     thread_id: ThreadId,
 ) -> Option<ConversationSummary> {
-    let state_db_ctx = get_state_db(config, None).await;
+    let state_db_ctx = get_state_db(config).await;
     read_summary_from_state_db_context_by_thread_id(state_db_ctx.as_ref(), thread_id).await
 }
 

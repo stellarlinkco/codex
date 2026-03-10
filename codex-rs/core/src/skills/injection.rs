@@ -7,6 +7,7 @@ use crate::analytics_client::InvocationType;
 use crate::analytics_client::SkillInvocation;
 use crate::analytics_client::TrackEventsContext;
 use crate::instructions::SkillInstructions;
+use crate::mention_syntax::TOOL_MENTION_SIGIL;
 use crate::mentions::build_skill_name_counts;
 use crate::skills::SkillMetadata;
 use codex_hooks::CommandHookConfig;
@@ -478,6 +479,10 @@ pub(crate) fn normalize_skill_path(path: &str) -> &str {
 /// resource path is present, it is captured for exact path matching while also tracking
 /// the name for fallback matching.
 pub(crate) fn extract_tool_mentions(text: &str) -> ToolMentions<'_> {
+    extract_tool_mentions_with_sigil(text, TOOL_MENTION_SIGIL)
+}
+
+pub(crate) fn extract_tool_mentions_with_sigil(text: &str, sigil: char) -> ToolMentions<'_> {
     let text_bytes = text.as_bytes();
     let mut mentioned_names: HashSet<&str> = HashSet::new();
     let mut mentioned_paths: HashSet<&str> = HashSet::new();
@@ -488,7 +493,7 @@ pub(crate) fn extract_tool_mentions(text: &str) -> ToolMentions<'_> {
         let byte = text_bytes[index];
         if byte == b'['
             && let Some((name, path, end_index)) =
-                parse_linked_tool_mention(text, text_bytes, index)
+                parse_linked_tool_mention(text, text_bytes, index, sigil)
         {
             if !is_common_env_var(name) {
                 let kind = tool_kind_for_path(path);
@@ -504,7 +509,7 @@ pub(crate) fn extract_tool_mentions(text: &str) -> ToolMentions<'_> {
             continue;
         }
 
-        if byte != b'$' {
+        if byte != sigil as u8 {
             index += 1;
             continue;
         }
@@ -623,13 +628,14 @@ fn parse_linked_tool_mention<'a>(
     text: &'a str,
     text_bytes: &[u8],
     start: usize,
+    sigil: char,
 ) -> Option<(&'a str, &'a str, usize)> {
-    let dollar_index = start + 1;
-    if text_bytes.get(dollar_index) != Some(&b'$') {
+    let sigil_index = start + 1;
+    if text_bytes.get(sigil_index) != Some(&(sigil as u8)) {
         return None;
     }
 
-    let name_start = dollar_index + 1;
+    let name_start = sigil_index + 1;
     let first_name_byte = text_bytes.get(name_start)?;
     if !is_mention_name_char(*first_name_byte) {
         return None;

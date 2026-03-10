@@ -702,6 +702,8 @@ mod tests {
     use std::path::PathBuf;
 
     use codex_protocol::config_types::WindowsSandboxLevel;
+    use codex_protocol::permissions::FileSystemSandboxPolicy;
+    use codex_protocol::permissions::NetworkSandboxPolicy;
     use codex_protocol::protocol::ReadOnlyAccess;
     use codex_protocol::protocol::SandboxPolicy;
     use pretty_assertions::assert_eq;
@@ -719,6 +721,10 @@ mod tests {
     use crate::outgoing_message::OutgoingMessage;
 
     fn windows_sandbox_exec_request() -> ExecRequest {
+        let sandbox_policy = SandboxPolicy::ReadOnly {
+            access: ReadOnlyAccess::FullAccess,
+            network_access: false,
+        };
         ExecRequest {
             command: vec!["cmd".to_string()],
             cwd: PathBuf::from("."),
@@ -728,10 +734,9 @@ mod tests {
             sandbox: SandboxType::WindowsRestrictedToken,
             windows_sandbox_level: WindowsSandboxLevel::Disabled,
             sandbox_permissions: codex_core::sandboxing::SandboxPermissions::UseDefault,
-            sandbox_policy: SandboxPolicy::ReadOnly {
-                access: ReadOnlyAccess::FullAccess,
-                network_access: false,
-            },
+            sandbox_policy: sandbox_policy.clone(),
+            file_system_sandbox_policy: FileSystemSandboxPolicy::from(&sandbox_policy),
+            network_sandbox_policy: NetworkSandboxPolicy::from(&sandbox_policy),
             justification: None,
             arg0: None,
         }
@@ -821,6 +826,10 @@ mod tests {
             connection_id: ConnectionId(8),
             request_id: codex_app_server_protocol::RequestId::Integer(100),
         };
+        let sandbox_policy = SandboxPolicy::ReadOnly {
+            access: ReadOnlyAccess::FullAccess,
+            network_access: false,
+        };
 
         manager
             .start(StartCommandExecParams {
@@ -836,10 +845,9 @@ mod tests {
                     sandbox: SandboxType::None,
                     windows_sandbox_level: WindowsSandboxLevel::Disabled,
                     sandbox_permissions: codex_core::sandboxing::SandboxPermissions::UseDefault,
-                    sandbox_policy: SandboxPolicy::ReadOnly {
-                        access: ReadOnlyAccess::FullAccess,
-                        network_access: false,
-                    },
+                    sandbox_policy: sandbox_policy.clone(),
+                    file_system_sandbox_policy: FileSystemSandboxPolicy::from(&sandbox_policy),
+                    network_sandbox_policy: NetworkSandboxPolicy::from(&sandbox_policy),
                     justification: None,
                     arg0: None,
                 },

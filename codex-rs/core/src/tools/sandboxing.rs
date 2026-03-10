@@ -17,8 +17,12 @@ use crate::tools::network_approval::NetworkApprovalSpec;
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::approvals::ExecPolicyAmendment;
 use codex_protocol::approvals::NetworkApprovalContext;
+use codex_protocol::models::PermissionProfile;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewDecision;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use futures::Future;
 use futures::future::BoxFuture;
 use serde::Serialize;
@@ -26,12 +30,14 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Clone, Default, Debug)]
 pub(crate) struct ApprovalStore {
     // Store serialized keys for generic caching across requests.
     map: HashMap<String, ReviewDecision>,
+    approved_write_roots: Vec<AbsolutePathBuf>,
 }
 
 impl ApprovalStore {
@@ -51,6 +57,84 @@ impl ApprovalStore {
             self.map.insert(s, value);
         }
     }
+
+    pub fn matching_write_roots<'a, I>(&self, paths: I) -> Option<Vec<AbsolutePathBuf>>
+    where
+        I: IntoIterator<Item = &'a AbsolutePathBuf>,
+    {
+        matching_write_roots(paths, &self.approved_write_roots)
+    }
+
+    pub fn approve_write_roots<I>(&mut self, roots: I)
+    where
+        I: IntoIterator<Item = AbsolutePathBuf>,
+    {
+        for root in roots {
+            let root = AbsolutePathBuf::from_absolute_path(normalize_approval_path(root.as_path()))
+                .unwrap_or(root);
+            if self
+                .approved_write_roots
+                .iter()
+                .any(|existing| existing == &root)
+            {
+                continue;
+            }
+            self.approved_write_roots.push(root);
+        }
+    }
+}
+
+pub(crate) fn approved_write_roots(
+    permissions: Option<&PermissionProfile>,
+) -> Option<Vec<AbsolutePathBuf>> {
+    permissions
+        .and_then(|permissions| permissions.file_system.as_ref())
+        .and_then(|file_system| file_system.write.clone())
+        .filter(|roots| !roots.is_empty())
+}
+
+pub(crate) fn matching_write_roots<'a, I>(
+    paths: I,
+    approved_write_roots: &[AbsolutePathBuf],
+) -> Option<Vec<AbsolutePathBuf>>
+where
+    I: IntoIterator<Item = &'a AbsolutePathBuf>,
+{
+    let mut matched_roots = Vec::new();
+    for path in paths {
+        let normalized_path = normalize_approval_path(path.as_path());
+        let root = approved_write_roots
+            .iter()
+            .find(|root| normalized_path.starts_with(root.as_path()))?;
+        if !matched_roots.iter().any(|existing| existing == root) {
+            matched_roots.push(root.clone());
+        }
+    }
+    Some(matched_roots)
+}
+
+fn normalize_approval_path(path: &Path) -> PathBuf {
+    if let Ok(canonical) = dunce::canonicalize(path) {
+        return canonical;
+    }
+
+    let mut normalized_ancestor = None;
+    let mut suffix = PathBuf::new();
+
+    for ancestor in path.ancestors() {
+        if let Ok(canonical) = dunce::canonicalize(ancestor) {
+            normalized_ancestor = Some(canonical);
+            break;
+        }
+
+        if let Some(name) = ancestor.file_name() {
+            suffix = PathBuf::from(name).join(suffix);
+        }
+    }
+
+    normalized_ancestor
+        .map(|ancestor| ancestor.join(suffix))
+        .unwrap_or_else(|| path.to_path_buf())
 }
 
 /// Takes a vector of approval keys and returns a ReviewDecision.
@@ -109,8 +193,8 @@ where
 
 #[derive(Clone)]
 pub(crate) struct ApprovalCtx<'a> {
-    pub session: &'a Session,
-    pub turn: &'a TurnContext,
+    pub session: &'a Arc<Session>,
+    pub turn: &'a Arc<TurnContext>,
     pub call_id: &'a str,
     pub retry_reason: Option<String>,
     pub network_approval_context: Option<NetworkApprovalContext>,
@@ -318,6 +402,8 @@ pub(crate) trait ToolRuntime<Req, Out>: Approvable<Req> + Sandboxable {
 pub(crate) struct SandboxAttempt<'a> {
     pub sandbox: crate::exec::SandboxType,
     pub policy: &'a crate::protocol::SandboxPolicy,
+    pub file_system_policy: &'a FileSystemSandboxPolicy,
+    pub network_policy: NetworkSandboxPolicy,
     pub enforce_managed_network: bool,
     pub(crate) manager: &'a SandboxManager,
     pub(crate) sandbox_cwd: &'a Path,
@@ -336,6 +422,8 @@ impl<'a> SandboxAttempt<'a> {
             .transform(crate::sandboxing::SandboxTransformRequest {
                 spec,
                 policy: self.policy,
+                file_system_policy: self.file_system_policy,
+                network_policy: self.network_policy,
                 sandbox: self.sandbox,
                 enforce_managed_network: self.enforce_managed_network,
                 network,
@@ -356,6 +444,7 @@ mod tests {
     use codex_protocol::protocol::NetworkAccess;
     use codex_protocol::protocol::RejectConfig;
     use pretty_assertions::assert_eq;
+    use tempfile::tempdir;
 
     #[test]
     fn external_sandbox_skips_exec_approval_on_request() {
@@ -424,6 +513,28 @@ mod tests {
                 proposed_execpolicy_amendment: None,
             }
         );
+    }
+
+    #[test]
+    fn matching_write_roots_accepts_descendant_paths() {
+        let tmp = tempdir().expect("tmp");
+        let root = AbsolutePathBuf::try_from(tmp.path().to_path_buf()).expect("abs");
+        let child = AbsolutePathBuf::try_from(tmp.path().join("nested/file.txt")).expect("abs");
+        let mut store = ApprovalStore::default();
+        store.approve_write_roots(vec![root.clone()]);
+
+        assert_eq!(store.matching_write_roots([&child]), Some(vec![root]));
+    }
+
+    #[test]
+    fn matching_write_roots_requires_every_path_to_be_covered() {
+        let tmp = tempdir().expect("tmp");
+        let root = AbsolutePathBuf::try_from(tmp.path().join("allowed")).expect("abs");
+        let outside = AbsolutePathBuf::try_from(tmp.path().join("blocked.txt")).expect("abs");
+        let mut store = ApprovalStore::default();
+        store.approve_write_roots(vec![root]);
+
+        assert_eq!(store.matching_write_roots([&outside]), None);
     }
 
     #[test]
