@@ -20,6 +20,7 @@ use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::approved_write_roots;
 use crate::tools::sandboxing::matching_write_roots;
+use crate::tools::sandboxing::with_cached_approval;
 use codex_apply_patch::ApplyPatchAction;
 use codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1;
 use codex_protocol::models::FileSystemPermissions;
@@ -127,7 +128,16 @@ impl ApplyPatchRuntime {
             });
         }
 
-        None
+        let store = session.services.tool_approvals.lock().await;
+        store.matching_write_roots(file_paths.iter())?;
+        let scoped_paths = file_paths.to_vec();
+        Some(PermissionProfile {
+            file_system: Some(FileSystemPermissions {
+                read: Some(scoped_paths.clone()),
+                write: Some(scoped_paths),
+            }),
+            ..Default::default()
+        })
     }
 }
 
@@ -174,7 +184,7 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
                 return rx_approve.await.unwrap_or_default();
             }
 
-            crate::tools::sandboxing::with_cached_approval(
+            let decision = with_cached_approval(
                 &session.services,
                 "apply_patch",
                 approval_keys.clone(),
@@ -185,7 +195,14 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
                     rx_approve.await.unwrap_or_default()
                 },
             )
-            .await
+            .await;
+
+            if matches!(decision, ReviewDecision::ApprovedForSession) {
+                let mut store = session.services.tool_approvals.lock().await;
+                store.approve_write_roots(approval_keys);
+            }
+
+            decision
         })
     }
 
@@ -235,7 +252,11 @@ impl ToolRuntime<ApplyPatchRequest, ExecToolCallOutput> for ApplyPatchRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codex::make_session_and_context;
     use codex_protocol::protocol::RejectConfig;
+    use pretty_assertions::assert_eq;
+    use std::sync::Arc;
+    use tempfile::tempdir;
 
     #[test]
     fn wants_no_sandbox_approval_reject_respects_sandbox_flag() {
@@ -254,6 +275,96 @@ mod tests {
                 rules: false,
                 mcp_elicitations: false,
             }))
+        );
+    }
+
+    #[tokio::test]
+    async fn preapproved_additional_permissions_accepts_cached_write_roots() {
+        let (session, _turn) = make_session_and_context().await;
+        let session = Arc::new(session);
+        let tmp = tempdir().expect("tmp");
+        let file_path =
+            AbsolutePathBuf::try_from(tmp.path().join("cached-write-root.txt")).expect("abs path");
+
+        {
+            let mut store = session.services.tool_approvals.lock().await;
+            store.approve_write_roots(vec![file_path.clone()]);
+        }
+
+        let permissions = ApplyPatchRuntime::preapproved_additional_permissions(
+            session.as_ref(),
+            std::slice::from_ref(&file_path),
+        )
+        .await;
+
+        assert_eq!(
+            permissions,
+            Some(PermissionProfile {
+                file_system: Some(FileSystemPermissions {
+                    read: Some(vec![file_path.clone()]),
+                    write: Some(vec![file_path]),
+                }),
+                ..Default::default()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn approved_for_session_marks_cached_write_roots() {
+        let (session, turn) = make_session_and_context().await;
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+        let tmp = tempdir().expect("tmp");
+        let file_path =
+            AbsolutePathBuf::try_from(tmp.path().join("approved-for-session.txt")).expect("abs");
+
+        {
+            let mut store = session.services.tool_approvals.lock().await;
+            store.put(file_path.clone(), ReviewDecision::ApprovedForSession);
+            assert!(store.matching_write_roots([&file_path]).is_none());
+        }
+
+        let req = ApplyPatchRequest {
+            action: ApplyPatchAction::new_add_for_test(file_path.as_path(), "content".to_string()),
+            file_paths: vec![file_path.clone()],
+            changes: HashMap::new(),
+            exec_approval_requirement: ExecApprovalRequirement::NeedsApproval {
+                reason: None,
+                proposed_execpolicy_amendment: None,
+            },
+            timeout_ms: None,
+            codex_exe: None,
+        };
+
+        let mut runtime = ApplyPatchRuntime::new();
+        let decision = runtime
+            .start_approval_async(
+                &req,
+                ApprovalCtx {
+                    session: &session,
+                    turn: &turn,
+                    call_id: "apply-patch-call",
+                    retry_reason: None,
+                    network_approval_context: None,
+                },
+            )
+            .await;
+
+        assert_eq!(decision, ReviewDecision::ApprovedForSession);
+        let store = session.services.tool_approvals.lock().await;
+        let expected_path = AbsolutePathBuf::try_from(
+            file_path
+                .as_path()
+                .parent()
+                .unwrap()
+                .canonicalize()
+                .unwrap()
+                .join(file_path.as_path().file_name().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(
+            store.matching_write_roots([&file_path]),
+            Some(vec![expected_path])
         );
     }
 }

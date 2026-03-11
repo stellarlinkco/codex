@@ -75,6 +75,13 @@ impl ApprovalStore {
             self.approved_write_roots.push(root);
         }
     }
+
+    pub fn matching_write_roots<'a, I>(&self, paths: I) -> Option<Vec<AbsolutePathBuf>>
+    where
+        I: IntoIterator<Item = &'a AbsolutePathBuf>,
+    {
+        matching_write_roots(paths, &self.approved_write_roots)
+    }
 }
 
 pub(crate) fn approved_write_roots(
