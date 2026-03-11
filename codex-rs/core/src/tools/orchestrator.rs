@@ -130,7 +130,7 @@ impl ToolOrchestrator {
             ExecApprovalRequirement::NeedsApproval { reason, .. } => {
                 let approval_ctx = ApprovalCtx {
                     session: &tool_ctx.session,
-                    turn: turn_ctx,
+                    turn: &tool_ctx.turn,
                     call_id: &tool_ctx.call_id,
                     retry_reason: reason,
                     network_approval_context: None,
@@ -169,7 +169,8 @@ impl ToolOrchestrator {
         let initial_sandbox = match tool.sandbox_mode_for_first_attempt(req) {
             SandboxOverride::BypassSandboxFirstAttempt => crate::exec::SandboxType::None,
             SandboxOverride::NoOverride => self.sandbox.select_initial(
-                &turn_ctx.sandbox_policy,
+                &turn_ctx.file_system_sandbox_policy,
+                turn_ctx.network_sandbox_policy,
                 tool.sandbox_preference(),
                 turn_ctx.windows_sandbox_level,
                 has_managed_network_requirements,
@@ -182,6 +183,8 @@ impl ToolOrchestrator {
         let initial_attempt = SandboxAttempt {
             sandbox: initial_sandbox,
             policy: &turn_ctx.sandbox_policy,
+            file_system_policy: &turn_ctx.file_system_sandbox_policy,
+            network_policy: turn_ctx.network_sandbox_policy,
             enforce_managed_network: has_managed_network_requirements,
             manager: &self.sandbox,
             sandbox_cwd: &turn_ctx.cwd,
@@ -266,7 +269,7 @@ impl ToolOrchestrator {
                 if !bypass_retry_approval {
                     let approval_ctx = ApprovalCtx {
                         session: &tool_ctx.session,
-                        turn: turn_ctx,
+                        turn: &tool_ctx.turn,
                         call_id: &tool_ctx.call_id,
                         retry_reason: Some(retry_reason),
                         network_approval_context: network_approval_context.clone(),
@@ -296,6 +299,8 @@ impl ToolOrchestrator {
                 let escalated_attempt = SandboxAttempt {
                     sandbox: crate::exec::SandboxType::None,
                     policy: &turn_ctx.sandbox_policy,
+                    file_system_policy: &turn_ctx.file_system_sandbox_policy,
+                    network_policy: turn_ctx.network_sandbox_policy,
                     enforce_managed_network: has_managed_network_requirements,
                     manager: &self.sandbox,
                     sandbox_cwd: &turn_ctx.cwd,

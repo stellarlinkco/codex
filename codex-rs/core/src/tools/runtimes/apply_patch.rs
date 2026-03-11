@@ -8,6 +8,7 @@ use crate::exec::ExecToolCallOutput;
 use crate::sandboxing::CommandSpec;
 use crate::sandboxing::SandboxPermissions;
 use crate::sandboxing::execute_env;
+use crate::sandboxing::merge_permission_profiles;
 use crate::tools::sandboxing::Approvable;
 use crate::tools::sandboxing::ApprovalCtx;
 use crate::tools::sandboxing::ExecApprovalRequirement;
@@ -17,9 +18,13 @@ use crate::tools::sandboxing::SandboxablePreference;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
+use crate::tools::sandboxing::approved_write_roots;
+use crate::tools::sandboxing::matching_write_roots;
 use crate::tools::sandboxing::with_cached_approval;
 use codex_apply_patch::ApplyPatchAction;
 use codex_apply_patch::CODEX_CORE_APPLY_PATCH_ARG1;
+use codex_protocol::models::FileSystemPermissions;
+use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::FileChange;
 use codex_protocol::protocol::ReviewDecision;
@@ -48,6 +53,7 @@ impl ApplyPatchRuntime {
 
     fn build_command_spec(
         req: &ApplyPatchRequest,
+        additional_permissions: Option<PermissionProfile>,
         _codex_home: &std::path::Path,
     ) -> Result<CommandSpec, ToolError> {
         let exe = if let Some(path) = &req.codex_exe {
@@ -65,6 +71,12 @@ impl ApplyPatchRuntime {
             }
         };
         let program = exe.to_string_lossy().to_string();
+        let mut env = HashMap::new();
+        let temp_dir = req.action.cwd.to_string_lossy().to_string();
+        env.insert("TMPDIR".to_string(), temp_dir.clone());
+        env.insert("TMP".to_string(), temp_dir.clone());
+        env.insert("TEMP".to_string(), temp_dir);
+
         Ok(CommandSpec {
             program,
             args: vec![
@@ -73,10 +85,15 @@ impl ApplyPatchRuntime {
             ],
             cwd: req.action.cwd.clone(),
             expiration: req.timeout_ms.into(),
-            // Run apply_patch with a minimal environment for determinism and to avoid leaks.
-            env: HashMap::new(),
-            sandbox_permissions: SandboxPermissions::UseDefault,
-            additional_permissions: None,
+            // Pin a writable temp dir inside cwd so sandboxed self-invocation
+            // does not depend on host TMPDIR access.
+            env,
+            sandbox_permissions: if additional_permissions.is_some() {
+                SandboxPermissions::WithAdditionalPermissions
+            } else {
+                SandboxPermissions::UseDefault
+            },
+            additional_permissions,
             justification: None,
         })
     }
@@ -86,6 +103,40 @@ impl ApplyPatchRuntime {
             sub_id: ctx.turn.sub_id.clone(),
             call_id: ctx.call_id.clone(),
             tx_event: ctx.session.get_tx_event(),
+        })
+    }
+
+    async fn preapproved_additional_permissions(
+        session: &crate::codex::Session,
+        file_paths: &[AbsolutePathBuf],
+    ) -> Option<PermissionProfile> {
+        let granted_permissions = merge_permission_profiles(
+            session.granted_session_permissions().await.as_ref(),
+            session.granted_turn_permissions().await.as_ref(),
+        );
+        if approved_write_roots(granted_permissions.as_ref())
+            .and_then(|roots| matching_write_roots(file_paths.iter(), &roots))
+            .is_some()
+        {
+            let scoped_paths = file_paths.to_vec();
+            return Some(PermissionProfile {
+                file_system: Some(FileSystemPermissions {
+                    read: Some(scoped_paths.clone()),
+                    write: Some(scoped_paths),
+                }),
+                ..Default::default()
+            });
+        }
+
+        let store = session.services.tool_approvals.lock().await;
+        store.matching_write_roots(file_paths.iter())?;
+        let scoped_paths = file_paths.to_vec();
+        Some(PermissionProfile {
+            file_system: Some(FileSystemPermissions {
+                read: Some(scoped_paths.clone()),
+                write: Some(scoped_paths),
+            }),
+            ..Default::default()
         })
     }
 }
@@ -118,6 +169,14 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
         let approval_keys = self.approval_keys(req);
         let changes = req.changes.clone();
         Box::pin(async move {
+            if retry_reason.is_none()
+                && Self::preapproved_additional_permissions(session.as_ref(), &approval_keys)
+                    .await
+                    .is_some()
+            {
+                return ReviewDecision::Approved;
+            }
+
             if let Some(reason) = retry_reason {
                 let rx_approve = session
                     .request_patch_approval(turn, call_id, changes.clone(), Some(reason), None)
@@ -125,10 +184,10 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
                 return rx_approve.await.unwrap_or_default();
             }
 
-            with_cached_approval(
+            let decision = with_cached_approval(
                 &session.services,
                 "apply_patch",
-                approval_keys,
+                approval_keys.clone(),
                 || async move {
                     let rx_approve = session
                         .request_patch_approval(turn, call_id, changes, None, None)
@@ -136,7 +195,14 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
                     rx_approve.await.unwrap_or_default()
                 },
             )
-            .await
+            .await;
+
+            if matches!(decision, ReviewDecision::ApprovedForSession) {
+                let mut store = session.services.tool_approvals.lock().await;
+                store.approve_write_roots(approval_keys);
+            }
+
+            decision
         })
     }
 
@@ -169,7 +235,10 @@ impl ToolRuntime<ApplyPatchRequest, ExecToolCallOutput> for ApplyPatchRuntime {
         attempt: &SandboxAttempt<'_>,
         ctx: &ToolCtx,
     ) -> Result<ExecToolCallOutput, ToolError> {
-        let spec = Self::build_command_spec(req, &ctx.turn.config.codex_home)?;
+        let additional_permissions =
+            Self::preapproved_additional_permissions(ctx.session.as_ref(), &req.file_paths).await;
+        let spec =
+            Self::build_command_spec(req, additional_permissions, &ctx.turn.config.codex_home)?;
         let env = attempt
             .env_for(spec, None)
             .map_err(|err| ToolError::Codex(err.into()))?;
@@ -183,7 +252,11 @@ impl ToolRuntime<ApplyPatchRequest, ExecToolCallOutput> for ApplyPatchRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codex::make_session_and_context;
     use codex_protocol::protocol::RejectConfig;
+    use pretty_assertions::assert_eq;
+    use std::sync::Arc;
+    use tempfile::tempdir;
 
     #[test]
     fn wants_no_sandbox_approval_reject_respects_sandbox_flag() {
@@ -202,6 +275,96 @@ mod tests {
                 rules: false,
                 mcp_elicitations: false,
             }))
+        );
+    }
+
+    #[tokio::test]
+    async fn preapproved_additional_permissions_accepts_cached_write_roots() {
+        let (session, _turn) = make_session_and_context().await;
+        let session = Arc::new(session);
+        let tmp = tempdir().expect("tmp");
+        let file_path =
+            AbsolutePathBuf::try_from(tmp.path().join("cached-write-root.txt")).expect("abs path");
+
+        {
+            let mut store = session.services.tool_approvals.lock().await;
+            store.approve_write_roots(vec![file_path.clone()]);
+        }
+
+        let permissions = ApplyPatchRuntime::preapproved_additional_permissions(
+            session.as_ref(),
+            std::slice::from_ref(&file_path),
+        )
+        .await;
+
+        assert_eq!(
+            permissions,
+            Some(PermissionProfile {
+                file_system: Some(FileSystemPermissions {
+                    read: Some(vec![file_path.clone()]),
+                    write: Some(vec![file_path]),
+                }),
+                ..Default::default()
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn approved_for_session_marks_cached_write_roots() {
+        let (session, turn) = make_session_and_context().await;
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+        let tmp = tempdir().expect("tmp");
+        let file_path =
+            AbsolutePathBuf::try_from(tmp.path().join("approved-for-session.txt")).expect("abs");
+
+        {
+            let mut store = session.services.tool_approvals.lock().await;
+            store.put(file_path.clone(), ReviewDecision::ApprovedForSession);
+            assert!(store.matching_write_roots([&file_path]).is_none());
+        }
+
+        let req = ApplyPatchRequest {
+            action: ApplyPatchAction::new_add_for_test(file_path.as_path(), "content".to_string()),
+            file_paths: vec![file_path.clone()],
+            changes: HashMap::new(),
+            exec_approval_requirement: ExecApprovalRequirement::NeedsApproval {
+                reason: None,
+                proposed_execpolicy_amendment: None,
+            },
+            timeout_ms: None,
+            codex_exe: None,
+        };
+
+        let mut runtime = ApplyPatchRuntime::new();
+        let decision = runtime
+            .start_approval_async(
+                &req,
+                ApprovalCtx {
+                    session: &session,
+                    turn: &turn,
+                    call_id: "apply-patch-call",
+                    retry_reason: None,
+                    network_approval_context: None,
+                },
+            )
+            .await;
+
+        assert_eq!(decision, ReviewDecision::ApprovedForSession);
+        let store = session.services.tool_approvals.lock().await;
+        let expected_path = AbsolutePathBuf::try_from(
+            file_path
+                .as_path()
+                .parent()
+                .unwrap()
+                .canonicalize()
+                .unwrap()
+                .join(file_path.as_path().file_name().unwrap()),
+        )
+        .unwrap();
+        assert_eq!(
+            store.matching_write_roots([&file_path]),
+            Some(vec![expected_path])
         );
     }
 }

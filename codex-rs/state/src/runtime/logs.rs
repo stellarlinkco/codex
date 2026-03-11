@@ -481,7 +481,7 @@ mod tests {
     #[tokio::test]
     async fn insert_logs_use_dedicated_log_database() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
 
@@ -513,7 +513,7 @@ mod tests {
     #[tokio::test]
     async fn query_logs_with_search_matches_substring() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
 
@@ -564,7 +564,7 @@ mod tests {
     #[tokio::test]
     async fn insert_logs_prunes_old_rows_when_thread_exceeds_size_limit() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
 
@@ -616,7 +616,7 @@ mod tests {
     #[tokio::test]
     async fn insert_logs_prunes_single_thread_row_when_it_exceeds_size_limit() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
 
@@ -653,7 +653,7 @@ mod tests {
     #[tokio::test]
     async fn insert_logs_prunes_threadless_rows_per_process_uuid_only() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
 
@@ -719,7 +719,7 @@ mod tests {
     #[tokio::test]
     async fn insert_logs_prunes_single_threadless_process_row_when_it_exceeds_size_limit() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
 
@@ -756,7 +756,7 @@ mod tests {
     #[tokio::test]
     async fn insert_logs_prunes_threadless_rows_with_null_process_uuid() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
 
@@ -821,7 +821,7 @@ mod tests {
     #[tokio::test]
     async fn insert_logs_prunes_single_threadless_null_process_row_when_it_exceeds_limit() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
 
@@ -856,9 +856,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn insert_logs_prunes_old_rows_when_thread_exceeds_row_limit() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
+
+        let entries: Vec<LogEntry> = (1..=1_001)
+            .map(|ts| LogEntry {
+                ts,
+                ts_nanos: 0,
+                level: "INFO".to_string(),
+                target: "cli".to_string(),
+                message: Some(format!("thread-row-{ts}")),
+                thread_id: Some("thread-row-limit".to_string()),
+                process_uuid: Some("proc-1".to_string()),
+                file: Some("main.rs".to_string()),
+                line: Some(ts),
+                module_path: Some("mod".to_string()),
+            })
+            .collect();
+        runtime
+            .insert_logs(&entries)
+            .await
+            .expect("insert test logs");
+
+        let rows = runtime
+            .query_logs(&LogQuery {
+                thread_ids: vec!["thread-row-limit".to_string()],
+                ..Default::default()
+            })
+            .await
+            .expect("query thread logs");
+
+        let timestamps: Vec<i64> = rows.into_iter().map(|row| row.ts).collect();
+        assert_eq!(timestamps.len(), 1_000);
+        assert_eq!(timestamps.first().copied(), Some(2));
+        assert_eq!(timestamps.last().copied(), Some(1_001));
+
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn insert_logs_prunes_old_threadless_rows_when_process_exceeds_row_limit() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
+
+        let entries: Vec<LogEntry> = (1..=1_001)
+            .map(|ts| LogEntry {
+                ts,
+                ts_nanos: 0,
+                level: "INFO".to_string(),
+                target: "cli".to_string(),
+                message: Some(format!("process-row-{ts}")),
+                thread_id: None,
+                process_uuid: Some("proc-row-limit".to_string()),
+                file: Some("main.rs".to_string()),
+                line: Some(ts),
+                module_path: Some("mod".to_string()),
+            })
+            .collect();
+        runtime
+            .insert_logs(&entries)
+            .await
+            .expect("insert test logs");
+
+        let rows = runtime
+            .query_logs(&LogQuery {
+                include_threadless: true,
+                ..Default::default()
+            })
+            .await
+            .expect("query threadless logs");
+
+        let timestamps: Vec<i64> = rows
+            .into_iter()
+            .filter(|row| row.process_uuid.as_deref() == Some("proc-row-limit"))
+            .map(|row| row.ts)
+            .collect();
+        assert_eq!(timestamps.len(), 1_000);
+        assert_eq!(timestamps.first().copied(), Some(2));
+        assert_eq!(timestamps.last().copied(), Some(1_001));
+
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
+    async fn insert_logs_prunes_old_threadless_null_process_rows_when_row_limit_exceeded() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("initialize runtime");
+
+        let entries: Vec<LogEntry> = (1..=1_001)
+            .map(|ts| LogEntry {
+                ts,
+                ts_nanos: 0,
+                level: "INFO".to_string(),
+                target: "cli".to_string(),
+                message: Some(format!("null-process-row-{ts}")),
+                thread_id: None,
+                process_uuid: None,
+                file: Some("main.rs".to_string()),
+                line: Some(ts),
+                module_path: Some("mod".to_string()),
+            })
+            .collect();
+        runtime
+            .insert_logs(&entries)
+            .await
+            .expect("insert test logs");
+
+        let rows = runtime
+            .query_logs(&LogQuery {
+                include_threadless: true,
+                ..Default::default()
+            })
+            .await
+            .expect("query threadless logs");
+
+        let timestamps: Vec<i64> = rows
+            .into_iter()
+            .filter(|row| row.process_uuid.is_none())
+            .map(|row| row.ts)
+            .collect();
+        assert_eq!(timestamps.len(), 1_000);
+        assert_eq!(timestamps.first().copied(), Some(2));
+        assert_eq!(timestamps.last().copied(), Some(1_001));
+
+        let _ = tokio::fs::remove_dir_all(codex_home).await;
+    }
+
+    #[tokio::test]
     async fn query_feedback_logs_returns_newest_lines_within_limit_in_order() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
 
@@ -920,7 +1054,7 @@ mod tests {
     #[tokio::test]
     async fn query_feedback_logs_excludes_oversized_newest_row() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
         let eleven_mebibytes = "z".repeat(11 * 1024 * 1024);
@@ -968,7 +1102,7 @@ mod tests {
     #[tokio::test]
     async fn query_feedback_logs_includes_threadless_rows_from_same_process() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
 
@@ -1042,7 +1176,7 @@ mod tests {
     #[tokio::test]
     async fn query_feedback_logs_excludes_threadless_rows_from_prior_processes() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
 
@@ -1116,7 +1250,7 @@ mod tests {
     #[tokio::test]
     async fn query_feedback_logs_keeps_newest_suffix_across_thread_and_threadless_logs() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("initialize runtime");
         let thread_marker = "thread-scoped-oldest";

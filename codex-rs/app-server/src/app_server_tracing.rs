@@ -1,3 +1,5 @@
+//! Tracing helpers shared by app-server request entry points.
+
 use crate::message_processor::ConnectionSessionState;
 use crate::outgoing_message::ConnectionId;
 use crate::transport::AppServerTransport;
@@ -65,6 +67,11 @@ pub(crate) fn request_span(
     span
 }
 
+/// Builds tracing span metadata for typed in-process requests.
+///
+/// This mirrors `request_span` semantics while stamping transport as
+/// `in-process` and deriving client info either from initialize params or
+/// from existing connection session state.
 fn transport_name(transport: AppServerTransport) -> &'static str {
     match transport {
         AppServerTransport::Stdio => "stdio",

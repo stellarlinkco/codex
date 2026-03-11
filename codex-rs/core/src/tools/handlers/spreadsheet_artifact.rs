@@ -151,6 +151,7 @@ async fn authorize_path_access(
                         None,
                         None,
                         None,
+                        None,
                     )
                     .await
             }

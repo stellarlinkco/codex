@@ -1527,6 +1527,7 @@ impl CodexClient {
             cwd,
             command_actions,
             additional_permissions,
+            skill_metadata,
             proposed_execpolicy_amendment,
             proposed_network_policy_amendments,
             available_decisions,
@@ -1560,6 +1561,9 @@ impl CodexClient {
         }
         if let Some(additional_permissions) = additional_permissions.as_ref() {
             println!("< additional permissions: {additional_permissions:?}");
+        }
+        if let Some(skill_metadata) = skill_metadata.as_ref() {
+            println!("< skill metadata: {skill_metadata:?}");
         }
         if let Some(execpolicy_amendment) = proposed_execpolicy_amendment.as_ref() {
             println!("< proposed execpolicy amendment: {execpolicy_amendment:?}");

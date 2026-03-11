@@ -434,9 +434,8 @@ ON CONFLICT(thread_id, position) DO NOTHING
         &self,
         builder: &ThreadMetadataBuilder,
         items: &[RolloutItem],
-        otel: Option<&SessionTelemetry>,
         new_thread_memory_mode: Option<&str>,
-        _updated_at_override: Option<DateTime<Utc>>,
+        updated_at_override: Option<DateTime<Utc>>,
     ) -> anyhow::Result<()> {
         if items.is_empty() {
             return Ok(());
@@ -452,7 +451,11 @@ ON CONFLICT(thread_id, position) DO NOTHING
         if let Some(existing_metadata) = existing_metadata.as_ref() {
             metadata.prefer_existing_git_info(existing_metadata);
         }
-        if let Some(updated_at) = file_modified_time_utc(builder.rollout_path.as_path()).await {
+        if let Some(updated_at) = updated_at_override {
+            metadata.updated_at = updated_at;
+        } else if let Some(updated_at) =
+            file_modified_time_utc(builder.rollout_path.as_path()).await
+        {
             metadata.updated_at = updated_at;
         }
         // Keep the thread upsert before dynamic tools to satisfy the foreign key constraint:
@@ -463,20 +466,12 @@ ON CONFLICT(thread_id, position) DO NOTHING
         } else {
             self.upsert_thread(&metadata).await
         };
-        if let Err(err) = upsert_result {
-            if let Some(otel) = otel {
-                otel.counter(DB_ERROR_METRIC, 1, &[("stage", "apply_rollout_items")]);
-            }
-            return Err(err);
-        }
+        upsert_result?;
         if let Some(memory_mode) = extract_memory_mode(items)
             && let Err(err) = self
                 .set_thread_memory_mode(builder.id, memory_mode.as_str())
                 .await
         {
-            if let Some(otel) = otel {
-                otel.counter(DB_ERROR_METRIC, 1, &[("stage", "set_thread_memory_mode")]);
-            }
             return Err(err);
         }
         let dynamic_tools = extract_dynamic_tools(items);
@@ -485,9 +480,6 @@ ON CONFLICT(thread_id, position) DO NOTHING
                 .persist_dynamic_tools(builder.id, dynamic_tools.as_deref())
                 .await
         {
-            if let Some(otel) = otel {
-                otel.counter(DB_ERROR_METRIC, 1, &[("stage", "persist_dynamic_tools")]);
-            }
             return Err(err);
         }
         Ok(())
@@ -650,6 +642,7 @@ mod tests {
     use super::*;
     use crate::runtime::test_support::test_thread_metadata;
     use crate::runtime::test_support::unique_temp_dir;
+    use codex_protocol::protocol::EventMsg;
     use codex_protocol::protocol::GitInfo;
     use codex_protocol::protocol::SessionMeta;
     use codex_protocol::protocol::SessionMetaLine;
@@ -660,7 +653,7 @@ mod tests {
     #[tokio::test]
     async fn upsert_thread_keeps_creation_memory_mode_for_existing_rows() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -698,7 +691,7 @@ mod tests {
     #[tokio::test]
     async fn apply_rollout_items_restores_memory_mode_from_session_meta() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -736,7 +729,7 @@ mod tests {
         })];
 
         runtime
-            .apply_rollout_items(&builder, &items, None, None, None)
+            .apply_rollout_items(&builder, &items, None, None)
             .await
             .expect("apply_rollout_items should succeed");
 
@@ -750,7 +743,7 @@ mod tests {
     #[tokio::test]
     async fn apply_rollout_items_preserves_existing_git_branch_and_fills_missing_git_fields() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -794,7 +787,7 @@ mod tests {
         })];
 
         runtime
-            .apply_rollout_items(&builder, &items, None, None, None)
+            .apply_rollout_items(&builder, &items, None, None)
             .await
             .expect("apply_rollout_items should succeed");
 
@@ -814,7 +807,7 @@ mod tests {
     #[tokio::test]
     async fn update_thread_git_info_preserves_newer_non_git_metadata() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -873,7 +866,7 @@ mod tests {
     #[tokio::test]
     async fn insert_thread_if_absent_preserves_existing_metadata() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -918,7 +911,7 @@ mod tests {
     #[tokio::test]
     async fn update_thread_git_info_can_clear_fields() {
         let codex_home = unique_temp_dir();
-        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string(), None)
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
             .await
             .expect("state db should initialize");
         let thread_id =
@@ -947,5 +940,59 @@ mod tests {
         assert_eq!(persisted.git_sha, None);
         assert_eq!(persisted.git_branch, None);
         assert_eq!(persisted.git_origin_url, None);
+    }
+
+    #[tokio::test]
+    async fn apply_rollout_items_uses_override_updated_at_when_provided() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("state db should initialize");
+        let thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000792").expect("valid thread id");
+        let metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("initial upsert should succeed");
+
+        let builder = ThreadMetadataBuilder::new(
+            thread_id,
+            metadata.rollout_path.clone(),
+            metadata.created_at,
+            SessionSource::Cli,
+        );
+        let items = vec![RolloutItem::EventMsg(EventMsg::TokenCount(
+            codex_protocol::protocol::TokenCountEvent {
+                info: Some(codex_protocol::protocol::TokenUsageInfo {
+                    total_token_usage: codex_protocol::protocol::TokenUsage {
+                        input_tokens: 0,
+                        cached_input_tokens: 0,
+                        output_tokens: 0,
+                        reasoning_output_tokens: 0,
+                        total_tokens: 321,
+                    },
+                    last_token_usage: codex_protocol::protocol::TokenUsage::default(),
+                    model_context_window: None,
+                }),
+                rate_limits: None,
+            },
+        ))];
+        let override_updated_at =
+            DateTime::<Utc>::from_timestamp(1_700_001_234, 0).expect("timestamp");
+
+        runtime
+            .apply_rollout_items(&builder, &items, None, Some(override_updated_at))
+            .await
+            .expect("apply_rollout_items should succeed");
+
+        let persisted = runtime
+            .get_thread(thread_id)
+            .await
+            .expect("thread should load")
+            .expect("thread should exist");
+        assert_eq!(persisted.tokens_used, 321);
+        assert_eq!(persisted.updated_at, override_updated_at);
     }
 }
