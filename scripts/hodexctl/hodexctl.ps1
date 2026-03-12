@@ -353,17 +353,20 @@ function Invoke-GhApiFallback {
 function Get-GitHubApiFailureMessage {
     param([string]$BaseMessage)
 
+    $base = $BaseMessage.Trim()
+    $baseSentence = if ($base -match '[.!?]$') { $base } else { "$base." }
+
     switch ($script:LastGhFallbackReason) {
-        "gh-success" { return "$BaseMessage`n$($script:LastGhFallbackDetail)" }
-        "gh-missing" { return "$BaseMessage. gh not found; set GITHUB_TOKEN or install/login to gh and retry." }
-        "gh-not-authenticated" { return "$BaseMessage. gh fallback was attempted but gh is not logged in; run 'gh auth login' or set GITHUB_TOKEN and retry." }
-        "gh-access-denied" { return "$BaseMessage. gh fallback was attempted but the current gh login/token lacks permission for $($script:RepoName): $($script:LastGhFallbackDetail)" }
-        "gh-failed" { return "$BaseMessage. gh fallback was attempted but gh api still failed: $($script:LastGhFallbackDetail)" }
+        "gh-success" { return "$baseSentence`n$($script:LastGhFallbackDetail)" }
+        "gh-missing" { return "$baseSentence gh not found; set GITHUB_TOKEN or install/login to gh and retry." }
+        "gh-not-authenticated" { return "$baseSentence gh fallback was attempted but gh is not logged in; run 'gh auth login' or set GITHUB_TOKEN and retry." }
+        "gh-access-denied" { return "$baseSentence gh fallback was attempted but the current gh login/token lacks permission for $($script:RepoName): $($script:LastGhFallbackDetail)" }
+        "gh-failed" { return "$baseSentence gh fallback was attempted but gh api still failed: $($script:LastGhFallbackDetail)" }
         default {
             if (-not [string]::IsNullOrWhiteSpace($script:ApiToken)) {
-                return "$BaseMessage. GITHUB_TOKEN was provided, but GitHub API is still unavailable; you can also try 'gh auth login' and retry."
+                return "$baseSentence GITHUB_TOKEN was provided, but GitHub API is still unavailable; you can also try 'gh auth login' and retry."
             }
-            return "$BaseMessage. Set GITHUB_TOKEN or install/login to gh and retry."
+            return "$baseSentence Set GITHUB_TOKEN or install/login to gh and retry."
         }
     }
 }
