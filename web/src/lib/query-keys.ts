@@ -1,5 +1,13 @@
 export const queryKeys = {
     sessions: ['sessions'] as const,
+    kanban: ['kanban'] as const,
+    modelsCatalog: ['models-catalog'] as const,
+    githubRepos: ['github-repos'] as const,
+    githubWorkItems: ['github-work-items'] as const,
+    githubKanban: ['github-kanban'] as const,
+    githubJobs: ['github-jobs'] as const,
+    githubWorkItemDetail: (workItemKey: string) => ['github-work-item-detail', workItemKey] as const,
+    githubJobLog: (jobId: string) => ['github-job-log', jobId] as const,
     session: (sessionId: string) => ['session', sessionId] as const,
     messages: (sessionId: string) => ['messages', sessionId] as const,
     machines: ['machines'] as const,

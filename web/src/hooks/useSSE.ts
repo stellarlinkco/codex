@@ -67,6 +67,8 @@ export function useSSE(options: {
     const onErrorRef = useRef(options.onError)
     const onToastRef = useRef(options.onToast)
     const eventSourceRef = useRef<EventSource | null>(null)
+    const pendingInvalidationsRef = useRef<Map<string, readonly unknown[]>>(new Map())
+    const invalidateTimerRef = useRef<number | null>(null)
     const [subscriptionId, setSubscriptionId] = useState<string | null>(null)
 
     useEffect(() => {
@@ -104,6 +106,21 @@ export function useSSE(options: {
         }
 
         setSubscriptionId(null)
+        const scheduleInvalidate = (queryKey: readonly unknown[]) => {
+            const key = JSON.stringify(queryKey)
+            pendingInvalidationsRef.current.set(key, queryKey)
+            if (invalidateTimerRef.current !== null) {
+                return
+            }
+            invalidateTimerRef.current = window.setTimeout(() => {
+                invalidateTimerRef.current = null
+                const pending = Array.from(pendingInvalidationsRef.current.values())
+                pendingInvalidationsRef.current.clear()
+                for (const key of pending) {
+                    void queryClient.invalidateQueries({ queryKey: key })
+                }
+            }, 50)
+        }
         const url = buildEventsUrl(options.baseUrl, options.token, {
             ...subscription,
             sessionId: subscription.sessionId ?? undefined
@@ -132,19 +149,43 @@ export function useSSE(options: {
             }
 
             if (event.type === 'session-added' || event.type === 'session-updated' || event.type === 'session-removed') {
-                void queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+                scheduleInvalidate(queryKeys.sessions)
                 if ('sessionId' in event) {
                     if (event.type === 'session-removed') {
                         void queryClient.removeQueries({ queryKey: queryKeys.session(event.sessionId) })
                         clearMessageWindow(event.sessionId)
                     } else {
-                        void queryClient.invalidateQueries({ queryKey: queryKeys.session(event.sessionId) })
+                        scheduleInvalidate(queryKeys.session(event.sessionId))
                     }
                 }
             }
 
             if (event.type === 'machine-updated') {
-                void queryClient.invalidateQueries({ queryKey: queryKeys.machines })
+                scheduleInvalidate(queryKeys.machines)
+            }
+
+            if (event.type === 'kanban-updated' || event.type === 'card-moved') {
+                if (event.type === 'kanban-updated') {
+                    queryClient.setQueryData(queryKeys.kanban, event.data as unknown)
+                } else {
+                    scheduleInvalidate(queryKeys.kanban)
+                }
+            }
+
+            if (event.type === 'github-work-items-updated') {
+                scheduleInvalidate(queryKeys.githubWorkItems)
+            }
+
+            if (event.type === 'github-kanban-updated' || event.type === 'github-card-moved') {
+                if (event.type === 'github-kanban-updated') {
+                    queryClient.setQueryData(queryKeys.githubKanban, event.data as unknown)
+                } else {
+                    scheduleInvalidate(queryKeys.githubKanban)
+                }
+            }
+
+            if (event.type === 'github-job-updated') {
+                scheduleInvalidate(queryKeys.githubJobs)
             }
 
             onEventRef.current(event)
@@ -188,6 +229,11 @@ export function useSSE(options: {
                 eventSourceRef.current = null
             }
             setSubscriptionId(null)
+            if (invalidateTimerRef.current !== null) {
+                window.clearTimeout(invalidateTimerRef.current)
+                invalidateTimerRef.current = null
+            }
+            pendingInvalidationsRef.current.clear()
         }
     }, [options.baseUrl, options.enabled, options.token, subscriptionKey, queryClient])
 

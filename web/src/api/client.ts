@@ -1,15 +1,27 @@
 import type {
     AttachmentMetadata,
     AuthResponse,
+    BatchMoveKanbanCardsRequest,
     DeleteUploadResponse,
     ListDirectoryResponse,
     FileReadResponse,
     FileSearchResponse,
     GitCommandResponse,
+    GithubJobsResponse,
+    GithubJobLogResponse,
+    GithubKanbanConfig,
+    GithubReposResponse,
+    GithubWorkItemDetail,
+    GithubWorkItemsSnapshot,
+    KanbanConfig,
+    CloseGithubWorkItemRequest,
     MachinePathsExistsResponse,
     MachinesResponse,
     MessagesResponse,
+    MoveGithubKanbanCardRequest,
+    MoveKanbanCardRequest,
     ModelMode,
+    ModelsCatalogResponse,
     PermissionMode,
     PushSubscriptionPayload,
     PushUnsubscribePayload,
@@ -18,7 +30,9 @@ import type {
     SlashCommandsResponse,
     SkillsResponse,
     SpawnResponse,
+    SetGithubReposRequest,
     UploadFileResponse,
+    UpdateGithubKanbanCardSettingsRequest,
     VisibilityPayload,
     SessionResponse,
     SessionsResponse
@@ -159,6 +173,86 @@ export class ApiClient {
 
     async getSessions(): Promise<SessionsResponse> {
         return await this.request<SessionsResponse>('/api/sessions')
+    }
+
+    async getKanban(): Promise<KanbanConfig> {
+        return await this.request<KanbanConfig>('/api/kanban')
+    }
+
+    async getModelsCatalog(): Promise<ModelsCatalogResponse> {
+        return await this.request<ModelsCatalogResponse>('/api/models/catalog')
+    }
+
+    async getGithubWorkItems(): Promise<GithubWorkItemsSnapshot> {
+        return await this.request<GithubWorkItemsSnapshot>('/api/github/work-items')
+    }
+
+    async getGithubRepos(): Promise<GithubReposResponse> {
+        return await this.request<GithubReposResponse>('/api/github/repos')
+    }
+
+    async setGithubRepos(payload: SetGithubReposRequest): Promise<void> {
+        await this.request<{}>('/api/github/repos', {
+            method: 'PUT',
+            body: JSON.stringify(payload)
+        })
+    }
+
+    async syncGithubWorkItems(): Promise<void> {
+        await this.request<{}>('/api/github/sync', { method: 'POST' })
+    }
+
+    async getGithubKanban(): Promise<GithubKanbanConfig> {
+        return await this.request<GithubKanbanConfig>('/api/github/kanban')
+    }
+
+    async moveGithubKanbanCard(payload: MoveGithubKanbanCardRequest): Promise<void> {
+        await this.request<{}>('/api/github/kanban/cards', {
+            method: 'PUT',
+            body: JSON.stringify(payload)
+        })
+    }
+
+    async updateGithubKanbanCardSettings(payload: UpdateGithubKanbanCardSettingsRequest): Promise<void> {
+        await this.request<{}>('/api/github/kanban/cards/settings', {
+            method: 'PUT',
+            body: JSON.stringify(payload)
+        })
+    }
+
+    async getGithubWorkItemDetail(workItemKey: string): Promise<GithubWorkItemDetail> {
+        const params = new URLSearchParams()
+        params.set('workItemKey', workItemKey)
+        return await this.request<GithubWorkItemDetail>(`/api/github/work-items/detail?${params.toString()}`)
+    }
+
+    async closeGithubWorkItem(payload: CloseGithubWorkItemRequest): Promise<void> {
+        await this.request<{}>('/api/github/work-items/close', {
+            method: 'POST',
+            body: JSON.stringify(payload)
+        })
+    }
+
+    async getGithubJobs(): Promise<GithubJobsResponse> {
+        return await this.request<GithubJobsResponse>('/api/github/jobs')
+    }
+
+    async getGithubJobLog(jobId: string): Promise<GithubJobLogResponse> {
+        return await this.request<GithubJobLogResponse>(`/api/github/jobs/${encodeURIComponent(jobId)}/log`)
+    }
+
+    async moveKanbanCard(sessionId: string, payload: MoveKanbanCardRequest): Promise<void> {
+        await this.request(`/api/kanban/cards/${encodeURIComponent(sessionId)}`, {
+            method: 'PUT',
+            body: JSON.stringify(payload)
+        })
+    }
+
+    async batchMoveKanbanCards(payload: BatchMoveKanbanCardsRequest): Promise<void> {
+        await this.request('/api/kanban/cards/batch', {
+            method: 'PUT',
+            body: JSON.stringify(payload)
+        })
     }
 
     async getPushVapidPublicKey(): Promise<PushVapidPublicKeyResponse> {

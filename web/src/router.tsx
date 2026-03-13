@@ -32,10 +32,22 @@ import { getComposerAutocompleteSuggestions } from '@/lib/autocomplete'
 
 const SessionChat = lazy(() => import('@/components/SessionChat').then((module) => ({ default: module.SessionChat })))
 const NewSession = lazy(() => import('@/components/NewSession').then((module) => ({ default: module.NewSession })))
+const KanbanPage = lazy(() => import('@/routes/kanban').then((module) => ({ default: module.KanbanPage })))
 const FilesPage = lazy(() => import('@/routes/sessions/files'))
 const FilePage = lazy(() => import('@/routes/sessions/file'))
 const TerminalPage = lazy(() => import('@/routes/sessions/terminal'))
 const SettingsPage = lazy(() => import('@/routes/settings'))
+
+const VIEW_KEY = 'codex.sessions.view'
+
+function IndexRedirect() {
+    let preferred: string | null = null
+    try {
+        preferred = window.localStorage.getItem(VIEW_KEY)
+    } catch {
+    }
+    return <Navigate to={preferred === 'kanban' ? '/kanban' : '/sessions'} replace />
+}
 
 function BackIcon(props: { className?: string }) {
     return (
@@ -124,6 +136,20 @@ function SessionsPage() {
                             {t('sessions.count', { n: sessions.length, m: projectCount })}
                         </div>
                         <div className="flex items-center gap-2">
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    try {
+                                        window.localStorage.setItem(VIEW_KEY, 'kanban')
+                                    } catch {
+                                    }
+                                    navigate({ to: '/kanban' })
+                                }}
+                                className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
+                                title="Kanban"
+                            >
+                                看板
+                            </button>
                             <button
                                 type="button"
                                 onClick={() => navigate({ to: '/settings' })}
@@ -392,13 +418,23 @@ const rootRoute = createRootRoute({
 const indexRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: '/',
-    component: () => <Navigate to="/sessions" replace />,
+    component: IndexRedirect,
 })
 
 const sessionsRoute = createRoute({
     getParentRoute: () => rootRoute,
     path: '/sessions',
     component: SessionsPage,
+})
+
+const kanbanRoute = createRoute({
+    getParentRoute: () => rootRoute,
+    path: '/kanban',
+    component: () => (
+        <Suspense fallback={<div className="flex-1 flex items-center justify-center p-4"><LoadingState label="Loading kanban…" className="text-sm" /></div>}>
+            <KanbanPage />
+        </Suspense>
+    ),
 })
 
 const sessionsIndexRoute = createRoute({
@@ -494,6 +530,7 @@ export const routeTree = rootRoute.addChildren([
             sessionFileRoute,
         ]),
     ]),
+    kanbanRoute,
     settingsRoute,
 ])
 

@@ -1,23 +1,17 @@
 use anyhow::Context;
 use anyhow::Result;
-use axum::Router;
 use axum::body::Bytes;
-use axum::extract::State;
 use axum::http::HeaderMap;
 use axum::http::HeaderValue;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use axum::routing::get;
-use axum::routing::post;
+use axum::response::Response;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use codex_core::config::find_codex_home;
-use codex_core::config::load_config_as_toml_with_cli_overrides;
 use codex_core::config::types::GithubWebhookAuthModeToml;
 use codex_core::config::types::GithubWebhookEventsToml;
 use codex_core::config::types::GithubWebhookSourceToml;
-use codex_utils_absolute_path::AbsolutePathBuf;
-use codex_utils_cli::CliConfigOverrides;
+use codex_core::config::types::GithubWebhookToml;
 use hmac::Hmac;
 use hmac::Mac;
 use jsonwebtoken::Algorithm;
@@ -29,6 +23,7 @@ use reqwest::header::HeaderMap as ReqwestHeaderMap;
 use reqwest::header::HeaderName;
 use reqwest::header::HeaderValue as ReqwestHeaderValue;
 use reqwest::header::USER_AGENT;
+use serde::Deserialize;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::Sha256;
@@ -37,7 +32,6 @@ use std::collections::HashSet;
 use std::collections::hash_map::DefaultHasher;
 use std::hash::Hash;
 use std::hash::Hasher;
-use std::net::SocketAddr;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -46,12 +40,10 @@ use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use tokio::io::AsyncBufReadExt;
 use tokio::io::AsyncReadExt;
-use tokio::net::TcpListener;
+use tokio::io::AsyncWriteExt;
 use tokio::sync::Mutex;
 use tokio::sync::Semaphore;
 
-#[cfg(test)]
-const DEFAULT_LISTEN_ADDR: &str = "127.0.0.1:8787";
 const DEFAULT_WEBHOOK_SECRET_ENV: &str = "GITHUB_WEBHOOK_SECRET";
 const DEFAULT_GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
 const DEFAULT_GITHUB_APP_ID_ENV: &str = "GITHUB_APP_ID";
@@ -122,8 +114,7 @@ impl Drop for TestGitCommandTimeoutGuard {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
-#[value(rename_all = "kebab-case")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum MinPermission {
     Read,
     Triage,
@@ -156,24 +147,6 @@ fn permission_rank(permission: &str) -> Option<u8> {
         "maintain" => Some(4),
         "admin" => Some(5),
         _ => None,
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, clap::ValueEnum)]
-#[value(rename_all = "kebab-case")]
-enum GithubAuthMode {
-    Auto,
-    Token,
-    GithubApp,
-}
-
-impl From<GithubAuthMode> for GithubWebhookAuthModeToml {
-    fn from(value: GithubAuthMode) -> Self {
-        match value {
-            GithubAuthMode::Auto => Self::Auto,
-            GithubAuthMode::Token => Self::Token,
-            GithubAuthMode::GithubApp => Self::GithubApp,
-        }
     }
 }
 
@@ -273,74 +246,6 @@ impl EnabledEvents {
     }
 }
 
-#[derive(Debug, Clone)]
-struct GithubWebhookRuntimeConfig {
-    enabled: bool,
-    listen: SocketAddr,
-    webhook_secret_env: String,
-    github_token_env: String,
-    github_app_id_env: String,
-    github_app_private_key_env: String,
-    auth_mode: GithubWebhookAuthModeToml,
-    min_permission: MinPermission,
-    allow_repo: Vec<String>,
-    command_prefix: String,
-    delivery_ttl_days: u64,
-    repo_ttl_days: u64,
-    enabled_sources: HashSet<WebhookSource>,
-    enabled_events: EnabledEvents,
-}
-
-#[derive(Debug, clap::Parser)]
-#[command(override_usage = "codex github [OPTIONS]")]
-pub struct GithubCommand {
-    /// Address to listen on.
-    #[arg(long, value_name = "ADDR")]
-    listen: Option<SocketAddr>,
-
-    /// Environment variable that contains the GitHub webhook secret.
-    #[arg(long, value_name = "ENV")]
-    webhook_secret_env: Option<String>,
-
-    /// Environment variable that contains the GitHub token used for API calls.
-    #[arg(long, value_name = "ENV")]
-    github_token_env: Option<String>,
-
-    /// Environment variable that contains the GitHub App ID.
-    #[arg(long, value_name = "ENV")]
-    github_app_id_env: Option<String>,
-
-    /// Environment variable that contains the GitHub App private key.
-    #[arg(long, value_name = "ENV")]
-    github_app_private_key_env: Option<String>,
-
-    /// GitHub authentication mode.
-    #[arg(long, value_enum, value_name = "MODE")]
-    auth_mode: Option<GithubAuthMode>,
-
-    /// Minimum required permission for the GitHub sender on the repository.
-    #[arg(long, value_enum, value_name = "PERMISSION")]
-    min_permission: Option<MinPermission>,
-
-    /// Only handle events for these repositories (repeatable), e.g. OWNER/REPO.
-    ///
-    /// If omitted, all repositories are allowed (permission checks still apply).
-    #[arg(long = "allow-repo", value_name = "OWNER/REPO")]
-    allow_repo: Vec<String>,
-
-    /// Comment prefix that triggers Codex.
-    #[arg(long, value_name = "PREFIX")]
-    command_prefix: Option<String>,
-
-    /// Delete delivery marker files older than this many days (0 disables).
-    #[arg(long, value_name = "DAYS")]
-    delivery_ttl_days: Option<u64>,
-
-    /// Delete repo caches older than this many days since last use, when no worktrees exist (0 disables).
-    #[arg(long, value_name = "DAYS")]
-    repo_ttl_days: Option<u64>,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct RepoKey {
     owner: String,
@@ -386,6 +291,408 @@ struct AppState {
     concurrency_limit: Arc<Semaphore>,
     work_locks: Arc<Mutex<HashMap<WorkKey, Arc<Mutex<()>>>>>,
     repo_locks: Arc<Mutex<HashMap<RepoKey, Arc<Mutex<()>>>>>,
+}
+
+#[derive(Clone)]
+pub struct GithubWebhook {
+    state: Arc<AppState>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubLabelSummary {
+    pub name: String,
+    pub color: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubRepoWorkItem {
+    pub repo: String,
+    pub kind: String,
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub url: String,
+    pub updated_at: String,
+    pub labels: Vec<GithubLabelSummary>,
+    pub comments: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubCodexJobOutput {
+    pub thread_id: Option<String>,
+    pub last_message: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GithubWorkItemDetail {
+    pub repo: String,
+    pub number: u64,
+    pub title: String,
+    pub state: String,
+    pub url: String,
+    pub updated_at: String,
+    pub body: String,
+}
+
+impl GithubWebhook {
+    pub fn try_from_config(
+        codex_home: &Path,
+        github_webhook: Option<&GithubWebhookToml>,
+        codex_bin: PathBuf,
+        mut codex_config_overrides: Vec<String>,
+    ) -> Result<Option<Self>> {
+        let Some(github_webhook) = github_webhook else {
+            return Ok(None);
+        };
+        if github_webhook.enabled != Some(true) {
+            return Ok(None);
+        }
+
+        let has_github_webhook_config = true;
+        let min_permission = match github_webhook.min_permission.as_deref() {
+            Some(value) => parse_min_permission_str(value)?,
+            None => MinPermission::Triage,
+        };
+        let auth_mode = github_webhook
+            .auth_mode
+            .unwrap_or(GithubWebhookAuthModeToml::Auto);
+
+        let webhook_secret_env = github_webhook
+            .webhook_secret_env
+            .clone()
+            .unwrap_or_else(|| DEFAULT_WEBHOOK_SECRET_ENV.to_string());
+        let github_token_env = github_webhook
+            .github_token_env
+            .clone()
+            .unwrap_or_else(|| DEFAULT_GITHUB_TOKEN_ENV.to_string());
+        let github_app_id_env = github_webhook
+            .github_app_id_env
+            .clone()
+            .unwrap_or_else(|| DEFAULT_GITHUB_APP_ID_ENV.to_string());
+        let github_app_private_key_env = github_webhook
+            .github_app_private_key_env
+            .clone()
+            .unwrap_or_else(|| DEFAULT_GITHUB_APP_PRIVATE_KEY_ENV.to_string());
+
+        let secret = read_env_required(&webhook_secret_env, "GitHub webhook secret")?;
+        let token = read_env_optional(&github_token_env)?.unwrap_or_default();
+        let github_app = load_github_app_credentials(
+            &github_app_id_env,
+            &github_app_private_key_env,
+            auth_mode,
+        )?;
+        if auth_mode == GithubWebhookAuthModeToml::Token && token.is_empty() {
+            anyhow::bail!("GitHub token not set: missing env {github_token_env}");
+        }
+        if auth_mode == GithubWebhookAuthModeToml::Auto && token.is_empty() && github_app.is_none()
+        {
+            anyhow::bail!(
+                "codex serve github webhook requires either env {github_token_env} or GitHub App envs {github_app_id_env} and {github_app_private_key_env}"
+            );
+        }
+
+        let enabled_sources = resolve_enabled_sources(github_webhook.sources.clone());
+        let enabled_events =
+            resolve_enabled_events(github_webhook.events.clone(), has_github_webhook_config);
+
+        let allow_repo = github_webhook.allow_repos.clone().unwrap_or_default();
+        let allow_repos = normalize_allowlist(&allow_repo);
+
+        let command_prefix = github_webhook
+            .command_prefix
+            .clone()
+            .unwrap_or_else(|| DEFAULT_COMMAND_PREFIX.to_string());
+
+        let delivery_ttl = ttl_from_days(
+            github_webhook
+                .delivery_ttl_days
+                .unwrap_or(DEFAULT_DELIVERY_TTL_DAYS),
+        );
+        let repo_ttl = ttl_from_days(
+            github_webhook
+                .repo_ttl_days
+                .unwrap_or(DEFAULT_REPO_TTL_DAYS),
+        );
+
+        codex_config_overrides.push("approval_policy=\"never\"".to_string());
+        codex_config_overrides.push("sandbox_mode=\"workspace-write\"".to_string());
+
+        let repo_root = codex_home.join("github-repos");
+        let delivery_markers_dir = codex_home.join("github").join("deliveries");
+        let thread_state_dir = codex_home.join("github").join("threads");
+
+        let state = AppState {
+            secret: Arc::new(secret.into_bytes()),
+            github_api_base_url: Arc::new(GITHUB_API_BASE_URL.to_string()),
+            github_auth: Arc::new(GithubAuthConfig {
+                mode: auth_mode,
+                static_token: Arc::new(token),
+                app: github_app,
+            }),
+            allow_repos: Arc::new(allow_repos),
+            enabled_sources: Arc::new(enabled_sources),
+            enabled_events,
+            min_permission,
+            command_prefix: Arc::new(command_prefix),
+            repo_root: Arc::new(repo_root),
+            codex_bin: Arc::new(codex_bin),
+            codex_config_overrides: Arc::new(codex_config_overrides),
+            delivery_markers_dir: Arc::new(delivery_markers_dir),
+            thread_state_dir: Arc::new(thread_state_dir),
+            delivery_ttl,
+            repo_ttl,
+            concurrency_limit: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENCY)),
+            work_locks: Arc::new(Mutex::new(HashMap::new())),
+            repo_locks: Arc::new(Mutex::new(HashMap::new())),
+        };
+
+        Ok(Some(Self {
+            state: Arc::new(state),
+        }))
+    }
+
+    pub fn spawn_gc_loop_if_needed(&self) {
+        if self.state.delivery_ttl.is_some() || self.state.repo_ttl.is_some() {
+            tokio::spawn(gc_loop(self.state.as_ref().clone()));
+        }
+    }
+
+    pub async fn handle_webhook(&self, headers: HeaderMap, body: Bytes) -> Response {
+        handle_webhook_inner(self.state.clone(), headers, body).await
+    }
+
+    pub async fn list_repo_work_items(
+        &self,
+        repo_full_name: &str,
+    ) -> Result<Vec<GithubRepoWorkItem>> {
+        let repo_full_name = repo_full_name.trim();
+        if repo_full_name.is_empty() {
+            return Ok(Vec::new());
+        }
+        let (owner, repo) = split_owner_repo(repo_full_name)?;
+        let dummy = WorkItem {
+            repo_full_name: repo_full_name.to_string(),
+            sender_login: owner.to_string(),
+            source: WebhookSource::Repo,
+            installation_id: None,
+            work: WorkKey {
+                owner: owner.to_string(),
+                repo: repo.to_string(),
+                kind: WorkKind::Issue,
+                number: 0,
+            },
+            prompt: String::new(),
+            display_target: String::new(),
+            push_ref: None,
+            push_after: None,
+            ack_target: AckTarget::None,
+            response_target: ResponseTarget::None,
+        };
+
+        let access = resolve_github_access(self.state.as_ref(), &dummy).await?;
+        let url_base = format!(
+            "{}/repos/{owner}/{repo}/issues?state=all",
+            access.github.base_url
+        );
+        let raw = access.github.list_paginated(url_base).await?;
+        let mut out = Vec::with_capacity(raw.len());
+        for v in raw {
+            match parse_repo_work_item(repo_full_name, v) {
+                Ok(item) => out.push(item),
+                Err(err) => {
+                    eprintln!("failed to parse GitHub work item in {repo_full_name}: {err:#}")
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    pub async fn fetch_work_item_detail(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+    ) -> Result<GithubWorkItemDetail> {
+        let repo_full_name = repo_full_name.trim();
+        if repo_full_name.is_empty() {
+            anyhow::bail!("missing repo");
+        }
+        let (owner, repo) = split_owner_repo(repo_full_name)?;
+        let dummy = WorkItem {
+            repo_full_name: repo_full_name.to_string(),
+            sender_login: owner.to_string(),
+            source: WebhookSource::Repo,
+            installation_id: None,
+            work: WorkKey {
+                owner: owner.to_string(),
+                repo: repo.to_string(),
+                kind: WorkKind::Issue,
+                number,
+            },
+            prompt: String::new(),
+            display_target: format!("#{number}"),
+            push_ref: None,
+            push_after: None,
+            ack_target: AckTarget::None,
+            response_target: ResponseTarget::None,
+        };
+
+        let access = resolve_github_access(self.state.as_ref(), &dummy).await?;
+        let url = format!(
+            "{}/repos/{owner}/{repo}/issues/{number}",
+            access.github.base_url
+        );
+        let v = access.github.get_json_value(url).await?;
+        let title = v.get("title").and_then(Value::as_str).unwrap_or_default();
+        let state = v.get("state").and_then(Value::as_str).unwrap_or_default();
+        let url = v
+            .get("html_url")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let updated_at = v
+            .get("updated_at")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        let body = v.get("body").and_then(Value::as_str).unwrap_or_default();
+        Ok(GithubWorkItemDetail {
+            repo: repo_full_name.to_string(),
+            number,
+            title: title.to_string(),
+            state: state.to_string(),
+            url: url.to_string(),
+            updated_at: updated_at.to_string(),
+            body: body.to_string(),
+        })
+    }
+
+    pub async fn set_work_item_state(
+        &self,
+        repo_full_name: &str,
+        number: u64,
+        state: &str,
+    ) -> Result<()> {
+        let repo_full_name = repo_full_name.trim();
+        if repo_full_name.is_empty() {
+            anyhow::bail!("missing repo");
+        }
+        let state = match state.trim().to_ascii_lowercase().as_str() {
+            "open" => "open",
+            "closed" => "closed",
+            other => anyhow::bail!("invalid issue state: {other}"),
+        };
+        let (owner, repo) = split_owner_repo(repo_full_name)?;
+        let dummy = WorkItem {
+            repo_full_name: repo_full_name.to_string(),
+            sender_login: owner.to_string(),
+            source: WebhookSource::Repo,
+            installation_id: None,
+            work: WorkKey {
+                owner: owner.to_string(),
+                repo: repo.to_string(),
+                kind: WorkKind::Issue,
+                number,
+            },
+            prompt: String::new(),
+            display_target: format!("#{number}"),
+            push_ref: None,
+            push_after: None,
+            ack_target: AckTarget::None,
+            response_target: ResponseTarget::None,
+        };
+
+        let access = resolve_github_access(self.state.as_ref(), &dummy).await?;
+        let url = format!(
+            "{}/repos/{owner}/{repo}/issues/{number}",
+            access.github.base_url
+        );
+        access
+            .github
+            .patch_json(url, serde_json::json!({ "state": state }))
+            .await
+    }
+
+    pub async fn run_codex_for_work_item(
+        &self,
+        repo_full_name: &str,
+        kind: &str,
+        number: u64,
+        prompt: String,
+        model: Option<String>,
+        reasoning_effort: Option<String>,
+        log_path: Option<std::path::PathBuf>,
+    ) -> Result<GithubCodexJobOutput> {
+        let (owner, repo) = split_owner_repo(repo_full_name)?;
+        let kind = match kind.trim().to_ascii_lowercase().as_str() {
+            "issue" => WorkKind::Issue,
+            "pull" => WorkKind::Pull,
+            other => anyhow::bail!("invalid work kind: {other}"),
+        };
+
+        let permit = self
+            .state
+            .concurrency_limit
+            .clone()
+            .try_acquire_owned()
+            .context("busy")?;
+
+        let item = WorkItem {
+            repo_full_name: repo_full_name.to_string(),
+            sender_login: owner.to_string(),
+            source: WebhookSource::Repo,
+            installation_id: None,
+            work: WorkKey {
+                owner: owner.to_string(),
+                repo: repo.to_string(),
+                kind,
+                number,
+            },
+            prompt,
+            display_target: format!("#{number}"),
+            push_ref: None,
+            push_after: None,
+            ack_target: AckTarget::None,
+            response_target: ResponseTarget::None,
+        };
+
+        let state = self.state.as_ref().clone();
+        let work_lock = {
+            let mut locks = state.work_locks.lock().await;
+            locks
+                .entry(item.work.clone())
+                .or_insert_with(|| Arc::new(Mutex::new(())))
+                .clone()
+        };
+        let _guard = work_lock.lock_owned().await;
+
+        let mut overrides = Vec::new();
+        if let Some(model) = model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            if model.contains('\"') || model.contains('\n') || model.contains('\r') {
+                anyhow::bail!("invalid model override");
+            }
+            overrides.push(format!("model=\"{model}\""));
+        }
+        if let Some(effort) = reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
+            if effort.contains('\"') || effort.contains('\n') || effort.contains('\r') {
+                anyhow::bail!("invalid reasoning effort override");
+            }
+            overrides.push(format!("model_reasoning_effort=\"{effort}\""));
+        }
+
+        let output =
+            run_work_item_inner_with_output(&state, &item, &overrides, log_path.as_deref()).await?;
+        drop(permit);
+        Ok(GithubCodexJobOutput {
+            thread_id: output.thread_id,
+            last_message: output.last_message,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
@@ -622,8 +929,9 @@ impl GithubApi {
 
     async fn list_paginated(&self, url_base: String) -> Result<Vec<Value>> {
         let mut out = Vec::new();
+        let sep = if url_base.contains('?') { '&' } else { '?' };
         for page in 1..=GITHUB_API_MAX_PAGES {
-            let url = format!("{url_base}?per_page={GITHUB_API_PER_PAGE}&page={page}");
+            let url = format!("{url_base}{sep}per_page={GITHUB_API_PER_PAGE}&page={page}");
             let batch = self.get_json_vec(url).await?;
             let n = batch.len();
             out.extend(batch);
@@ -720,6 +1028,11 @@ impl GithubApi {
         Ok(())
     }
 
+    async fn patch_json(&self, url: String, body: Value) -> Result<()> {
+        self.patch_json_value(url, body).await?;
+        Ok(())
+    }
+
     async fn post_json_value(&self, url: String, body: Value) -> Result<Value> {
         let res = self
             .client
@@ -738,10 +1051,25 @@ impl GithubApi {
         }
         serde_json::from_str(&text).context("invalid GitHub JSON")
     }
-}
 
-fn default_listen_addr() -> SocketAddr {
-    SocketAddr::from(([127, 0, 0, 1], 8787))
+    async fn patch_json_value(&self, url: String, body: Value) -> Result<Value> {
+        let res = self
+            .client
+            .patch(url)
+            .json(&body)
+            .send()
+            .await
+            .context("failed to call GitHub API")?;
+        let status = res.status();
+        let text = res.text().await.unwrap_or_default();
+        if !status.is_success() {
+            anyhow::bail!("GitHub API failed ({status}): {text}");
+        }
+        if text.trim().is_empty() {
+            return Ok(Value::Null);
+        }
+        serde_json::from_str(&text).context("invalid GitHub JSON")
+    }
 }
 
 fn parse_min_permission_str(raw: &str) -> Result<MinPermission> {
@@ -808,87 +1136,6 @@ fn resolve_enabled_events(
     enabled_events
 }
 
-async fn resolve_runtime_config(
-    cmd: &GithubCommand,
-    root_config_overrides: &CliConfigOverrides,
-    codex_home: &Path,
-) -> Result<GithubWebhookRuntimeConfig> {
-    let config_cwd = AbsolutePathBuf::current_dir()?;
-    let cli_kv_overrides = root_config_overrides
-        .parse_overrides()
-        .map_err(anyhow::Error::msg)?;
-    let config_toml =
-        load_config_as_toml_with_cli_overrides(codex_home, &config_cwd, cli_kv_overrides)
-            .await
-            .context("failed to load config.toml for codex github")?;
-    let has_github_webhook_config = config_toml.github_webhook.is_some();
-    let github_webhook = config_toml.github_webhook.unwrap_or_default();
-
-    let min_permission = match cmd.min_permission {
-        Some(value) => value,
-        None => match github_webhook.min_permission.as_deref() {
-            Some(value) => parse_min_permission_str(value)?,
-            None => MinPermission::Triage,
-        },
-    };
-
-    let auth_mode = cmd
-        .auth_mode
-        .map(Into::into)
-        .or(github_webhook.auth_mode)
-        .unwrap_or(GithubWebhookAuthModeToml::Auto);
-
-    Ok(GithubWebhookRuntimeConfig {
-        enabled: github_webhook.enabled.unwrap_or(true),
-        listen: cmd
-            .listen
-            .or(github_webhook.listen)
-            .unwrap_or_else(default_listen_addr),
-        webhook_secret_env: cmd
-            .webhook_secret_env
-            .clone()
-            .or(github_webhook.webhook_secret_env)
-            .unwrap_or_else(|| DEFAULT_WEBHOOK_SECRET_ENV.to_string()),
-        github_token_env: cmd
-            .github_token_env
-            .clone()
-            .or(github_webhook.github_token_env)
-            .unwrap_or_else(|| DEFAULT_GITHUB_TOKEN_ENV.to_string()),
-        github_app_id_env: cmd
-            .github_app_id_env
-            .clone()
-            .or(github_webhook.github_app_id_env)
-            .unwrap_or_else(|| DEFAULT_GITHUB_APP_ID_ENV.to_string()),
-        github_app_private_key_env: cmd
-            .github_app_private_key_env
-            .clone()
-            .or(github_webhook.github_app_private_key_env)
-            .unwrap_or_else(|| DEFAULT_GITHUB_APP_PRIVATE_KEY_ENV.to_string()),
-        auth_mode,
-        min_permission,
-        allow_repo: if cmd.allow_repo.is_empty() {
-            github_webhook.allow_repos.unwrap_or_default()
-        } else {
-            cmd.allow_repo.clone()
-        },
-        command_prefix: cmd
-            .command_prefix
-            .clone()
-            .or(github_webhook.command_prefix)
-            .unwrap_or_else(|| DEFAULT_COMMAND_PREFIX.to_string()),
-        delivery_ttl_days: cmd
-            .delivery_ttl_days
-            .or(github_webhook.delivery_ttl_days)
-            .unwrap_or(DEFAULT_DELIVERY_TTL_DAYS),
-        repo_ttl_days: cmd
-            .repo_ttl_days
-            .or(github_webhook.repo_ttl_days)
-            .unwrap_or(DEFAULT_REPO_TTL_DAYS),
-        enabled_sources: resolve_enabled_sources(github_webhook.sources),
-        enabled_events: resolve_enabled_events(github_webhook.events, has_github_webhook_config),
-    })
-}
-
 fn read_env_optional(env_var: &str) -> Result<Option<String>> {
     match std::env::var(env_var) {
         Ok(value) => {
@@ -941,109 +1188,6 @@ fn load_github_app_credentials(
             private_key: Arc::new(normalize_github_app_private_key(&private_key)?),
         }))),
     }
-}
-
-pub async fn run_main(cmd: GithubCommand, root_config_overrides: CliConfigOverrides) -> Result<()> {
-    run_main_with_shutdown(cmd, root_config_overrides, shutdown_signal()).await
-}
-
-async fn run_main_with_shutdown<F>(
-    cmd: GithubCommand,
-    root_config_overrides: CliConfigOverrides,
-    shutdown: F,
-) -> Result<()>
-where
-    F: std::future::Future<Output = ()> + Send + 'static,
-{
-    let codex_home = find_codex_home().context("failed to resolve CODEX_HOME")?;
-    let runtime = resolve_runtime_config(&cmd, &root_config_overrides, &codex_home).await?;
-    if !runtime.enabled {
-        anyhow::bail!("github webhook is disabled by config.toml")
-    }
-
-    let secret = read_env_required(&runtime.webhook_secret_env, "GitHub webhook secret")?;
-    let token = read_env_optional(&runtime.github_token_env)?.unwrap_or_default();
-    let github_app = load_github_app_credentials(
-        &runtime.github_app_id_env,
-        &runtime.github_app_private_key_env,
-        runtime.auth_mode,
-    )?;
-    if runtime.auth_mode == GithubWebhookAuthModeToml::Token && token.is_empty() {
-        anyhow::bail!(
-            "GitHub token not set: missing env {}",
-            runtime.github_token_env
-        );
-    }
-    if runtime.auth_mode == GithubWebhookAuthModeToml::Auto
-        && token.is_empty()
-        && github_app.is_none()
-    {
-        anyhow::bail!(
-            "codex github requires either env {} or GitHub App envs {} and {}",
-            runtime.github_token_env,
-            runtime.github_app_id_env,
-            runtime.github_app_private_key_env
-        );
-    }
-
-    let repo_root = codex_home.join("github-repos");
-    let delivery_markers_dir = codex_home.join("github").join("deliveries");
-    let thread_state_dir = codex_home.join("github").join("threads");
-    let allow_repos = normalize_allowlist(&runtime.allow_repo);
-    let codex_bin = std::env::current_exe().context("failed to resolve current executable")?;
-
-    let mut codex_config_overrides = root_config_overrides.raw_overrides;
-    codex_config_overrides.push("approval_policy=\"never\"".to_string());
-    codex_config_overrides.push("sandbox_mode=\"workspace-write\"".to_string());
-
-    let delivery_ttl = ttl_from_days(runtime.delivery_ttl_days);
-    let repo_ttl = ttl_from_days(runtime.repo_ttl_days);
-
-    let state = AppState {
-        secret: Arc::new(secret.into_bytes()),
-        github_api_base_url: Arc::new(GITHUB_API_BASE_URL.to_string()),
-        github_auth: Arc::new(GithubAuthConfig {
-            mode: runtime.auth_mode,
-            static_token: Arc::new(token),
-            app: github_app,
-        }),
-        allow_repos: Arc::new(allow_repos),
-        enabled_sources: Arc::new(runtime.enabled_sources),
-        enabled_events: runtime.enabled_events,
-        min_permission: runtime.min_permission,
-        command_prefix: Arc::new(runtime.command_prefix),
-        repo_root: Arc::new(repo_root),
-        codex_bin: Arc::new(codex_bin),
-        codex_config_overrides: Arc::new(codex_config_overrides),
-        delivery_markers_dir: Arc::new(delivery_markers_dir),
-        thread_state_dir: Arc::new(thread_state_dir),
-        delivery_ttl,
-        repo_ttl,
-        concurrency_limit: Arc::new(Semaphore::new(DEFAULT_MAX_CONCURRENCY)),
-        work_locks: Arc::new(Mutex::new(HashMap::new())),
-        repo_locks: Arc::new(Mutex::new(HashMap::new())),
-    };
-
-    if state.delivery_ttl.is_some() || state.repo_ttl.is_some() {
-        tokio::spawn(gc_loop(state.clone()));
-    }
-
-    let app = Router::new()
-        .route("/", post(handle_webhook))
-        .route("/healthz", get(healthz))
-        .with_state(state);
-
-    let listener = TcpListener::bind(runtime.listen)
-        .await
-        .with_context(|| format!("failed to bind {}", runtime.listen))?;
-
-    eprintln!("codex github listening on http://{}", runtime.listen);
-    axum::serve(listener, app.into_make_service())
-        .with_graceful_shutdown(shutdown)
-        .await
-        .context("github webhook server failed")?;
-
-    Ok(())
 }
 
 async fn gc_loop(state: AppState) {
@@ -1242,19 +1386,7 @@ async fn read_repo_last_used(repo_dir: &Path) -> Result<Option<u64>> {
     }
 }
 
-async fn shutdown_signal() {
-    let _ = tokio::signal::ctrl_c().await;
-}
-
-async fn healthz() -> impl IntoResponse {
-    (StatusCode::OK, "ok")
-}
-
-async fn handle_webhook(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> impl IntoResponse {
+async fn handle_webhook_inner(state: Arc<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     if body.len() > MAX_WEBHOOK_BYTES {
         return (StatusCode::PAYLOAD_TOO_LARGE, "payload too large").into_response();
     }
@@ -1356,7 +1488,7 @@ async fn handle_webhook(
         eprintln!("failed to post ack: {err:#}");
     }
 
-    tokio::spawn(process_work_item(state, work_item, permit));
+    tokio::spawn(process_work_item(state.as_ref().clone(), work_item, permit));
     (StatusCode::ACCEPTED, "queued").into_response()
 }
 
@@ -1398,6 +1530,70 @@ fn repo_allowed(allow_repos: &HashSet<String>, repo_full_name: &str) -> bool {
         return true;
     }
     allow_repos.contains(&normalize_repo_full_name(repo_full_name))
+}
+
+fn parse_repo_work_item(repo_full_name: &str, payload: Value) -> Result<GithubRepoWorkItem> {
+    let number = payload
+        .get("number")
+        .and_then(Value::as_u64)
+        .context("missing number")?;
+    let title = payload
+        .get("title")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let state = payload
+        .get("state")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let url = payload
+        .get("html_url")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let updated_at = payload
+        .get("updated_at")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string();
+    let comments = payload.get("comments").and_then(Value::as_u64).unwrap_or(0);
+
+    let kind = if payload.get("pull_request").is_some() {
+        "pull".to_string()
+    } else {
+        "issue".to_string()
+    };
+
+    let labels = payload
+        .get("labels")
+        .and_then(Value::as_array)
+        .map(|labels| {
+            labels
+                .iter()
+                .filter_map(|label| {
+                    let name = label.get("name")?.as_str()?;
+                    let color = label.get("color")?.as_str()?;
+                    Some(GithubLabelSummary {
+                        name: name.to_string(),
+                        color: color.to_string(),
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+
+    Ok(GithubRepoWorkItem {
+        repo: repo_full_name.to_string(),
+        kind,
+        number,
+        title,
+        state,
+        url,
+        updated_at,
+        labels,
+        comments,
+    })
 }
 
 fn generate_github_app_jwt(credentials: &GithubAppCredentials) -> Result<String> {
@@ -2068,15 +2264,33 @@ async fn process_work_item(
 }
 
 async fn process_work_item_inner(state: &AppState, item: &WorkItem) -> Result<()> {
+    let _ = run_work_item_inner_with_output(state, item, &[], None).await?;
+    Ok(())
+}
+
+async fn run_work_item_inner_with_output(
+    state: &AppState,
+    item: &WorkItem,
+    codex_config_overrides: &[String],
+    log_path: Option<&Path>,
+) -> Result<CodexOutput> {
     let access = resolve_github_access(state, item).await?;
     let work_dir = worktree_path(state, &item.work);
     ensure_repo_and_worktree(state, item, &access.github, &access.token, &work_dir).await?;
-    let output = run_codex_in_worktree_with_github(state, item, &access.github, &work_dir).await?;
+    let output = run_codex_in_worktree_with_github(
+        state,
+        item,
+        &access.github,
+        &work_dir,
+        codex_config_overrides,
+        log_path,
+    )
+    .await?;
     if let Some(thread_id) = output.thread_id.as_deref() {
         write_thread_id(state, &item.work, thread_id).await?;
     }
     post_success_with_github(&access.github, item, &output.last_message).await?;
-    Ok(())
+    Ok(output)
 }
 
 fn worktree_path(state: &AppState, key: &WorkKey) -> PathBuf {
@@ -2846,6 +3060,8 @@ async fn run_codex_in_worktree_with_github(
     item: &WorkItem,
     github: &GithubApi,
     work_dir: &Path,
+    codex_config_overrides: &[String],
+    log_path: Option<&Path>,
 ) -> Result<CodexOutput> {
     let thread_id = read_thread_id(state, &item.work).await?;
 
@@ -2924,6 +3140,9 @@ Read {GITHUB_CONTEXT_FILENAME} first, then do the command.",
     for ov in state.codex_config_overrides.iter() {
         cmd.arg("-c").arg(ov);
     }
+    for ov in codex_config_overrides {
+        cmd.arg("-c").arg(ov);
+    }
     cmd.arg("exec")
         .arg("--json")
         .arg("-C")
@@ -2939,21 +3158,48 @@ Read {GITHUB_CONTEXT_FILENAME} first, then do the command.",
     cmd.arg(prompt);
 
     cmd.kill_on_drop(true);
+    let log_file = if let Some(path) = log_path {
+        if let Some(parent) = path.parent() {
+            if let Err(err) = tokio::fs::create_dir_all(parent).await {
+                eprintln!("failed to create log dir {}: {err:#}", parent.display());
+                None
+            } else {
+                match tokio::fs::File::create(path).await {
+                    Ok(file) => Some(Arc::new(Mutex::new(file))),
+                    Err(err) => {
+                        eprintln!("failed to create log {}: {err:#}", path.display());
+                        None
+                    }
+                }
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
     let mut child = cmd
         .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
+        .stderr(if log_file.is_some() {
+            std::process::Stdio::piped()
+        } else {
+            std::process::Stdio::inherit()
+        })
         .spawn()
         .context("failed to spawn codex exec")?;
 
     let stdout = child.stdout.take().context("missing stdout")?;
     let mut reader = tokio::io::BufReader::new(stdout).lines();
+    let stderr = child.stderr.take();
+    let mut stderr_reader = stderr.map(|stderr| tokio::io::BufReader::new(stderr).lines());
     let mut observed_thread_id: Option<String> = None;
     let mut stdout_closed = false;
+    let mut stderr_closed = stderr_reader.is_none();
     let mut exit_status = None;
     let deadline = tokio::time::sleep(CODEX_EXEC_TIMEOUT);
     tokio::pin!(deadline);
 
-    while exit_status.is_none() || !stdout_closed {
+    while exit_status.is_none() || !stdout_closed || !stderr_closed {
         tokio::select! {
             _ = &mut deadline => {
                 let _ = child.kill().await;
@@ -2963,6 +3209,12 @@ Read {GITHUB_CONTEXT_FILENAME} first, then do the command.",
                 let line = line.context("failed to read codex exec stdout")?;
                 match line {
                     Some(line) => {
+                        if let Some(file) = log_file.as_ref() {
+                            let mut file = file.lock().await;
+                            if let Err(err) = file.write_all(format!("[stdout] {line}\n").as_bytes()).await {
+                                eprintln!("failed to write codex log stdout: {err:#}");
+                            }
+                        }
                         if observed_thread_id.is_none()
                             && let Ok(v) = serde_json::from_str::<Value>(&line)
                                 && v.get("type").and_then(Value::as_str) == Some("thread.started")
@@ -2972,6 +3224,26 @@ Read {GITHUB_CONTEXT_FILENAME} first, then do the command.",
                             }
                     }
                     None => stdout_closed = true,
+                }
+            }
+            line = async {
+                if let Some(stderr_reader) = stderr_reader.as_mut() {
+                    stderr_reader.next_line().await
+                } else {
+                    Ok(None)
+                }
+            }, if !stderr_closed => {
+                let line = line.context("failed to read codex exec stderr")?;
+                match line {
+                    Some(line) => {
+                        if let Some(file) = log_file.as_ref() {
+                            let mut file = file.lock().await;
+                            if let Err(err) = file.write_all(format!("[stderr] {line}\n").as_bytes()).await {
+                                eprintln!("failed to write codex log stderr: {err:#}");
+                            }
+                        }
+                    }
+                    None => stderr_closed = true,
                 }
             }
             status = child.wait(), if exit_status.is_none() => {
@@ -3007,7 +3279,7 @@ async fn run_codex_in_worktree(
     work_dir: &Path,
 ) -> Result<CodexOutput> {
     let access = resolve_github_access(state, item).await?;
-    run_codex_in_worktree_with_github(state, item, &access.github, work_dir).await
+    run_codex_in_worktree_with_github(state, item, &access.github, work_dir, &[], None).await
 }
 
 fn truncate_for_github(s: &str) -> String {
@@ -3146,7 +3418,10 @@ async fn post_success(state: &AppState, item: &WorkItem, message: &str) -> Resul
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::Router;
     use axum::extract::Query;
+    use axum::routing::get;
+    use axum::routing::post;
     use pretty_assertions::assert_eq;
     use serde_json::json;
     use std::collections::HashMap;
@@ -3154,6 +3429,7 @@ mod tests {
     use std::sync::OnceLock;
     use std::sync::atomic::AtomicUsize;
     use std::sync::atomic::Ordering;
+    use tokio::net::TcpListener;
 
     #[cfg(unix)]
     static ENV_MUTEX: OnceLock<std::sync::Mutex<()>> = OnceLock::new();
@@ -3390,14 +3666,6 @@ mod tests {
         let body = b"hello world";
         let header = HeaderValue::from_static("sha256=not-hex");
         assert!(!verify_github_signature(secret, body, Some(&header)));
-    }
-
-    #[test]
-    fn github_command_defaults_to_github_env_vars() {
-        let cmd = <GithubCommand as clap::Parser>::try_parse_from(["github"].as_ref())
-            .expect("parse should succeed");
-        assert_eq!(cmd.webhook_secret_env, None);
-        assert_eq!(cmd.github_token_env, None);
     }
 
     #[test]
@@ -4002,174 +4270,6 @@ mod tests {
         assert!(format!("{err:#}").contains("failed to create delivery marker file"));
     }
 
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn run_main_with_shutdown_serves_healthz() {
-        let temp = tempfile::tempdir().unwrap();
-        let _env = EnvSnapshot::set(&[
-            ("CODEX_HOME", temp.path().to_str().unwrap()),
-            (DEFAULT_WEBHOOK_SECRET_ENV, "sekrit"),
-            (DEFAULT_GITHUB_TOKEN_ENV, "t"),
-        ]);
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-
-        let cmd = GithubCommand {
-            listen: Some(addr),
-            webhook_secret_env: Some(DEFAULT_WEBHOOK_SECRET_ENV.to_string()),
-            github_token_env: Some(DEFAULT_GITHUB_TOKEN_ENV.to_string()),
-            github_app_id_env: None,
-            github_app_private_key_env: None,
-            auth_mode: None,
-            min_permission: Some(MinPermission::Triage),
-            allow_repo: Vec::new(),
-            command_prefix: Some(DEFAULT_COMMAND_PREFIX.to_string()),
-            delivery_ttl_days: Some(0),
-            repo_ttl_days: Some(0),
-        };
-
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(async move {
-            run_main_with_shutdown(cmd, CliConfigOverrides::default(), async move {
-                let _ = rx.await;
-            })
-            .await
-        });
-
-        let url = format!("http://{addr}/healthz");
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Ok(res) = reqwest::get(&url).await
-                    && res.status() == StatusCode::OK
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .unwrap();
-
-        let _ = tx.send(());
-        server.await.unwrap().unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn run_main_with_shutdown_spawns_gc_when_ttl_enabled() {
-        let temp = tempfile::tempdir().unwrap();
-        let _env = EnvSnapshot::set(&[
-            ("CODEX_HOME", temp.path().to_str().unwrap()),
-            (DEFAULT_WEBHOOK_SECRET_ENV, "sekrit"),
-            (DEFAULT_GITHUB_TOKEN_ENV, "t"),
-        ]);
-
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-
-        let cmd = GithubCommand {
-            listen: Some(addr),
-            webhook_secret_env: Some(DEFAULT_WEBHOOK_SECRET_ENV.to_string()),
-            github_token_env: Some(DEFAULT_GITHUB_TOKEN_ENV.to_string()),
-            github_app_id_env: None,
-            github_app_private_key_env: None,
-            auth_mode: None,
-            min_permission: Some(MinPermission::Triage),
-            allow_repo: Vec::new(),
-            command_prefix: Some(DEFAULT_COMMAND_PREFIX.to_string()),
-            delivery_ttl_days: Some(1),
-            repo_ttl_days: Some(0),
-        };
-
-        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
-        let server = tokio::spawn(async move {
-            run_main_with_shutdown(cmd, CliConfigOverrides::default(), async move {
-                let _ = rx.await;
-            })
-            .await
-        });
-
-        let url = format!("http://{addr}/healthz");
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                if let Ok(res) = reqwest::get(&url).await
-                    && res.status() == StatusCode::OK
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-        })
-        .await
-        .unwrap();
-
-        let _ = tx.send(());
-        server.await.unwrap().unwrap();
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn run_main_with_shutdown_errors_when_env_missing() {
-        let temp = tempfile::tempdir().unwrap();
-        let _env = EnvSnapshot::set(&[("CODEX_HOME", temp.path().to_str().unwrap())]);
-        unsafe {
-            std::env::remove_var(DEFAULT_WEBHOOK_SECRET_ENV);
-            std::env::remove_var(DEFAULT_GITHUB_TOKEN_ENV);
-        }
-
-        let cmd = GithubCommand {
-            listen: Some(DEFAULT_LISTEN_ADDR.parse().unwrap()),
-            webhook_secret_env: Some(DEFAULT_WEBHOOK_SECRET_ENV.to_string()),
-            github_token_env: Some(DEFAULT_GITHUB_TOKEN_ENV.to_string()),
-            github_app_id_env: None,
-            github_app_private_key_env: None,
-            auth_mode: None,
-            min_permission: Some(MinPermission::Triage),
-            allow_repo: Vec::new(),
-            command_prefix: Some(DEFAULT_COMMAND_PREFIX.to_string()),
-            delivery_ttl_days: Some(0),
-            repo_ttl_days: Some(0),
-        };
-
-        let err = run_main_with_shutdown(cmd, CliConfigOverrides::default(), async {})
-            .await
-            .unwrap_err();
-        assert!(format!("{err:#}").contains(DEFAULT_WEBHOOK_SECRET_ENV));
-    }
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn run_main_with_shutdown_errors_when_env_empty() {
-        let temp = tempfile::tempdir().unwrap();
-        let _env = EnvSnapshot::set(&[
-            ("CODEX_HOME", temp.path().to_str().unwrap()),
-            (DEFAULT_WEBHOOK_SECRET_ENV, "   "),
-            (DEFAULT_GITHUB_TOKEN_ENV, "t"),
-        ]);
-
-        let cmd = GithubCommand {
-            listen: Some(DEFAULT_LISTEN_ADDR.parse().unwrap()),
-            webhook_secret_env: Some(DEFAULT_WEBHOOK_SECRET_ENV.to_string()),
-            github_token_env: Some(DEFAULT_GITHUB_TOKEN_ENV.to_string()),
-            github_app_id_env: None,
-            github_app_private_key_env: None,
-            auth_mode: None,
-            min_permission: Some(MinPermission::Triage),
-            allow_repo: Vec::new(),
-            command_prefix: Some(DEFAULT_COMMAND_PREFIX.to_string()),
-            delivery_ttl_days: Some(0),
-            repo_ttl_days: Some(0),
-        };
-
-        let err = run_main_with_shutdown(cmd, CliConfigOverrides::default(), async {})
-            .await
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("is empty"));
-    }
-
     #[tokio::test]
     async fn resolve_github_access_token_mode_uses_configured_base_url() {
         let temp = tempfile::tempdir().unwrap();
@@ -4322,76 +4422,6 @@ gM6+LiULCYzYqcuiuKsJk6lL
         assert_eq!(access.github.base_url, format!("http://{addr}"));
 
         server.abort();
-    }
-
-    #[tokio::test]
-    async fn resolve_runtime_config_reads_github_webhook_table() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::write(
-            temp.path().join("config.toml"),
-            r#"
-[github_webhook]
-enabled = true
-listen = "127.0.0.1:9898"
-webhook_secret_env = "ALT_WEBHOOK_SECRET"
-github_token_env = "ALT_GITHUB_TOKEN"
-auth_mode = "github-app"
-min_permission = "read"
-allow_repos = ["o/r"]
-command_prefix = "/bot"
-delivery_ttl_days = 3
-repo_ttl_days = 5
-sources = ["organization", "github-app"]
-
-[github_webhook.events]
-issue_comment = false
-issues = true
-pull_request = true
-pull_request_review = false
-pull_request_review_comment = true
-push = true
-"#,
-        )
-        .unwrap();
-
-        let cmd = GithubCommand {
-            listen: None,
-            webhook_secret_env: None,
-            github_token_env: None,
-            github_app_id_env: None,
-            github_app_private_key_env: None,
-            auth_mode: None,
-            min_permission: None,
-            allow_repo: Vec::new(),
-            command_prefix: None,
-            delivery_ttl_days: None,
-            repo_ttl_days: None,
-        };
-
-        let runtime = resolve_runtime_config(&cmd, &CliConfigOverrides::default(), temp.path())
-            .await
-            .unwrap();
-
-        assert_eq!(runtime.enabled, true);
-        assert_eq!(runtime.listen.to_string(), "127.0.0.1:9898");
-        assert_eq!(runtime.webhook_secret_env, "ALT_WEBHOOK_SECRET");
-        assert_eq!(runtime.github_token_env, "ALT_GITHUB_TOKEN");
-        assert_eq!(runtime.auth_mode, GithubWebhookAuthModeToml::GithubApp);
-        assert_eq!(runtime.min_permission, MinPermission::Read);
-        assert_eq!(runtime.allow_repo, vec!["o/r".to_string()]);
-        assert_eq!(runtime.command_prefix, "/bot");
-        assert_eq!(runtime.delivery_ttl_days, 3);
-        assert_eq!(runtime.repo_ttl_days, 5);
-        assert_eq!(
-            runtime.enabled_sources,
-            HashSet::from([WebhookSource::Organization, WebhookSource::GithubApp])
-        );
-        assert_eq!(runtime.enabled_events.issue_comment, false);
-        assert_eq!(runtime.enabled_events.issues, true);
-        assert_eq!(runtime.enabled_events.pull_request, true);
-        assert_eq!(runtime.enabled_events.pull_request_review, false);
-        assert_eq!(runtime.enabled_events.pull_request_review_comment, true);
-        assert_eq!(runtime.enabled_events.push, true);
     }
 
     #[tokio::test]
@@ -4948,53 +4978,45 @@ push = true
     #[tokio::test]
     async fn handle_webhook_rejects_payload_too_large() {
         let temp = tempfile::tempdir().unwrap();
-        let state = test_state(&temp);
+        let state = Arc::new(test_state(&temp));
         let body = vec![0_u8; MAX_WEBHOOK_BYTES + 1];
-        let res = handle_webhook(State(state), HeaderMap::new(), Bytes::from(body))
-            .await
-            .into_response();
+        let res = handle_webhook_inner(state, HeaderMap::new(), Bytes::from(body)).await;
         assert_eq!(res.status(), StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     #[tokio::test]
     async fn handle_webhook_requires_event_header() {
         let temp = tempfile::tempdir().unwrap();
-        let state = test_state(&temp);
-        let res = handle_webhook(State(state), HeaderMap::new(), Bytes::from_static(b"{}"))
-            .await
-            .into_response();
+        let state = Arc::new(test_state(&temp));
+        let res = handle_webhook_inner(state, HeaderMap::new(), Bytes::from_static(b"{}")).await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn handle_webhook_requires_delivery_header() {
         let temp = tempfile::tempdir().unwrap();
-        let state = test_state(&temp);
+        let state = Arc::new(test_state(&temp));
         let mut headers = HeaderMap::new();
         headers.insert("X-GitHub-Event", HeaderValue::from_static("issue_comment"));
-        let res = handle_webhook(State(state), headers, Bytes::from_static(b"{}"))
-            .await
-            .into_response();
+        let res = handle_webhook_inner(state, headers, Bytes::from_static(b"{}")).await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn handle_webhook_rejects_missing_signature() {
         let temp = tempfile::tempdir().unwrap();
-        let state = test_state(&temp);
+        let state = Arc::new(test_state(&temp));
         let mut headers = HeaderMap::new();
         headers.insert("X-GitHub-Event", HeaderValue::from_static("issue_comment"));
         headers.insert("X-GitHub-Delivery", HeaderValue::from_static("d1"));
-        let res = handle_webhook(State(state), headers, Bytes::from_static(b"{}"))
-            .await
-            .into_response();
+        let res = handle_webhook_inner(state, headers, Bytes::from_static(b"{}")).await;
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]
     async fn handle_webhook_rejects_invalid_json() {
         let temp = tempfile::tempdir().unwrap();
-        let state = test_state(&temp);
+        let state = Arc::new(test_state(&temp));
         let body = Bytes::from_static(b"not-json");
         let header = signature_header(b"sekrit", body.as_ref());
 
@@ -5003,16 +5025,14 @@ push = true
         headers.insert("X-GitHub-Delivery", HeaderValue::from_static("d1"));
         headers.insert("X-Hub-Signature-256", header);
 
-        let res = handle_webhook(State(state), headers, body)
-            .await
-            .into_response();
+        let res = handle_webhook_inner(state, headers, body).await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn handle_webhook_rejects_invalid_payload() {
         let temp = tempfile::tempdir().unwrap();
-        let state = test_state(&temp);
+        let state = Arc::new(test_state(&temp));
         let payload = json!({
             "action": "created",
             "repository": { "full_name": "invalid" },
@@ -5028,16 +5048,14 @@ push = true
         headers.insert("X-GitHub-Delivery", HeaderValue::from_static("d1"));
         headers.insert("X-Hub-Signature-256", header);
 
-        let res = handle_webhook(State(state), headers, body)
-            .await
-            .into_response();
+        let res = handle_webhook_inner(state, headers, body).await;
         assert_eq!(res.status(), StatusCode::BAD_REQUEST);
     }
 
     #[tokio::test]
     async fn handle_webhook_ignores_when_comment_missing_prefix() {
         let temp = tempfile::tempdir().unwrap();
-        let state = test_state(&temp);
+        let state = Arc::new(test_state(&temp));
         let payload = json!({
             "action": "created",
             "repository": { "full_name": "o/r" },
@@ -5053,9 +5071,7 @@ push = true
         headers.insert("X-GitHub-Delivery", HeaderValue::from_static("d1"));
         headers.insert("X-Hub-Signature-256", header);
 
-        let res = handle_webhook(State(state), headers, body)
-            .await
-            .into_response();
+        let res = handle_webhook_inner(state, headers, body).await;
         assert_eq!(res.status(), StatusCode::ACCEPTED);
     }
 
@@ -5064,6 +5080,7 @@ push = true
         let temp = tempfile::tempdir().unwrap();
         let mut state = test_state(&temp);
         state.allow_repos = Arc::new(HashSet::from([normalize_repo_full_name("x/y")]));
+        let state = Arc::new(state);
 
         let payload = json!({
             "action": "created",
@@ -5080,9 +5097,7 @@ push = true
         headers.insert("X-GitHub-Delivery", HeaderValue::from_static("d1"));
         headers.insert("X-Hub-Signature-256", header);
 
-        let res = handle_webhook(State(state), headers, body)
-            .await
-            .into_response();
+        let res = handle_webhook_inner(state, headers, body).await;
         assert_eq!(res.status(), StatusCode::ACCEPTED);
     }
 
@@ -5099,7 +5114,7 @@ push = true
         let github =
             GithubApi::new_with_base_url("t".to_string(), format!("http://{addr}")).unwrap();
         let temp = tempfile::tempdir().unwrap();
-        let state = AppState {
+        let state = Arc::new(AppState {
             secret: Arc::new(b"sekrit".to_vec()),
             github_api_base_url: Arc::new(github.base_url.clone()),
             github_auth: test_github_auth("t"),
@@ -5118,7 +5133,7 @@ push = true
             concurrency_limit: Arc::new(Semaphore::new(2)),
             work_locks: Arc::new(Mutex::new(HashMap::new())),
             repo_locks: Arc::new(Mutex::new(HashMap::new())),
-        };
+        });
 
         let payload = json!({
             "action": "created",
@@ -5135,9 +5150,7 @@ push = true
         headers.insert("X-GitHub-Delivery", HeaderValue::from_static("d1"));
         headers.insert("X-Hub-Signature-256", header);
 
-        let res = handle_webhook(State(state), headers, Bytes::from(body))
-            .await
-            .into_response();
+        let res = handle_webhook_inner(state.clone(), headers, Bytes::from(body)).await;
         assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
         server.abort();
@@ -5190,9 +5203,7 @@ push = true
         headers.insert("X-GitHub-Delivery", HeaderValue::from_static("d1"));
         headers.insert("X-Hub-Signature-256", header);
 
-        let res = handle_webhook(State(state), headers, Bytes::from(body))
-            .await
-            .into_response();
+        let res = handle_webhook_inner(Arc::new(state), headers, Bytes::from(body)).await;
         assert_eq!(res.status(), StatusCode::INTERNAL_SERVER_ERROR);
     }
 
@@ -5258,9 +5269,7 @@ push = true
         headers.insert("X-GitHub-Delivery", HeaderValue::from_static("d1"));
         headers.insert("X-Hub-Signature-256", header);
 
-        let res = handle_webhook(State(state), headers, Bytes::from(body))
-            .await
-            .into_response();
+        let res = handle_webhook_inner(Arc::new(state), headers, Bytes::from(body)).await;
         assert_eq!(res.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert!(posted_body.lock().await.contains("busy"));
 
@@ -5316,9 +5325,7 @@ push = true
         headers.insert("X-GitHub-Delivery", HeaderValue::from_static("d1"));
         headers.insert("X-Hub-Signature-256", header);
 
-        let res = handle_webhook(State(state), headers, Bytes::from(body))
-            .await
-            .into_response();
+        let res = handle_webhook_inner(Arc::new(state), headers, Bytes::from(body)).await;
         assert_eq!(res.status(), StatusCode::ACCEPTED);
 
         server.abort();
@@ -7440,7 +7447,7 @@ push = true
             "#!/bin/sh\nset -eu\nout=\"\"\nwhile [ \"$#\" -gt 0 ]; do\n  if [ \"$1\" = \"-o\" ]; then out=\"$2\"; shift 2; continue; fi\n  shift\ndone\necho \"{\\\"type\\\":\\\"thread.started\\\",\\\"thread_id\\\":\\\"thr-1\\\"}\"\nprintf %s \"ok\" > \"$out\"\n",
         );
 
-        let state = AppState {
+        let state = Arc::new(AppState {
             secret: Arc::new(b"sekrit".to_vec()),
             github_api_base_url: Arc::new(github.base_url.clone()),
             github_auth: test_github_auth("t"),
@@ -7459,7 +7466,7 @@ push = true
             concurrency_limit: Arc::new(Semaphore::new(2)),
             work_locks: Arc::new(Mutex::new(HashMap::new())),
             repo_locks: Arc::new(Mutex::new(HashMap::new())),
-        };
+        });
 
         let payload = json!({
             "action": "created",
@@ -7476,9 +7483,7 @@ push = true
         headers.insert("X-GitHub-Delivery", HeaderValue::from_static("d1"));
         headers.insert("X-Hub-Signature-256", header);
 
-        let res = handle_webhook(State(state.clone()), headers, Bytes::from(body.clone()))
-            .await
-            .into_response();
+        let res = handle_webhook_inner(state.clone(), headers, Bytes::from(body.clone())).await;
         assert_eq!(res.status(), StatusCode::ACCEPTED);
 
         let header = signature_header(b"sekrit", &body);
@@ -7486,9 +7491,7 @@ push = true
         headers.insert("X-GitHub-Event", HeaderValue::from_static("issue_comment"));
         headers.insert("X-GitHub-Delivery", HeaderValue::from_static("d1"));
         headers.insert("X-Hub-Signature-256", header);
-        let dup = handle_webhook(State(state.clone()), headers, Bytes::from(body))
-            .await
-            .into_response();
+        let dup = handle_webhook_inner(state.clone(), headers, Bytes::from(body)).await;
         assert_eq!(dup.status(), StatusCode::ACCEPTED);
 
         tokio::time::timeout(Duration::from_secs(10), async {

@@ -23,7 +23,9 @@ base64 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 codex-core = { workspace = true }
 codex-file-search = { workspace = true }
+codex-github-webhook = { workspace = true }
 codex-protocol = { workspace = true }
+codex-utils-absolute-path = { workspace = true }
 codex-utils-cli = { workspace = true }
 codex-utils-pty = { workspace = true }
 chrono = { workspace = true }
@@ -44,3 +46,6 @@ tokio = { workspace = true, features = [
 tracing = { workspace = true }
 uuid = { workspace = true, features = ["v4"] }
 webbrowser = { workspace = true }
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
