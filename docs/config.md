@@ -111,7 +111,7 @@ disable_cron = false
 
 ## GitHub webhook
 
-`codex github` can load non-sensitive webhook defaults from the top-level `[github_webhook]` table in `~/.codex/config.toml`.
+`codex serve` can load non-sensitive webhook defaults from the top-level `[github_webhook]` table in `~/.codex/config.toml`.
 Secrets stay in environment variables; the config only stores env var names and runtime defaults.
 
 Example:
@@ -143,10 +143,12 @@ push = true
 
 Notes:
 
-- CLI flags still override config defaults.
-- If `[github_webhook]` is absent, `codex github` keeps the legacy event surface (`issue_comment`, `pull_request_review`, `pull_request_review_comment`).
+- CLI overrides still override config defaults (for example, `codex serve -c github_webhook.min_permission=write`).
+- If `[github_webhook]` is absent or `enabled = false`, the webhook route is disabled.
 - `issues`, `pull_request`, and `push` only trigger when the issue body, PR body, or head commit message explicitly starts with the configured command prefix.
 - `auth_mode = "auto"` prefers GitHub App installation tokens when available and falls back to `GITHUB_TOKEN`.
+- When running under `codex serve`, `github_webhook.listen` is ignored; the webhook is served at `POST /github/webhook` on the same host/port as `codex serve`.
+- GitHub Kanban sync uses `CODEX_HOME/github-repos.json` when present; otherwise it uses `github_webhook.allow_repos`, and if both are empty it attempts to infer a single repo from the current working directory's `git remote origin`.
 
 ## JSON Schema
 

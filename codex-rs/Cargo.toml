@@ -15,6 +15,7 @@ members = [
     "cloud-tasks",
     "cloud-tasks-client",
     "cli",
+    "github-webhook",
     "config",
     "shell-command",
     "shell-escalation",
@@ -105,6 +106,7 @@ codex-execpolicy = { path = "execpolicy" }
 codex-experimental-api-macros = { path = "codex-experimental-api-macros" }
 codex-feedback = { path = "feedback" }
 codex-file-search = { path = "file-search" }
+codex-github-webhook = { path = "github-webhook" }
 codex-git = { path = "utils/git" }
 codex-hooks = { path = "hooks" }
 codex-keyring-store = { path = "keyring-store" }

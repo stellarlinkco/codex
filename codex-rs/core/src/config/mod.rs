@@ -1177,7 +1177,7 @@ pub struct ConfigToml {
     #[serde(default)]
     pub profiles: HashMap<String, ConfigProfile>,
 
-    /// Settings for the `codex github` webhook server.
+    /// Settings for the GitHub webhook runtime (served by `codex serve` when enabled).
     pub github_webhook: Option<GithubWebhookToml>,
 
     /// Settings that govern if and what will be written to `~/.codex/history.jsonl`.

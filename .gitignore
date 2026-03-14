@@ -96,3 +96,8 @@ __pycache__/
 # harness
 
 harness-*
+
+# local dev artifacts
+.worktrees/
+run/
+tasks/

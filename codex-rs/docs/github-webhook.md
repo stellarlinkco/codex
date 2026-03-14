@@ -1,6 +1,12 @@
-# `codex github` webhook 运行说明
+# `codex serve` GitHub webhook 运行说明
 
-`codex github` 会在本地启动一个 GitHub webhook HTTP 服务，把 GitHub 事件转成工作目录里的 Codex 执行。
+当 `config.toml` 中启用 `[github_webhook] enabled = true` 时，`codex serve` 会在同一个进程/同一个端口上提供：
+
+- Web UI
+- `/api/*`
+- `POST /github/webhook`（GitHub webhook 入口）
+
+`POST /github/webhook` 不走 Web UI token 鉴权；只依赖 GitHub HMAC（`X-Hub-Signature-256`）+ allowlist + permission checks（与原 `codex github` 行为一致）。
 
 ## 支持的来源
 
@@ -47,7 +53,6 @@
 ```toml
 [github_webhook]
 enabled = true
-listen = "127.0.0.1:8787"
 webhook_secret_env = "GITHUB_WEBHOOK_SECRET"
 github_token_env = "GITHUB_TOKEN"
 github_app_id_env = "GITHUB_APP_ID"
@@ -69,7 +74,9 @@ pull_request_review_comment = true
 push = true
 ```
 
-优先级是：CLI 参数 > `config.toml` > 内置默认值。
+优先级是：CLI overrides（例如 `-c key=value`） > `config.toml` > 内置默认值。
+
+提示：GitHub Kanban 同步优先使用 `allow_repos` 作为同步目标；如果未配置，会尝试从启动 `codex serve` 的当前目录读取 `git remote origin` 推断一个 repo。
 
 ## 环境变量
 
@@ -95,7 +102,7 @@ GitHub App 模式下：
 
 ### Repo / Organization webhook
 
-- Payload URL：你的公网入口，例如 `https://example.ngrok.app/`
+- Payload URL：你的公网入口 + `/github/webhook`，例如 `https://example.ngrok.app/github/webhook`
 - Content type：`application/json`
 - Secret：与本地 `GITHUB_WEBHOOK_SECRET` 一致
 
@@ -112,7 +119,7 @@ GitHub App 模式下：
 
 GitHub App 的 webhook URL 也指向同一个公网入口，例如：
 
-- `https://example.ngrok.app/`
+- `https://example.ngrok.app/github/webhook`
 
 注意：
 
@@ -134,7 +141,7 @@ GitHub App 的 webhook URL 也指向同一个公网入口，例如：
 
 ## 运行时行为
 
-收到有效 webhook 后，`codex github` 会：
+收到有效 webhook 后，`codex serve`（内嵌 GitHub runtime）会：
 
 1. 校验 HMAC 签名
 2. 识别 webhook 来源并检查是否允许
@@ -185,7 +192,7 @@ GitHub App 的 webhook URL 也指向同一个公网入口，例如：
 ```bash
 export GITHUB_WEBHOOK_SECRET=your-secret
 export GITHUB_TOKEN=your-token
-codex github --listen 127.0.0.1:8787
+codex serve --host 127.0.0.1 --port 8787
 ```
 
 GitHub App：
@@ -195,11 +202,13 @@ export GITHUB_WEBHOOK_SECRET=your-secret
 export GITHUB_APP_ID=123456
 export GITHUB_APP_PRIVATE_KEY='-----BEGIN RSA PRIVATE KEY-----
 ...'
-codex github -c github_webhook.auth_mode="github-app"
+codex serve --host 127.0.0.1 --port 8787 -c github_webhook.auth_mode="github-app"
 ```
 
 如果你只允许某个仓库触发：
 
 ```bash
-codex github --allow-repo owner/repo
+codex serve --host 127.0.0.1 --port 8787 -c github_webhook.allow_repos='["owner/repo"]'
 ```
+
+注意：融合模式下 `github_webhook.listen` 被忽略；实际监听地址由 `codex serve --host/--port` 决定。

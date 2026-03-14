@@ -1,9 +1,11 @@
 use crate::Cli;
+use crate::kanban;
 use anyhow::Context;
 use anyhow::bail;
 use axum::Json;
 use axum::Router;
 use axum::body::Body;
+use axum::body::Bytes;
 use axum::extract::Path;
 use axum::extract::Query;
 use axum::extract::State;
@@ -19,6 +21,7 @@ use axum::response::sse::Event as SseEvent;
 use axum::response::sse::Sse;
 use axum::routing::get;
 use axum::routing::post;
+use axum::routing::put;
 use base64::Engine;
 use chrono::DateTime;
 use codex_core::AuthManager;
@@ -26,8 +29,14 @@ use codex_core::CodexThread;
 use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
+use codex_core::config::load_config_as_toml_with_cli_overrides;
+use codex_core::git_info::collect_git_info;
 use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
+use codex_core::models_manager::manager::RefreshStrategy;
 use codex_core::skills::SkillLoadOutcome;
+use codex_github_webhook::GithubCodexJobOutput;
+use codex_github_webhook::GithubRepoWorkItem as GithubRepoWorkItemRaw;
+use codex_github_webhook::GithubWebhook;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationMode;
 use codex_protocol::config_types::CollaborationModeMask;
@@ -37,6 +46,7 @@ use codex_protocol::config_types::Settings;
 use codex_protocol::custom_prompts::CustomPrompt;
 use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
@@ -48,6 +58,7 @@ use codex_protocol::protocol::SessionSource;
 use codex_protocol::request_user_input::RequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use codex_protocol::user_input::UserInput;
+use codex_utils_absolute_path::AbsolutePathBuf;
 use futures::StreamExt;
 use futures::stream;
 use include_dir::Dir;
@@ -64,12 +75,23 @@ use std::path::Path as FsPath;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncSeekExt;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use tracing::warn;
 
 static WEB_ASSETS: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/web");
+
+const GITHUB_KANBAN_FILE_NAME: &str = "github-kanban.json";
+const GITHUB_WORK_ITEMS_FILE_NAME: &str = "github-work-items.json";
+const GITHUB_REPOS_FILE_NAME: &str = "github-repos.json";
+const GITHUB_JOBS_FILE_NAME: &str = "github-jobs.json";
+const GITHUB_JOB_LOGS_DIR: &str = "github-job-logs";
+const GITHUB_JOB_LOG_MAX_BYTES: u64 = 200_000;
+const GITHUB_SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone)]
 struct AppState {
@@ -81,6 +103,13 @@ struct AppState {
     auth_manager: Arc<AuthManager>,
     thread_manager: Arc<ThreadManager>,
     sessions: Arc<RwLock<HashMap<String, Arc<ActiveSession>>>>,
+    kanban: Arc<RwLock<kanban::KanbanConfig>>,
+    github_webhook: Option<GithubWebhook>,
+    github_repos: Arc<RwLock<Vec<String>>>,
+    github_work_items: Arc<RwLock<GithubWorkItemsSnapshot>>,
+    github_kanban: Arc<RwLock<kanban::KanbanConfig>>,
+    github_jobs: Arc<RwLock<HashMap<String, GithubJob>>>,
+    github_sync_lock: Arc<Mutex<()>>,
     events_tx: broadcast::Sender<SyncEvent>,
 }
 
@@ -109,6 +138,53 @@ struct SessionState {
     agent_state: WebAgentState,
     next_seq: u64,
     messages: Vec<WebDecryptedMessage>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubLabel {
+    name: String,
+    color: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubWorkItem {
+    #[serde(rename = "workItemKey")]
+    work_item_key: String,
+    repo: String,
+    kind: String,
+    number: u64,
+    title: String,
+    state: String,
+    url: String,
+    #[serde(rename = "updatedAt")]
+    updated_at: u64,
+    labels: Vec<GithubLabel>,
+    comments: u64,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct GithubWorkItemsSnapshot {
+    fetched_at: u64,
+    items: Vec<GithubWorkItem>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubJob {
+    job_id: String,
+    #[serde(rename = "workItemKey")]
+    work_item_key: String,
+    status: String,
+    created_at: u64,
+    started_at: Option<u64>,
+    finished_at: Option<u64>,
+    last_error: Option<String>,
+    result_summary: Option<String>,
+    thread_id: Option<String>,
+    log_path: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -146,6 +222,36 @@ enum SyncEvent {
     },
     #[serde(rename = "heartbeat")]
     Heartbeat,
+    #[serde(rename = "kanban-updated")]
+    KanbanUpdated { data: JsonValue },
+    #[serde(rename = "card-moved")]
+    CardMoved {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        #[serde(rename = "columnId")]
+        column_id: String,
+        position: u32,
+    },
+    #[serde(rename = "github-work-items-updated")]
+    GithubWorkItemsUpdated,
+    #[serde(rename = "github-kanban-updated")]
+    GithubKanbanUpdated { data: JsonValue },
+    #[serde(rename = "github-card-moved")]
+    GithubCardMoved {
+        #[serde(rename = "workItemKey")]
+        work_item_key: String,
+        #[serde(rename = "columnId")]
+        column_id: String,
+        position: u32,
+    },
+    #[serde(rename = "github-job-updated")]
+    GithubJobUpdated {
+        #[serde(rename = "jobId")]
+        job_id: String,
+        #[serde(rename = "workItemKey")]
+        work_item_key: String,
+        status: String,
+    },
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -536,9 +642,11 @@ mod tests {
     use super::ReasoningSummaryConfig;
     use super::SpawnRequest;
     use super::WEB_ASSETS;
+    use super::build_router;
     use super::custom_prompts_to_slash_commands;
     use super::extract_reasoning_effort_from_history;
     use super::handle_machine_spawn;
+    use super::handle_move_kanban_card;
     use super::handle_post_message;
     use super::handle_resume_session;
     use super::handle_skills;
@@ -547,8 +655,10 @@ mod tests {
     use super::safe_join;
     use super::skills_outcome_to_summaries;
     use axum::Json;
+    use axum::body::Body;
     use axum::extract::Path;
     use axum::extract::State;
+    use axum::http::Request;
     use axum::http::StatusCode;
     use codex_core::AuthManager;
     use codex_core::ThreadManager;
@@ -578,6 +688,7 @@ mod tests {
     use std::sync::Arc;
     use tokio::sync::RwLock;
     use tokio::sync::broadcast;
+    use tower::util::ServiceExt;
 
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
@@ -671,6 +782,14 @@ mod tests {
     fn spawn_request_accepts_reasoning_effort() {
         let req: SpawnRequest =
             serde_json::from_str(r#"{"directory":"x","reasoningEffort":"high"}"#).unwrap();
+        assert_eq!(req.reasoning_effort, Some(ReasoningEffort::High));
+    }
+
+    #[test]
+    fn update_github_kanban_card_settings_request_accepts_reasoning_effort() {
+        let req: super::UpdateGithubKanbanCardSettingsRequest =
+            serde_json::from_str(r#"{"workItemKey":"owner/repo#1","reasoningEffort":"high"}"#)
+                .unwrap();
         assert_eq!(req.reasoning_effort, Some(ReasoningEffort::High));
     }
 
@@ -871,6 +990,7 @@ mod tests {
             CollaborationModesConfig::default(),
         ));
         let (events_tx, _) = broadcast::channel(64);
+        let kanban = crate::kanban::load_or_default(&config.codex_home).await;
 
         let state = AppState {
             token: Arc::new("test-token".to_string()),
@@ -881,6 +1001,13 @@ mod tests {
             auth_manager,
             thread_manager,
             sessions: Arc::new(RwLock::new(HashMap::new())),
+            kanban: Arc::new(RwLock::new(kanban)),
+            github_webhook: None,
+            github_repos: Arc::new(RwLock::new(Vec::new())),
+            github_work_items: Arc::new(RwLock::new(super::GithubWorkItemsSnapshot::default())),
+            github_kanban: Arc::new(RwLock::new(crate::kanban::KanbanConfig::default())),
+            github_jobs: Arc::new(RwLock::new(HashMap::new())),
+            github_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
             events_tx,
         };
 
@@ -980,6 +1107,184 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let _ = state.thread_manager.remove_and_close_all_threads().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn web_handlers_kanban_smoke_move_and_persist() {
+        let _lock = ENV_LOCK.lock().await;
+        codex_core::test_support::set_thread_manager_test_mode(true);
+
+        let codex_home = temp_dir("codex-home");
+        let _env = EnvVarGuard::set("CODEX_HOME", codex_home.as_path());
+
+        let base_overrides = ConfigOverrides {
+            cwd: Some(codex_home.clone()),
+            ..Default::default()
+        };
+        let config = Config::load_with_cli_overrides_and_harness_overrides(
+            Vec::new(),
+            base_overrides.clone(),
+        )
+        .await
+        .expect("load config");
+
+        let auth_manager = AuthManager::shared(
+            config.codex_home.clone(),
+            false,
+            config.cli_auth_credentials_store_mode,
+        );
+        let thread_manager = Arc::new(ThreadManager::new(
+            config.codex_home.clone(),
+            auth_manager.clone(),
+            SessionSource::Cli,
+            config.model_catalog.clone(),
+            CollaborationModesConfig::default(),
+        ));
+        let (events_tx, _) = broadcast::channel(64);
+        let kanban = crate::kanban::load_or_default(&config.codex_home).await;
+
+        let state = AppState {
+            token: Arc::new("test-token".to_string()),
+            static_dir: None,
+            config: Arc::new(config),
+            cli_overrides: Vec::new(),
+            base_overrides,
+            auth_manager,
+            thread_manager,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            kanban: Arc::new(RwLock::new(kanban)),
+            github_webhook: None,
+            github_repos: Arc::new(RwLock::new(Vec::new())),
+            github_work_items: Arc::new(RwLock::new(super::GithubWorkItemsSnapshot::default())),
+            github_kanban: Arc::new(RwLock::new(crate::kanban::KanbanConfig::default())),
+            github_jobs: Arc::new(RwLock::new(HashMap::new())),
+            github_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            events_tx,
+        };
+
+        let session_dir = temp_dir("session-cwd");
+        let spawn_req = SpawnRequest {
+            directory: session_dir.display().to_string(),
+            agent: Some("codex".to_string()),
+            model: None,
+            reasoning_effort: Some(ReasoningEffort::High),
+            yolo: Some(false),
+        };
+        let resp = handle_machine_spawn(
+            State(state.clone()),
+            Path("local".to_string()),
+            Json(spawn_req),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let session_id = state
+            .sessions
+            .read()
+            .await
+            .keys()
+            .next()
+            .cloned()
+            .expect("spawned session id");
+
+        let pos = state
+            .kanban
+            .read()
+            .await
+            .card_positions
+            .get(&session_id)
+            .cloned()
+            .expect("session added to kanban");
+        assert_eq!(pos.column_id, "backlog");
+
+        let path = codex_home.join("kanban.json");
+        assert!(tokio::fs::metadata(&path).await.is_ok());
+
+        let resp = handle_move_kanban_card(
+            State(state.clone()),
+            Path(session_id.clone()),
+            Json(super::MoveKanbanCardRequest {
+                column_id: "done".to_string(),
+                position: 0,
+            }),
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let pos = state
+            .kanban
+            .read()
+            .await
+            .card_positions
+            .get(&session_id)
+            .cloned()
+            .expect("session still present in kanban");
+        assert_eq!(pos.column_id, "done");
+
+        let _ = state.thread_manager.remove_and_close_all_threads().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn github_webhook_route_is_not_token_protected() {
+        let _lock = ENV_LOCK.lock().await;
+        codex_core::test_support::set_thread_manager_test_mode(true);
+
+        let codex_home = temp_dir("codex-home");
+        let _env = EnvVarGuard::set("CODEX_HOME", codex_home.as_path());
+
+        let base_overrides = ConfigOverrides {
+            cwd: Some(codex_home.clone()),
+            ..Default::default()
+        };
+        let config = Config::load_with_cli_overrides_and_harness_overrides(
+            Vec::new(),
+            base_overrides.clone(),
+        )
+        .await
+        .expect("load config");
+
+        let auth_manager = AuthManager::shared(
+            config.codex_home.clone(),
+            false,
+            config.cli_auth_credentials_store_mode,
+        );
+        let thread_manager = Arc::new(ThreadManager::new(
+            config.codex_home.clone(),
+            auth_manager.clone(),
+            SessionSource::Cli,
+            config.model_catalog.clone(),
+            CollaborationModesConfig::default(),
+        ));
+        let (events_tx, _) = broadcast::channel(64);
+        let kanban = crate::kanban::load_or_default(&config.codex_home).await;
+
+        let state = AppState {
+            token: Arc::new("test-token".to_string()),
+            static_dir: None,
+            config: Arc::new(config),
+            cli_overrides: Vec::new(),
+            base_overrides,
+            auth_manager,
+            thread_manager,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            kanban: Arc::new(RwLock::new(kanban)),
+            github_webhook: None,
+            github_repos: Arc::new(RwLock::new(Vec::new())),
+            github_work_items: Arc::new(RwLock::new(super::GithubWorkItemsSnapshot::default())),
+            github_kanban: Arc::new(RwLock::new(crate::kanban::KanbanConfig::default())),
+            github_jobs: Arc::new(RwLock::new(HashMap::new())),
+            github_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            events_tx,
+        };
+
+        let app = build_router(state);
+        let req = Request::builder()
+            .method("POST")
+            .uri("/github/webhook")
+            .body(Body::from("{}"))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::NOT_FOUND);
     }
 }
 
@@ -1161,17 +1466,74 @@ pub async fn run(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::
 
     let token = cli.token.unwrap_or_else(generate_token);
     let (events_tx, _) = broadcast::channel::<SyncEvent>(2048);
+    let config_cwd = AbsolutePathBuf::current_dir().context("resolve config cwd")?;
+    let config_toml = load_config_as_toml_with_cli_overrides(
+        &config.codex_home,
+        &config_cwd,
+        cli_overrides.clone(),
+    )
+    .await
+    .context("load config.toml for embedded GitHub webhook")?;
+    let github_webhook = GithubWebhook::try_from_config(
+        &config.codex_home,
+        config_toml.github_webhook.as_ref(),
+        std::env::current_exe().context("resolve current executable")?,
+        cli.config_overrides.raw_overrides.clone(),
+    )
+    .context("init embedded GitHub webhook")?;
+    if let Some(webhook) = github_webhook.as_ref() {
+        webhook.spawn_gc_loop_if_needed();
+    }
+
+    let config = Arc::new(config);
+    let kanban = kanban::load_or_default(&config.codex_home).await;
+    let github_repos = if github_webhook.is_some() {
+        let repos = load_github_repos(&config.codex_home).await;
+        if repos.is_empty() {
+            resolve_github_repos_for_kanban(&config_toml, &config_cwd).await
+        } else {
+            repos
+        }
+    } else {
+        Vec::new()
+    };
+    let github_work_items = if github_webhook.is_some() {
+        load_github_work_items_snapshot(&config.codex_home).await
+    } else {
+        GithubWorkItemsSnapshot::default()
+    };
+    let github_kanban = if github_webhook.is_some() {
+        kanban::load_or_default_from(&config.codex_home, GITHUB_KANBAN_FILE_NAME).await
+    } else {
+        kanban::KanbanConfig::default()
+    };
+    let github_jobs = if github_webhook.is_some() {
+        load_github_jobs(&config.codex_home).await
+    } else {
+        HashMap::new()
+    };
     let state = AppState {
         token: Arc::new(token.clone()),
         static_dir,
-        config: Arc::new(config),
+        config: Arc::clone(&config),
         cli_overrides,
         base_overrides,
         auth_manager,
         thread_manager,
         sessions: Arc::new(RwLock::new(HashMap::new())),
+        kanban: Arc::new(RwLock::new(kanban)),
+        github_webhook,
+        github_repos: Arc::new(RwLock::new(github_repos)),
+        github_work_items: Arc::new(RwLock::new(github_work_items)),
+        github_kanban: Arc::new(RwLock::new(github_kanban)),
+        github_jobs: Arc::new(RwLock::new(github_jobs)),
+        github_sync_lock: Arc::new(Mutex::new(())),
         events_tx,
     };
+
+    if state.github_webhook.is_some() {
+        tokio::spawn(github_sync_loop(state.clone()));
+    }
 
     let listener = TcpListener::bind(SocketAddr::new(cli.host, cli.port))
         .await
@@ -1208,6 +1570,32 @@ fn build_router(state: AppState) -> Router {
     let authed = Router::new()
         .route("/events", get(handle_events))
         .route("/sessions", get(handle_sessions))
+        .route("/kanban", get(handle_get_kanban))
+        .route("/models/catalog", get(handle_models_catalog))
+        .route("/kanban/cards/{session_id}", put(handle_move_kanban_card))
+        .route("/kanban/cards/batch", put(handle_batch_move_kanban_cards))
+        .route(
+            "/github/repos",
+            get(handle_github_repos).put(handle_set_github_repos),
+        )
+        .route("/github/work-items", get(handle_github_work_items))
+        .route(
+            "/github/work-items/detail",
+            get(handle_github_work_item_detail),
+        )
+        .route(
+            "/github/work-items/close",
+            post(handle_github_work_item_close),
+        )
+        .route("/github/sync", post(handle_github_sync))
+        .route("/github/kanban", get(handle_get_github_kanban))
+        .route("/github/kanban/cards", put(handle_move_github_kanban_card))
+        .route(
+            "/github/kanban/cards/settings",
+            put(handle_update_github_kanban_card_settings),
+        )
+        .route("/github/jobs", get(handle_github_jobs))
+        .route("/github/jobs/{job_id}/log", get(handle_github_job_log))
         .route(
             "/sessions/{id}",
             get(handle_session)
@@ -1266,6 +1654,7 @@ fn build_router(state: AppState) -> Router {
         ));
 
     Router::new()
+        .route("/github/webhook", post(handle_github_webhook))
         .route("/api/auth", post(handle_auth))
         .route("/api/bind", post(handle_bind))
         .nest("/api", authed)
@@ -1275,6 +1664,17 @@ fn build_router(state: AppState) -> Router {
         )
         .fallback(get(handle_static))
         .with_state(state)
+}
+
+async fn handle_github_webhook(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(webhook) = state.github_webhook.clone() else {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    };
+    webhook.handle_webhook(headers, body).await
 }
 
 async fn require_token(
@@ -1418,6 +1818,12 @@ fn event_matches_session(event: &SyncEvent, session_id: &str) -> bool {
         SyncEvent::MessageReceived { session_id: id, .. } => id == session_id,
         SyncEvent::ConnectionChanged { .. } => true,
         SyncEvent::Heartbeat => true,
+        SyncEvent::KanbanUpdated { .. } => false,
+        SyncEvent::CardMoved { .. } => false,
+        SyncEvent::GithubWorkItemsUpdated => false,
+        SyncEvent::GithubKanbanUpdated { .. } => false,
+        SyncEvent::GithubCardMoved { .. } => false,
+        SyncEvent::GithubJobUpdated { .. } => false,
     }
 }
 
@@ -1426,6 +1832,637 @@ fn sse_json(event: &SyncEvent) -> SseEvent {
         return SseEvent::default().data("{\"type\":\"toast\",\"data\":{\"title\":\"Serialize error\",\"body\":\"\",\"sessionId\":\"\",\"url\":\"\"}}");
     };
     SseEvent::default().data(data)
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveKanbanCardRequest {
+    column_id: String,
+    position: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchMoveKanbanCardsRequest {
+    moves: Vec<BatchMoveKanbanCard>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BatchMoveKanbanCard {
+    session_id: String,
+    column_id: String,
+    position: u32,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MoveGithubKanbanCardRequest {
+    #[serde(rename = "workItemKey")]
+    work_item_key: String,
+    column_id: String,
+    position: u32,
+    #[serde(default, rename = "promptPrefix")]
+    prompt_prefix: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<ReasoningEffort>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateGithubKanbanCardSettingsRequest {
+    #[serde(rename = "workItemKey")]
+    work_item_key: String,
+    #[serde(default, rename = "promptPrefix")]
+    prompt_prefix: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
+    #[serde(default)]
+    reasoning_effort: Option<ReasoningEffort>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelsCatalogResponse {
+    models: Vec<ModelCatalogModel>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelCatalogModel {
+    id: String,
+    display_name: String,
+    description: String,
+    is_default: bool,
+    show_in_picker: bool,
+    default_reasoning_effort: ReasoningEffort,
+    supported_reasoning_efforts: Vec<ReasoningEffortPreset>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubReposResponse {
+    repos: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SetGithubReposRequest {
+    repos: Vec<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubWorkItemDetailQuery {
+    #[serde(rename = "workItemKey")]
+    work_item_key: String,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CloseGithubWorkItemRequest {
+    #[serde(rename = "workItemKey")]
+    work_item_key: String,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct GithubJobLogResponse {
+    #[serde(rename = "jobId")]
+    job_id: String,
+    #[serde(rename = "logText")]
+    log_text: String,
+    truncated: bool,
+}
+
+async fn handle_get_kanban(State(state): State<AppState>) -> Response {
+    let mut session_ids: HashSet<String> = state.sessions.read().await.keys().cloned().collect();
+    if let Ok(page) = codex_core::RolloutRecorder::list_threads(
+        state.config.as_ref(),
+        2000,
+        None,
+        codex_core::ThreadSortKey::UpdatedAt,
+        codex_core::INTERACTIVE_SESSION_SOURCES,
+        None,
+        &state.config.model_provider_id,
+        None,
+    )
+    .await
+    {
+        for item in page.items {
+            if let Some(thread_id) = item.thread_id {
+                session_ids.insert(thread_id.to_string());
+            }
+        }
+    }
+
+    let mut kanban = state.kanban.write().await;
+    let changed = kanban.reconcile_sessions(&session_ids);
+    let snapshot = kanban.clone();
+    drop(kanban);
+
+    if changed {
+        kanban::persist(&state.config.codex_home, &snapshot).await;
+    }
+
+    Json(snapshot).into_response()
+}
+
+async fn handle_move_kanban_card(
+    State(state): State<AppState>,
+    Path(session_id): Path<String>,
+    Json(body): Json<MoveKanbanCardRequest>,
+) -> Response {
+    let mut kanban = state.kanban.write().await;
+    if !kanban.has_column(&body.column_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_error("kanban_unknown_column")),
+        )
+            .into_response();
+    }
+
+    let changed = kanban.move_card(&session_id, &body.column_id, body.position);
+    let snapshot = kanban.clone();
+    let final_position = snapshot
+        .card_positions
+        .get(&session_id)
+        .map(|pos| pos.position)
+        .unwrap_or(body.position);
+    drop(kanban);
+
+    if changed {
+        kanban::persist(&state.config.codex_home, &snapshot).await;
+        let data = serde_json::to_value(&snapshot).unwrap_or(JsonValue::Null);
+        let _ = state.events_tx.send(SyncEvent::KanbanUpdated { data });
+        let _ = state.events_tx.send(SyncEvent::CardMoved {
+            session_id,
+            column_id: body.column_id,
+            position: final_position,
+        });
+    }
+
+    Json(serde_json::json!({})).into_response()
+}
+
+async fn handle_batch_move_kanban_cards(
+    State(state): State<AppState>,
+    Json(body): Json<BatchMoveKanbanCardsRequest>,
+) -> Response {
+    let moves: Vec<(String, kanban::CardPosition)> = body
+        .moves
+        .into_iter()
+        .map(|m| {
+            (
+                m.session_id,
+                kanban::CardPosition {
+                    column_id: m.column_id,
+                    position: m.position,
+                },
+            )
+        })
+        .collect();
+
+    let mut kanban = state.kanban.write().await;
+    let changed = kanban.apply_moves(&moves);
+    let snapshot = kanban.clone();
+    drop(kanban);
+
+    if changed {
+        kanban::persist(&state.config.codex_home, &snapshot).await;
+        let data = serde_json::to_value(&snapshot).unwrap_or(JsonValue::Null);
+        let _ = state.events_tx.send(SyncEvent::KanbanUpdated { data });
+    }
+
+    Json(serde_json::json!({})).into_response()
+}
+
+async fn handle_github_repos(State(state): State<AppState>) -> Response {
+    if state.github_webhook.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("github_not_enabled")),
+        )
+            .into_response();
+    }
+    let repos = state.github_repos.read().await.clone();
+    Json(GithubReposResponse { repos }).into_response()
+}
+
+async fn handle_set_github_repos(
+    State(state): State<AppState>,
+    Json(body): Json<SetGithubReposRequest>,
+) -> Response {
+    if state.github_webhook.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("github_not_enabled")),
+        )
+            .into_response();
+    }
+    let repos = normalize_github_repos(body.repos);
+    persist_github_repos(&state.config.codex_home, &repos).await;
+    {
+        let mut guard = state.github_repos.write().await;
+        *guard = repos;
+    }
+    {
+        let _guard = state.github_sync_lock.lock().await;
+        if let Err(err) = sync_github_work_items(&state).await {
+            warn!("github sync after repos update failed: {err:#}");
+        }
+    }
+    Json(serde_json::json!({})).into_response()
+}
+
+async fn handle_github_work_items(State(state): State<AppState>) -> Response {
+    if state.github_webhook.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("github_not_enabled")),
+        )
+            .into_response();
+    }
+    let snapshot = state.github_work_items.read().await.clone();
+    Json(snapshot).into_response()
+}
+
+async fn handle_github_work_item_detail(
+    State(state): State<AppState>,
+    Query(q): Query<GithubWorkItemDetailQuery>,
+) -> Response {
+    let Some(webhook) = state.github_webhook.as_ref() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("github_not_enabled")),
+        )
+            .into_response();
+    };
+    let work_item_key = q.work_item_key.trim().to_string();
+    let Some((repo, number, _kind)) = parse_github_work_item_key(&work_item_key) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_error("github_invalid_work_item_key")),
+        )
+            .into_response();
+    };
+
+    match webhook.fetch_work_item_detail(&repo, number).await {
+        Ok(detail) => Json(detail).into_response(),
+        Err(err) => {
+            warn!("failed to fetch github work item detail for {work_item_key}: {err:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json_error("github_detail_failed")),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn handle_github_work_item_close(
+    State(state): State<AppState>,
+    Json(body): Json<CloseGithubWorkItemRequest>,
+) -> Response {
+    let Some(webhook) = state.github_webhook.as_ref() else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("github_not_enabled")),
+        )
+            .into_response();
+    };
+    let work_item_key = body.work_item_key.trim().to_string();
+    let Some((repo, number, _kind)) = parse_github_work_item_key(&work_item_key) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_error("github_invalid_work_item_key")),
+        )
+            .into_response();
+    };
+
+    if let Err(err) = webhook.set_work_item_state(&repo, number, "closed").await {
+        warn!("failed to close github work item {work_item_key}: {err:#}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json_error("github_close_failed")),
+        )
+            .into_response();
+    }
+
+    // Best-effort sync so the board reflects the new state quickly.
+    {
+        let _guard = state.github_sync_lock.lock().await;
+        if let Err(err) = sync_github_work_items(&state).await {
+            warn!("github sync after close failed: {err:#}");
+        }
+    }
+    Json(serde_json::json!({})).into_response()
+}
+
+async fn handle_github_jobs(State(state): State<AppState>) -> Response {
+    if state.github_webhook.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("github_not_enabled")),
+        )
+            .into_response();
+    }
+    let jobs = state.github_jobs.read().await;
+    let mut out: Vec<GithubJob> = jobs.values().cloned().collect();
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Json(serde_json::json!({ "jobs": out })).into_response()
+}
+
+async fn handle_github_job_log(
+    State(state): State<AppState>,
+    Path(job_id): Path<String>,
+) -> Response {
+    if state.github_webhook.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("github_not_enabled")),
+        )
+            .into_response();
+    }
+
+    let job = {
+        let jobs = state.github_jobs.read().await;
+        jobs.get(job_id.trim()).cloned()
+    };
+    let Some(job) = job else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("github_job_not_found")),
+        )
+            .into_response();
+    };
+    let Some(rel) = job.log_path.clone() else {
+        return (StatusCode::NOT_FOUND, Json(json_error("github_job_no_log"))).into_response();
+    };
+
+    let path = match safe_join(&state.config.codex_home, &rel) {
+        Ok(path) => path,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json_error("github_job_log_path_invalid")),
+            )
+                .into_response();
+        }
+    };
+
+    match tokio::fs::metadata(&path).await {
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json_error("github_job_log_not_found")),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            warn!(
+                "failed to stat github job log for {} at {}: {err}",
+                job.job_id,
+                path.display()
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json_error("github_job_log_read_failed")),
+            )
+                .into_response();
+        }
+    }
+
+    match read_tail_file(&path, GITHUB_JOB_LOG_MAX_BYTES).await {
+        Ok((log_text, truncated)) => Json(GithubJobLogResponse {
+            job_id: job.job_id,
+            log_text,
+            truncated,
+        })
+        .into_response(),
+        Err(err) => {
+            warn!("failed to read github job log for {}: {err:#}", job.job_id);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json_error("github_job_log_read_failed")),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn handle_github_sync(State(state): State<AppState>) -> Response {
+    if state.github_webhook.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("github_not_enabled")),
+        )
+            .into_response();
+    }
+    if state.github_repos.read().await.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_error("github_no_repos_configured")),
+        )
+            .into_response();
+    }
+    let _guard = state.github_sync_lock.lock().await;
+    if let Err(err) = sync_github_work_items(&state).await {
+        warn!("github sync failed: {err:#}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json_error("github_sync_failed")),
+        )
+            .into_response();
+    }
+    Json(serde_json::json!({})).into_response()
+}
+
+async fn handle_update_github_kanban_card_settings(
+    State(state): State<AppState>,
+    Json(body): Json<UpdateGithubKanbanCardSettingsRequest>,
+) -> Response {
+    if state.github_webhook.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("github_not_enabled")),
+        )
+            .into_response();
+    }
+    let work_item_key = body.work_item_key.trim().to_string();
+    if work_item_key.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_error("github_invalid_work_item_key")),
+        )
+            .into_response();
+    }
+
+    let prompt_prefix = normalize_optional_text(body.prompt_prefix.as_deref());
+    let model = normalize_optional_text(body.model.as_deref());
+    let reasoning_effort = body.reasoning_effort;
+
+    let mut kanban = state.github_kanban.write().await;
+    let mut changed = false;
+    let current = kanban
+        .card_settings
+        .get(&work_item_key)
+        .cloned()
+        .unwrap_or_default();
+    let next = kanban::KanbanCardSettings {
+        prompt_prefix,
+        model,
+        reasoning_effort,
+    };
+    if current != next {
+        changed = true;
+        if next.prompt_prefix.is_none() && next.model.is_none() && next.reasoning_effort.is_none() {
+            kanban.card_settings.remove(&work_item_key);
+        } else {
+            kanban.card_settings.insert(work_item_key.clone(), next);
+        }
+    }
+    let snapshot = kanban.clone();
+    drop(kanban);
+
+    if changed {
+        kanban::persist_to(&state.config.codex_home, GITHUB_KANBAN_FILE_NAME, &snapshot).await;
+        let data = serde_json::to_value(&snapshot).unwrap_or(JsonValue::Null);
+        let _ = state
+            .events_tx
+            .send(SyncEvent::GithubKanbanUpdated { data });
+    }
+
+    Json(serde_json::json!({})).into_response()
+}
+
+async fn handle_get_github_kanban(State(state): State<AppState>) -> Response {
+    if state.github_webhook.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("github_not_enabled")),
+        )
+            .into_response();
+    }
+    let keys: HashSet<String> = state
+        .github_work_items
+        .read()
+        .await
+        .items
+        .iter()
+        .map(|i| i.work_item_key.clone())
+        .collect();
+
+    let mut kanban = state.github_kanban.write().await;
+    let changed = kanban.reconcile_sessions(&keys);
+    let snapshot = kanban.clone();
+    drop(kanban);
+    if changed {
+        kanban::persist_to(&state.config.codex_home, GITHUB_KANBAN_FILE_NAME, &snapshot).await;
+    }
+    Json(snapshot).into_response()
+}
+
+async fn handle_move_github_kanban_card(
+    State(state): State<AppState>,
+    Json(body): Json<MoveGithubKanbanCardRequest>,
+) -> Response {
+    if state.github_webhook.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("github_not_enabled")),
+        )
+            .into_response();
+    }
+    let work_item_key = body.work_item_key.trim().to_string();
+    if work_item_key.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_error("github_invalid_work_item_key")),
+        )
+            .into_response();
+    }
+
+    let mut kanban = state.github_kanban.write().await;
+    if !kanban.has_column(&body.column_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_error("kanban_unknown_column")),
+        )
+            .into_response();
+    }
+    let mut settings_changed = false;
+    let prompt_prefix = normalize_optional_text(body.prompt_prefix.as_deref());
+    let model = normalize_optional_text(body.model.as_deref());
+    if body.prompt_prefix.is_some() || body.model.is_some() || body.reasoning_effort.is_some() {
+        let current = kanban
+            .card_settings
+            .get(&work_item_key)
+            .cloned()
+            .unwrap_or_default();
+        let mut next = current.clone();
+        if body.prompt_prefix.is_some() {
+            next.prompt_prefix = prompt_prefix;
+        }
+        if body.model.is_some() {
+            next.model = model;
+        }
+        if body.reasoning_effort.is_some() {
+            next.reasoning_effort = body.reasoning_effort;
+        }
+        if next != current {
+            settings_changed = true;
+            if next.prompt_prefix.is_none()
+                && next.model.is_none()
+                && next.reasoning_effort.is_none()
+            {
+                kanban.card_settings.remove(&work_item_key);
+            } else {
+                kanban.card_settings.insert(work_item_key.clone(), next);
+            }
+        }
+    }
+    let prev_col = kanban
+        .card_positions
+        .get(&work_item_key)
+        .map(|pos| pos.column_id.clone());
+    let changed = kanban.move_card(&work_item_key, &body.column_id, body.position);
+    let run_settings = kanban
+        .card_settings
+        .get(&work_item_key)
+        .cloned()
+        .unwrap_or_default();
+    let snapshot = kanban.clone();
+    let final_position = snapshot
+        .card_positions
+        .get(&work_item_key)
+        .map(|pos| pos.position)
+        .unwrap_or(body.position);
+    drop(kanban);
+
+    if changed || settings_changed {
+        kanban::persist_to(&state.config.codex_home, GITHUB_KANBAN_FILE_NAME, &snapshot).await;
+        let data = serde_json::to_value(&snapshot).unwrap_or(JsonValue::Null);
+        let _ = state
+            .events_tx
+            .send(SyncEvent::GithubKanbanUpdated { data });
+        let _ = state.events_tx.send(SyncEvent::GithubCardMoved {
+            work_item_key: work_item_key.clone(),
+            column_id: body.column_id.clone(),
+            position: final_position,
+        });
+    }
+
+    if changed && body.column_id == "in-progress" && prev_col.as_deref() != Some("in-progress") {
+        if let Err(err) = enqueue_github_job(&state, &work_item_key, run_settings).await {
+            warn!("failed to enqueue github job for {work_item_key}: {err:#}");
+        }
+    }
+
+    Json(serde_json::json!({})).into_response()
 }
 
 async fn handle_sessions(State(state): State<AppState>) -> Response {
@@ -1730,6 +2767,18 @@ async fn handle_resume_session(State(state): State<AppState>, Path(id): Path<Str
         session_id.clone(),
         session,
     ));
+
+    {
+        let mut kanban = state.kanban.write().await;
+        let changed = kanban.ensure_session(&session_id);
+        let snapshot = kanban.clone();
+        drop(kanban);
+        if changed {
+            kanban::persist(&state.config.codex_home, &snapshot).await;
+            let data = serde_json::to_value(&snapshot).unwrap_or(JsonValue::Null);
+            let _ = state.events_tx.send(SyncEvent::KanbanUpdated { data });
+        }
+    }
     let _ = state.events_tx.send(SyncEvent::SessionUpdated {
         session_id: session_id.clone(),
         data: None,
@@ -1773,9 +2822,21 @@ async fn handle_archive_session(State(state): State<AppState>, Path(id): Path<St
     let _ = tokio::fs::rename(&path, &dest).await;
 
     state.sessions.write().await.remove(&id);
-    let _ = state
-        .events_tx
-        .send(SyncEvent::SessionRemoved { session_id: id });
+    let _ = state.events_tx.send(SyncEvent::SessionRemoved {
+        session_id: id.clone(),
+    });
+
+    {
+        let mut kanban = state.kanban.write().await;
+        let changed = kanban.remove_session(&id);
+        let snapshot = kanban.clone();
+        drop(kanban);
+        if changed {
+            kanban::persist(&state.config.codex_home, &snapshot).await;
+            let data = serde_json::to_value(&snapshot).unwrap_or(JsonValue::Null);
+            let _ = state.events_tx.send(SyncEvent::KanbanUpdated { data });
+        }
+    }
     Json(serde_json::json!({})).into_response()
 }
 
@@ -1798,9 +2859,21 @@ async fn handle_delete_session(State(state): State<AppState>, Path(id): Path<Str
         let _ = tokio::fs::remove_file(path).await;
     }
 
-    let _ = state
-        .events_tx
-        .send(SyncEvent::SessionRemoved { session_id: id });
+    let _ = state.events_tx.send(SyncEvent::SessionRemoved {
+        session_id: id.clone(),
+    });
+
+    {
+        let mut kanban = state.kanban.write().await;
+        let changed = kanban.remove_session(&id);
+        let snapshot = kanban.clone();
+        drop(kanban);
+        if changed {
+            kanban::persist(&state.config.codex_home, &snapshot).await;
+            let data = serde_json::to_value(&snapshot).unwrap_or(JsonValue::Null);
+            let _ = state.events_tx.send(SyncEvent::KanbanUpdated { data });
+        }
+    }
     Json(serde_json::json!({})).into_response()
 }
 
@@ -2355,6 +3428,18 @@ async fn handle_machine_spawn(
         session_id.clone(),
         session,
     ));
+
+    {
+        let mut kanban = state.kanban.write().await;
+        let changed = kanban.ensure_session(&session_id);
+        let snapshot = kanban.clone();
+        drop(kanban);
+        if changed {
+            kanban::persist(&state.config.codex_home, &snapshot).await;
+            let data = serde_json::to_value(&snapshot).unwrap_or(JsonValue::Null);
+            let _ = state.events_tx.send(SyncEvent::KanbanUpdated { data });
+        }
+    }
 
     let _ = state.events_tx.send(SyncEvent::SessionAdded {
         session_id: session_id.clone(),
@@ -3319,6 +4404,423 @@ fn parse_rfc3339_ms(input: &str) -> Option<u64> {
     Some(dt.timestamp_millis() as u64)
 }
 
+fn parse_repo_full_name_from_git_remote_url(input: &str) -> Option<String> {
+    let input = input.trim();
+    if input.is_empty() {
+        return None;
+    }
+
+    let path = if let Some((_, rest)) = input.split_once("://") {
+        // scheme://[userinfo@]host[:port]/owner/repo(.git)
+        let (_, rest) = rest.split_once('/')?;
+        rest
+    } else if let Some((_, rest)) = input.split_once('@') {
+        // scp-like: user@host:owner/repo(.git)
+        let (_, rest) = rest.rsplit_once(':')?;
+        rest
+    } else {
+        return None;
+    };
+
+    let path = path.trim().trim_start_matches('/').trim_end_matches('/');
+    let path = path.strip_suffix(".git").unwrap_or(path);
+    let mut parts = path.split('/').filter(|p| !p.trim().is_empty());
+    let owner = parts.next()?.trim();
+    let repo = parts.next()?.trim();
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+    Some(format!("{owner}/{repo}"))
+}
+
+async fn resolve_github_repos_for_kanban(
+    config_toml: &codex_core::config::ConfigToml,
+    config_cwd: &AbsolutePathBuf,
+) -> Vec<String> {
+    let allow_repos = config_toml
+        .github_webhook
+        .as_ref()
+        .and_then(|cfg| cfg.allow_repos.clone())
+        .unwrap_or_default();
+    if !allow_repos.is_empty() {
+        return allow_repos;
+    }
+
+    let git_info = collect_git_info(config_cwd.as_path()).await;
+    let Some(remote_url) = git_info.and_then(|info| info.repository_url) else {
+        return Vec::new();
+    };
+    let Some(repo) = parse_repo_full_name_from_git_remote_url(&remote_url) else {
+        warn!("unable to parse repo from git remote: {remote_url}");
+        return Vec::new();
+    };
+    vec![repo]
+}
+
+fn github_work_item_key(repo: &str, number: u64, kind: &str) -> String {
+    format!("{repo}#{number}:{kind}")
+}
+
+fn parse_github_work_item_key(key: &str) -> Option<(String, u64, String)> {
+    let key = key.trim();
+    if key.is_empty() {
+        return None;
+    }
+    let (repo, rest) = key.split_once('#')?;
+    let (number, kind) = rest.split_once(':')?;
+    let repo = repo.trim();
+    let kind = kind.trim().to_ascii_lowercase();
+    if repo.is_empty() || kind.is_empty() {
+        return None;
+    }
+    let number = number.trim().parse::<u64>().ok()?;
+    Some((repo.to_string(), number, kind))
+}
+
+fn convert_work_item(raw: GithubRepoWorkItemRaw) -> GithubWorkItem {
+    GithubWorkItem {
+        work_item_key: github_work_item_key(&raw.repo, raw.number, &raw.kind),
+        repo: raw.repo,
+        kind: raw.kind,
+        number: raw.number,
+        title: raw.title,
+        state: raw.state,
+        url: raw.url,
+        updated_at: parse_rfc3339_ms(&raw.updated_at).unwrap_or(0),
+        labels: raw
+            .labels
+            .into_iter()
+            .map(|l| GithubLabel {
+                name: l.name,
+                color: l.color,
+            })
+            .collect(),
+        comments: raw.comments,
+    }
+}
+
+async fn load_github_work_items_snapshot(codex_home: &FsPath) -> GithubWorkItemsSnapshot {
+    let path = codex_home.join(GITHUB_WORK_ITEMS_FILE_NAME);
+    let content = match tokio::fs::read(&path).await {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return GithubWorkItemsSnapshot::default();
+        }
+        Err(err) => {
+            warn!("failed to read {GITHUB_WORK_ITEMS_FILE_NAME}: {err}");
+            return GithubWorkItemsSnapshot::default();
+        }
+    };
+    match serde_json::from_slice::<GithubWorkItemsSnapshot>(&content) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            warn!("failed to parse {GITHUB_WORK_ITEMS_FILE_NAME}: {err}");
+            GithubWorkItemsSnapshot::default()
+        }
+    }
+}
+
+async fn persist_github_work_items_snapshot(
+    codex_home: &FsPath,
+    snapshot: &GithubWorkItemsSnapshot,
+) {
+    if let Err(err) = tokio::fs::create_dir_all(codex_home).await {
+        warn!("failed to create codex home dir for {GITHUB_WORK_ITEMS_FILE_NAME}: {err}");
+        return;
+    }
+    let path = codex_home.join(GITHUB_WORK_ITEMS_FILE_NAME);
+    let tmp_path = path.with_extension("json.tmp");
+    let mut body = match serde_json::to_vec_pretty(snapshot) {
+        Ok(body) => body,
+        Err(err) => {
+            warn!("failed to serialize {GITHUB_WORK_ITEMS_FILE_NAME}: {err}");
+            return;
+        }
+    };
+    body.push(b'\n');
+    if let Err(err) = tokio::fs::write(&tmp_path, body).await {
+        warn!("failed to write {GITHUB_WORK_ITEMS_FILE_NAME} tmp: {err}");
+        return;
+    }
+    if let Err(_err) = tokio::fs::rename(&tmp_path, &path).await {
+        let _ = tokio::fs::remove_file(&path).await;
+        if let Err(err) = tokio::fs::rename(&tmp_path, &path).await {
+            warn!("failed to persist {GITHUB_WORK_ITEMS_FILE_NAME}: {err}");
+        }
+    }
+}
+
+async fn load_github_jobs(codex_home: &FsPath) -> HashMap<String, GithubJob> {
+    let path = codex_home.join(GITHUB_JOBS_FILE_NAME);
+    let content = match tokio::fs::read(&path).await {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return HashMap::new(),
+        Err(err) => {
+            warn!("failed to read {GITHUB_JOBS_FILE_NAME}: {err}");
+            return HashMap::new();
+        }
+    };
+    match serde_json::from_slice::<Vec<GithubJob>>(&content) {
+        Ok(list) => list.into_iter().map(|j| (j.job_id.clone(), j)).collect(),
+        Err(err) => {
+            warn!("failed to parse {GITHUB_JOBS_FILE_NAME}: {err}");
+            HashMap::new()
+        }
+    }
+}
+
+async fn persist_github_jobs(codex_home: &FsPath, jobs: &HashMap<String, GithubJob>) {
+    if let Err(err) = tokio::fs::create_dir_all(codex_home).await {
+        warn!("failed to create codex home dir for {GITHUB_JOBS_FILE_NAME}: {err}");
+        return;
+    }
+    let mut list: Vec<GithubJob> = jobs.values().cloned().collect();
+    list.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    let path = codex_home.join(GITHUB_JOBS_FILE_NAME);
+    let tmp_path = path.with_extension("json.tmp");
+    let mut body = match serde_json::to_vec_pretty(&list) {
+        Ok(body) => body,
+        Err(err) => {
+            warn!("failed to serialize {GITHUB_JOBS_FILE_NAME}: {err}");
+            return;
+        }
+    };
+    body.push(b'\n');
+    if let Err(err) = tokio::fs::write(&tmp_path, body).await {
+        warn!("failed to write {GITHUB_JOBS_FILE_NAME} tmp: {err}");
+        return;
+    }
+    if let Err(_err) = tokio::fs::rename(&tmp_path, &path).await {
+        let _ = tokio::fs::remove_file(&path).await;
+        if let Err(err) = tokio::fs::rename(&tmp_path, &path).await {
+            warn!("failed to persist {GITHUB_JOBS_FILE_NAME}: {err}");
+        }
+    }
+}
+
+async fn sync_github_work_items(state: &AppState) -> anyhow::Result<()> {
+    let Some(webhook) = state.github_webhook.as_ref() else {
+        return Ok(());
+    };
+    let repos = state.github_repos.read().await.clone();
+    if repos.is_empty() {
+        return Ok(());
+    }
+
+    let mut all = Vec::new();
+    for repo in repos.iter() {
+        let items = webhook.list_repo_work_items(repo).await?;
+        all.extend(items);
+    }
+
+    let mut by_key: HashMap<String, GithubWorkItem> = HashMap::new();
+    for raw in all {
+        let item = convert_work_item(raw);
+        by_key.insert(item.work_item_key.clone(), item);
+    }
+    let mut items: Vec<GithubWorkItem> = by_key.into_values().collect();
+    items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let snapshot = GithubWorkItemsSnapshot {
+        fetched_at: now_ms(),
+        items,
+    };
+
+    *state.github_work_items.write().await = snapshot.clone();
+    persist_github_work_items_snapshot(&state.config.codex_home, &snapshot).await;
+    let _ = state.events_tx.send(SyncEvent::GithubWorkItemsUpdated);
+    Ok(())
+}
+
+async fn github_sync_loop(state: AppState) {
+    {
+        let _guard = state.github_sync_lock.lock().await;
+        if let Err(err) = sync_github_work_items(&state).await {
+            warn!("github sync failed: {err:#}");
+        }
+    }
+
+    let mut interval = tokio::time::interval(GITHUB_SYNC_INTERVAL);
+    interval.tick().await;
+    loop {
+        interval.tick().await;
+        let _guard = state.github_sync_lock.lock().await;
+        if let Err(err) = sync_github_work_items(&state).await {
+            warn!("github sync failed: {err:#}");
+        }
+    }
+}
+
+async fn enqueue_github_job(
+    state: &AppState,
+    work_item_key: &str,
+    run_settings: kanban::KanbanCardSettings,
+) -> anyhow::Result<()> {
+    let work_item_key = work_item_key.trim().to_string();
+    let Some(webhook) = state.github_webhook.clone() else {
+        anyhow::bail!("github not enabled");
+    };
+    let Some((repo, number, kind)) = parse_github_work_item_key(&work_item_key) else {
+        anyhow::bail!("invalid work item key: {work_item_key}");
+    };
+
+    let snapshot = state.github_work_items.read().await;
+    let Some(item) = snapshot
+        .items
+        .iter()
+        .find(|i| i.work_item_key == work_item_key)
+    else {
+        return Ok(());
+    };
+    if !item.state.eq_ignore_ascii_case("open") {
+        return Ok(());
+    }
+    let title = item.title.clone();
+    drop(snapshot);
+
+    let base_prompt = if title.is_empty() {
+        format!("Work on {repo} {kind} #{number}.")
+    } else {
+        format!("Work on {repo} {kind} #{number}: {title}")
+    };
+    let prompt = run_settings
+        .prompt_prefix
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|prefix| format!("{prefix}\n\n{base_prompt}"))
+        .unwrap_or(base_prompt);
+
+    let job_id = uuid::Uuid::new_v4().to_string();
+    let created_at = now_ms();
+    let log_rel = format!("{GITHUB_JOB_LOGS_DIR}/{job_id}.log");
+    let log_path = safe_join(&state.config.codex_home, &log_rel).ok();
+    {
+        let mut jobs = state.github_jobs.write().await;
+        jobs.insert(
+            job_id.clone(),
+            GithubJob {
+                job_id: job_id.clone(),
+                work_item_key: work_item_key.clone(),
+                status: "queued".to_string(),
+                created_at,
+                started_at: None,
+                finished_at: None,
+                last_error: None,
+                result_summary: None,
+                thread_id: None,
+                log_path: Some(log_rel),
+            },
+        );
+        persist_github_jobs(&state.config.codex_home, &jobs).await;
+    }
+    let _ = state.events_tx.send(SyncEvent::GithubJobUpdated {
+        job_id: job_id.clone(),
+        work_item_key: work_item_key.clone(),
+        status: "queued".to_string(),
+    });
+
+    let jobs = Arc::clone(&state.github_jobs);
+    let events_tx = state.events_tx.clone();
+    let codex_home = state.config.codex_home.clone();
+    let work_item_key = work_item_key.clone();
+    let model = run_settings.model.clone();
+    let reasoning_effort = run_settings
+        .reasoning_effort
+        .map(|effort| effort.to_string());
+    tokio::spawn(async move {
+        {
+            let mut map = jobs.write().await;
+            if let Some(job) = map.get_mut(&job_id) {
+                job.status = "running".to_string();
+                job.started_at = Some(now_ms());
+            }
+            persist_github_jobs(&codex_home, &map).await;
+        }
+        let _ = events_tx.send(SyncEvent::GithubJobUpdated {
+            job_id: job_id.clone(),
+            work_item_key: work_item_key.clone(),
+            status: "running".to_string(),
+        });
+
+        let result: anyhow::Result<GithubCodexJobOutput> = webhook
+            .run_codex_for_work_item(
+                &repo,
+                &kind,
+                number,
+                prompt,
+                model,
+                reasoning_effort,
+                log_path,
+            )
+            .await
+            .map_err(Into::into);
+
+        {
+            let mut map = jobs.write().await;
+            if let Some(job) = map.get_mut(&job_id) {
+                job.finished_at = Some(now_ms());
+                match result {
+                    Ok(output) => {
+                        job.status = "succeeded".to_string();
+                        job.thread_id = output.thread_id.clone();
+                        job.result_summary = Some(truncate_summary(&output.last_message, 280));
+                    }
+                    Err(err) => {
+                        job.status = "failed".to_string();
+                        job.last_error = Some(truncate_summary(&format!("{err:#}"), 400));
+                    }
+                }
+            }
+            persist_github_jobs(&codex_home, &map).await;
+        }
+
+        let final_status = {
+            let map = jobs.read().await;
+            map.get(&job_id)
+                .map(|j| j.status.clone())
+                .unwrap_or_else(|| "unknown".to_string())
+        };
+        let _ = events_tx.send(SyncEvent::GithubJobUpdated {
+            job_id,
+            work_item_key: work_item_key.clone(),
+            status: final_status,
+        });
+    });
+
+    Ok(())
+}
+
+async fn handle_models_catalog(State(state): State<AppState>) -> Response {
+    let models = state
+        .thread_manager
+        .list_models(RefreshStrategy::Offline)
+        .await
+        .into_iter()
+        .map(|preset| ModelCatalogModel {
+            id: preset.model,
+            display_name: preset.display_name,
+            description: preset.description,
+            is_default: preset.is_default,
+            show_in_picker: preset.show_in_picker,
+            default_reasoning_effort: preset.default_reasoning_effort,
+            supported_reasoning_efforts: preset.supported_reasoning_efforts,
+        })
+        .collect();
+    Json(ModelsCatalogResponse { models }).into_response()
+}
+
+fn truncate_summary(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_string();
+    }
+    let mut out = s
+        .chars()
+        .take(max_len.saturating_sub(1))
+        .collect::<String>();
+    out.push('…');
+    out
+}
+
 fn safe_join(root: &FsPath, rel: &str) -> Result<PathBuf, String> {
     let rel_path = FsPath::new(rel);
     let mut out = root.to_path_buf();
@@ -3334,6 +4836,97 @@ fn safe_join(root: &FsPath, rel: &str) -> Result<PathBuf, String> {
         }
     }
     Ok(out)
+}
+
+fn normalize_optional_text(input: Option<&str>) -> Option<String> {
+    let s = input.unwrap_or_default().trim();
+    if s.is_empty() {
+        return None;
+    }
+    Some(s.to_string())
+}
+
+fn normalize_github_repos(repos: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for raw in repos {
+        let repo = raw.trim().trim_matches('/').to_string();
+        if repo.is_empty() {
+            continue;
+        }
+        if seen.insert(repo.clone()) {
+            out.push(repo);
+        }
+    }
+    out
+}
+
+async fn load_github_repos(codex_home: &FsPath) -> Vec<String> {
+    let path = codex_home.join(GITHUB_REPOS_FILE_NAME);
+    let content = match tokio::fs::read(&path).await {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Vec::new(),
+        Err(err) => {
+            warn!("failed to read {GITHUB_REPOS_FILE_NAME}: {err}");
+            return Vec::new();
+        }
+    };
+    match serde_json::from_slice::<Vec<String>>(&content) {
+        Ok(repos) => normalize_github_repos(repos),
+        Err(err) => {
+            warn!("failed to parse {GITHUB_REPOS_FILE_NAME}: {err}");
+            Vec::new()
+        }
+    }
+}
+
+async fn persist_github_repos(codex_home: &FsPath, repos: &[String]) {
+    if let Err(err) = tokio::fs::create_dir_all(codex_home).await {
+        warn!("failed to create codex home dir for {GITHUB_REPOS_FILE_NAME}: {err}");
+        return;
+    }
+    let path = codex_home.join(GITHUB_REPOS_FILE_NAME);
+    let tmp_path = path.with_extension("json.tmp");
+    let mut body = match serde_json::to_vec_pretty(repos) {
+        Ok(body) => body,
+        Err(err) => {
+            warn!("failed to serialize {GITHUB_REPOS_FILE_NAME}: {err}");
+            return;
+        }
+    };
+    body.push(b'\n');
+    if let Err(err) = tokio::fs::write(&tmp_path, body).await {
+        warn!("failed to write {GITHUB_REPOS_FILE_NAME} tmp: {err}");
+        return;
+    }
+    if let Err(_err) = tokio::fs::rename(&tmp_path, &path).await {
+        let _ = tokio::fs::remove_file(&path).await;
+        if let Err(err) = tokio::fs::rename(&tmp_path, &path).await {
+            warn!("failed to persist {GITHUB_REPOS_FILE_NAME}: {err}");
+        }
+    }
+}
+
+async fn read_tail_file(path: &FsPath, max_bytes: u64) -> anyhow::Result<(String, bool)> {
+    let mut file = tokio::fs::File::open(path)
+        .await
+        .with_context(|| format!("open {}", path.display()))?;
+    let meta = file
+        .metadata()
+        .await
+        .with_context(|| format!("stat {}", path.display()))?;
+    let len = meta.len();
+    let truncated = len > max_bytes;
+    let start = len.saturating_sub(max_bytes);
+    file.seek(std::io::SeekFrom::Start(start))
+        .await
+        .with_context(|| format!("seek {}", path.display()))?;
+    let mut buf = Vec::new();
+    file.read_to_end(&mut buf)
+        .await
+        .with_context(|| format!("read {}", path.display()))?;
+    let text = String::from_utf8_lossy(&buf).to_string();
+    Ok((text, truncated))
 }
 
 async fn resolve_session_cwd(state: &AppState, session_id: &str) -> Result<PathBuf, String> {

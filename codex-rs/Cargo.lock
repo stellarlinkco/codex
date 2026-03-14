@@ -2059,6 +2059,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "codex-github-webhook"
+version = "1.2.6"
+dependencies = [
+ "anyhow",
+ "assert_matches",
+ "axum",
+ "base64 0.22.1",
+ "codex-core",
+ "codex-utils-absolute-path",
+ "hmac",
+ "jsonwebtoken",
+ "pretty_assertions",
+ "regex-lite",
+ "reqwest 0.12.28",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "tokio",
+ "toml 0.9.12+spec-1.1.0",
+ "tracing",
+]
+
+[[package]]
 name = "codex-hooks"
 version = "1.2.6"
 dependencies = [
@@ -2381,7 +2405,9 @@ dependencies = [
  "clap",
  "codex-core",
  "codex-file-search",
+ "codex-github-webhook",
  "codex-protocol",
+ "codex-utils-absolute-path",
  "codex-utils-cli",
  "codex-utils-pty",
  "futures",
@@ -2392,6 +2418,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "toml 0.9.12+spec-1.1.0",
+ "tower",
  "tracing",
  "uuid",
  "webbrowser",

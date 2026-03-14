@@ -151,6 +151,26 @@ const MachineChangedSchema = SessionEventBaseSchema.extend({
     machineId: z.string()
 })
 
+export const KanbanColumnSchema = z.object({
+    id: z.string(),
+    name: z.string(),
+    position: z.number()
+})
+
+export const CardPositionSchema = z.object({
+    columnId: z.string(),
+    position: z.number()
+})
+
+export const KanbanConfigSchema = z.object({
+    columns: z.array(KanbanColumnSchema),
+    cardPositions: z.record(z.string(), CardPositionSchema)
+})
+
+export type KanbanColumn = z.infer<typeof KanbanColumnSchema>
+export type CardPosition = z.infer<typeof CardPositionSchema>
+export type KanbanConfig = z.infer<typeof KanbanConfigSchema>
+
 export const SyncEventSchema = z.discriminatedUnion('type', [
     SessionChangedSchema.extend({
         type: z.literal('session-added'),
@@ -190,6 +210,35 @@ export const SyncEventSchema = z.discriminatedUnion('type', [
             status: z.string(),
             subscriptionId: z.string().optional()
         }).optional()
+    }),
+    SessionEventBaseSchema.extend({
+        type: z.literal('kanban-updated'),
+        data: KanbanConfigSchema
+    }),
+    SessionEventBaseSchema.extend({
+        type: z.literal('card-moved'),
+        sessionId: z.string(),
+        columnId: z.string(),
+        position: z.number()
+    }),
+    SessionEventBaseSchema.extend({
+        type: z.literal('github-work-items-updated')
+    }),
+    SessionEventBaseSchema.extend({
+        type: z.literal('github-kanban-updated'),
+        data: KanbanConfigSchema
+    }),
+    SessionEventBaseSchema.extend({
+        type: z.literal('github-card-moved'),
+        workItemKey: z.string(),
+        columnId: z.string(),
+        position: z.number()
+    }),
+    SessionEventBaseSchema.extend({
+        type: z.literal('github-job-updated'),
+        jobId: z.string(),
+        workItemKey: z.string(),
+        status: z.string()
     })
 ])
 

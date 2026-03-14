@@ -3,6 +3,7 @@ use codex_utils_cli::CliConfigOverrides;
 use std::net::IpAddr;
 use std::path::PathBuf;
 
+mod kanban;
 mod server;
 
 #[derive(Debug, Parser)]

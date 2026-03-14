@@ -2102,7 +2102,7 @@
           "$ref": "#/definitions/GithubWebhookToml"
         }
       ],
-      "description": "Settings for the `codex github` webhook server."
+      "description": "Settings for the GitHub webhook runtime (served by `codex serve` when enabled)."
     },
     "hide_agent_reasoning": {
       "description": "When set to `true`, `AgentReasoning` events will be hidden from the UI/output. Defaults to `false`.",
