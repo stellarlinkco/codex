@@ -223,7 +223,7 @@ jobs:
 
       - name: Upload Cargo timings
         continue-on-error: true
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: cargo-timings-rust-release-${{ matrix.target }}
           path: codex-rs/target/**/cargo-timings/cargo-timing.html
@@ -365,7 +365,7 @@ jobs:
       - name: Upload release artifacts (attempt 1)
         id: upload_release_artifacts_1
         continue-on-error: true
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           # Upload the per-binary .zst files as well as the new .tar.gz
@@ -377,7 +377,7 @@ jobs:
         id: upload_release_artifacts_2
         if: steps.upload_release_artifacts_1.outcome == 'failure'
         continue-on-error: true
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: |
@@ -385,7 +385,7 @@ jobs:
 
       - name: Upload release artifacts (attempt 3)
         if: steps.upload_release_artifacts_2.outcome == 'failure'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ matrix.target }}
           path: |
@@ -588,7 +588,7 @@ jobs:
 
       - name: Upload Cargo timings
         continue-on-error: true
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: cargo-timings-rust-release-${{ env.TARGET }}${{ env.ASSET_SUFFIX }}
           path: codex-rs/target/**/cargo-timings/cargo-timing.html
@@ -629,7 +629,7 @@ jobs:
       - name: Upload release artifacts (attempt 1)
         id: upload_release_artifacts_1
         continue-on-error: true
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.TARGET }}${{ env.ASSET_SUFFIX }}
           path: |
@@ -639,7 +639,7 @@ jobs:
         id: upload_release_artifacts_2
         if: steps.upload_release_artifacts_1.outcome == 'failure'
         continue-on-error: true
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.TARGET }}${{ env.ASSET_SUFFIX }}
           path: |
@@ -647,7 +647,7 @@ jobs:
 
       - name: Upload release artifacts (attempt 3)
         if: steps.upload_release_artifacts_2.outcome == 'failure'
-        uses: actions/upload-artifact@v6
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.TARGET }}${{ env.ASSET_SUFFIX }}
           path: |
