@@ -265,6 +265,25 @@ html[data-theme="dark"] .shiki span {
   animation: bounce-in 0.3s ease-out;
 }
 
+/* Kanban board styles */
+.line-clamp-2 {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* Hide scrollbar for kanban horizontal scroll on mobile */
+@media (max-width: 639px) {
+  .snap-x {
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+  }
+  .snap-x::-webkit-scrollbar {
+    display: none;
+  }
+}
+
 /* ReactQueryDevtools button - move to middle-right to avoid blocking UI */
 .tsqd-open-btn-container {
   bottom: 50% !important;

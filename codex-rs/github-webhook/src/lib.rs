@@ -638,6 +638,11 @@ impl GithubWebhook {
             .try_acquire_owned()
             .context("busy")?;
 
+        let response_target = match kind {
+            WorkKind::Issue => ResponseTarget::IssueComment { issue_number: number },
+            WorkKind::Pull => ResponseTarget::PullRequestReview { pull_number: number },
+            WorkKind::Push => ResponseTarget::None,
+        };
         let item = WorkItem {
             repo_full_name: repo_full_name.to_string(),
             sender_login: owner.to_string(),
@@ -654,7 +659,7 @@ impl GithubWebhook {
             push_ref: None,
             push_after: None,
             ack_target: AckTarget::None,
-            response_target: ResponseTarget::None,
+            response_target,
         };
 
         let state = self.state.as_ref().clone();

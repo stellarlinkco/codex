@@ -222,6 +222,87 @@ export type SyncEvent = ProtocolSyncEvent
 
 export type KanbanConfig = ProtocolKanbanConfig
 
+export type WorkspaceSummary = {
+    id: string
+    name: string
+    repoCount: number
+}
+
+export type WorkspaceRepoRefInput = {
+    fullName: string
+    color?: string | null
+    shortLabel?: string | null
+    defaultBranch?: string | null
+}
+
+export type WorkspaceRepoRef = {
+    fullName: string
+    color: string
+    shortLabel: string
+    defaultBranch: string
+}
+
+export type WorkspaceBoardColumn = {
+    id: string
+    name: string
+    position: number
+    autoTrigger?: 'startExecution' | 'closeIssue' | null
+}
+
+export type WorkspaceIssueRef = {
+    repo: string
+    number: number
+}
+
+export type WorkspaceBoardFilters = {
+    repos?: string[] | null
+    epics?: WorkspaceIssueRef[] | null
+    labels?: string[] | null
+    assignees?: string[] | null
+}
+
+export type WorkspaceBoardConfig = {
+    columns: WorkspaceBoardColumn[]
+    swimlaneMode: 'byEpic' | 'byRepo' | 'byAssignee' | 'none'
+    wipLimits: Record<string, number>
+    filters: WorkspaceBoardFilters
+}
+
+export type WorkspaceExecConfig = {
+    model?: string | null
+    reasoningEffort?: ReasoningEffort | null
+    sandbox?: 'readOnly' | 'workspaceWrite' | 'fullAccess' | null
+    systemPrompt?: string | null
+    prompt?: string | null
+    timeoutMinutes?: number | null
+    autoPr?: boolean | null
+    autoTest?: boolean | null
+}
+
+export type Workspace = {
+    id: string
+    name: string
+    repos: WorkspaceRepoRef[]
+    board: WorkspaceBoardConfig
+    defaultExec: WorkspaceExecConfig
+    createdAtMs: number
+    updatedAtMs: number
+}
+
+export type CreateWorkspaceRequest = {
+    name: string
+    repos: WorkspaceRepoRefInput[]
+    board?: WorkspaceBoardConfig | null
+    defaultExec?: WorkspaceExecConfig | null
+}
+
+export type UpdateWorkspaceRequest = {
+    name?: string | null
+    repos?: WorkspaceRepoRefInput[] | null
+    board?: WorkspaceBoardConfig | null
+    defaultExec?: WorkspaceExecConfig | null
+}
+
 export type GithubLabel = {
     name: string
     color: string

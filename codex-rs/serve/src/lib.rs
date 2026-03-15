@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 mod kanban;
 mod server;
+mod workspace;
 
 #[derive(Debug, Parser)]
 pub struct Cli {

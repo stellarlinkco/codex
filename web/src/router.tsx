@@ -148,7 +148,7 @@ function SessionsPage() {
                                 className="p-1.5 rounded-full text-[var(--app-hint)] hover:text-[var(--app-fg)] hover:bg-[var(--app-subtle-bg)] transition-colors"
                                 title="Kanban"
                             >
-                                看板
+                                Board
                             </button>
                             <button
                                 type="button"

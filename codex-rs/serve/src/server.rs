@@ -1,5 +1,6 @@
 use crate::Cli;
 use crate::kanban;
+use crate::workspace;
 use anyhow::Context;
 use anyhow::bail;
 use axum::Json;
@@ -92,6 +93,8 @@ const GITHUB_JOBS_FILE_NAME: &str = "github-jobs.json";
 const GITHUB_JOB_LOGS_DIR: &str = "github-job-logs";
 const GITHUB_JOB_LOG_MAX_BYTES: u64 = 200_000;
 const GITHUB_SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const WORKSPACE_WORK_ITEMS_FILE_NAME: &str = "work-items.json";
+const WORKSPACE_KANBAN_FILE_NAME: &str = "kanban.json";
 
 #[derive(Clone)]
 struct AppState {
@@ -104,12 +107,14 @@ struct AppState {
     thread_manager: Arc<ThreadManager>,
     sessions: Arc<RwLock<HashMap<String, Arc<ActiveSession>>>>,
     kanban: Arc<RwLock<kanban::KanbanConfig>>,
+    workspaces: Arc<RwLock<workspace::WorkspaceStore>>,
     github_webhook: Option<GithubWebhook>,
     github_repos: Arc<RwLock<Vec<String>>>,
     github_work_items: Arc<RwLock<GithubWorkItemsSnapshot>>,
     github_kanban: Arc<RwLock<kanban::KanbanConfig>>,
     github_jobs: Arc<RwLock<HashMap<String, GithubJob>>>,
     github_sync_lock: Arc<Mutex<()>>,
+    workspace_kanban_locks: Arc<RwLock<HashMap<String, Arc<Mutex<()>>>>>,
     events_tx: broadcast::Sender<SyncEvent>,
 }
 
@@ -724,6 +729,18 @@ mod tests {
         dir
     }
 
+    async fn collect_body_bytes(body: Body) -> anyhow::Result<Vec<u8>> {
+        use futures::StreamExt;
+
+        let mut stream = body.into_data_stream();
+        let mut out = Vec::new();
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            out.extend_from_slice(&chunk);
+        }
+        Ok(out)
+    }
+
     #[test]
     fn auth_request_accepts_access_token_aliases() {
         let camel: AuthRequest = serde_json::from_str(r#"{"accessToken":"devtoken"}"#).unwrap();
@@ -1002,12 +1019,14 @@ mod tests {
             thread_manager,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             kanban: Arc::new(RwLock::new(kanban)),
+            workspaces: Arc::new(RwLock::new(crate::workspace::WorkspaceStore::default())),
             github_webhook: None,
             github_repos: Arc::new(RwLock::new(Vec::new())),
             github_work_items: Arc::new(RwLock::new(super::GithubWorkItemsSnapshot::default())),
             github_kanban: Arc::new(RwLock::new(crate::kanban::KanbanConfig::default())),
             github_jobs: Arc::new(RwLock::new(HashMap::new())),
             github_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            workspace_kanban_locks: Arc::new(RwLock::new(HashMap::new())),
             events_tx,
         };
 
@@ -1153,12 +1172,14 @@ mod tests {
             thread_manager,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             kanban: Arc::new(RwLock::new(kanban)),
+            workspaces: Arc::new(RwLock::new(crate::workspace::WorkspaceStore::default())),
             github_webhook: None,
             github_repos: Arc::new(RwLock::new(Vec::new())),
             github_work_items: Arc::new(RwLock::new(super::GithubWorkItemsSnapshot::default())),
             github_kanban: Arc::new(RwLock::new(crate::kanban::KanbanConfig::default())),
             github_jobs: Arc::new(RwLock::new(HashMap::new())),
             github_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            workspace_kanban_locks: Arc::new(RwLock::new(HashMap::new())),
             events_tx,
         };
 
@@ -1225,6 +1246,780 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
+    async fn web_handlers_workspaces_crud_persists_across_reload() {
+        let _lock = ENV_LOCK.lock().await;
+        codex_core::test_support::set_thread_manager_test_mode(true);
+
+        let codex_home = temp_dir("codex-home");
+        let _env = EnvVarGuard::set("CODEX_HOME", codex_home.as_path());
+
+        let base_overrides = ConfigOverrides {
+            cwd: Some(codex_home.clone()),
+            ..Default::default()
+        };
+        let config = Config::load_with_cli_overrides_and_harness_overrides(
+            Vec::new(),
+            base_overrides.clone(),
+        )
+        .await
+        .expect("load config");
+
+        let auth_manager = AuthManager::shared(
+            config.codex_home.clone(),
+            false,
+            config.cli_auth_credentials_store_mode,
+        );
+        let thread_manager = Arc::new(ThreadManager::new(
+            config.codex_home.clone(),
+            auth_manager.clone(),
+            SessionSource::Cli,
+            config.model_catalog.clone(),
+            CollaborationModesConfig::default(),
+        ));
+        let (events_tx, _) = broadcast::channel(64);
+        let kanban = crate::kanban::load_or_default(&config.codex_home).await;
+
+        let state = AppState {
+            token: Arc::new("test-token".to_string()),
+            static_dir: None,
+            config: Arc::new(config),
+            cli_overrides: Vec::new(),
+            base_overrides,
+            auth_manager,
+            thread_manager,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            kanban: Arc::new(RwLock::new(kanban)),
+            workspaces: Arc::new(RwLock::new(crate::workspace::WorkspaceStore::default())),
+            github_webhook: None,
+            github_repos: Arc::new(RwLock::new(Vec::new())),
+            github_work_items: Arc::new(RwLock::new(super::GithubWorkItemsSnapshot::default())),
+            github_kanban: Arc::new(RwLock::new(crate::kanban::KanbanConfig::default())),
+            github_jobs: Arc::new(RwLock::new(HashMap::new())),
+            github_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            workspace_kanban_locks: Arc::new(RwLock::new(HashMap::new())),
+            events_tx,
+        };
+
+        let app = build_router(state.clone());
+        let create_req = Request::builder()
+            .method("POST")
+            .uri("/api/workspaces")
+            .header("authorization", "Bearer test-token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "name": "WS1",
+                    "repos": [{ "fullName": "owner/repo" }]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let res = app.oneshot(create_req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let workspace_id = {
+            let store = state.workspaces.read().await;
+            let list = store.list();
+            assert_eq!(list.len(), 1);
+            list[0].id.clone()
+        };
+
+        let reloaded = crate::workspace::WorkspaceStore::load_or_default(&codex_home).await;
+        assert!(reloaded.get(&workspace_id).is_some());
+
+        let update_req = Request::builder()
+            .method("PUT")
+            .uri(format!("/api/workspaces/{workspace_id}"))
+            .header("authorization", "Bearer test-token")
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({ "name": "WS2" }).to_string()))
+            .unwrap();
+        let res = build_router(state.clone())
+            .oneshot(update_req)
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let ws2_name = {
+            let store = state.workspaces.read().await;
+            store.get(&workspace_id).unwrap().name
+        };
+        assert_eq!(ws2_name, "WS2");
+
+        let delete_req = Request::builder()
+            .method("DELETE")
+            .uri(format!("/api/workspaces/{workspace_id}"))
+            .header("authorization", "Bearer test-token")
+            .body(Body::empty())
+            .unwrap();
+        let res = build_router(state.clone())
+            .oneshot(delete_req)
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::NO_CONTENT);
+
+        let reloaded = crate::workspace::WorkspaceStore::load_or_default(&codex_home).await;
+        assert!(reloaded.get(&workspace_id).is_none());
+
+        let _ = state.thread_manager.remove_and_close_all_threads().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn web_handlers_workspaces_kanban_move_persists_to_workspace_dir() {
+        let _lock = ENV_LOCK.lock().await;
+        codex_core::test_support::set_thread_manager_test_mode(true);
+
+        let codex_home = temp_dir("codex-home");
+        let _env = EnvVarGuard::set("CODEX_HOME", codex_home.as_path());
+
+        let base_overrides = ConfigOverrides {
+            cwd: Some(codex_home.clone()),
+            ..Default::default()
+        };
+        let config = Config::load_with_cli_overrides_and_harness_overrides(
+            Vec::new(),
+            base_overrides.clone(),
+        )
+        .await
+        .expect("load config");
+
+        let auth_manager = AuthManager::shared(
+            config.codex_home.clone(),
+            false,
+            config.cli_auth_credentials_store_mode,
+        );
+        let thread_manager = Arc::new(ThreadManager::new(
+            config.codex_home.clone(),
+            auth_manager.clone(),
+            SessionSource::Cli,
+            config.model_catalog.clone(),
+            CollaborationModesConfig::default(),
+        ));
+        let (events_tx, _) = broadcast::channel(64);
+        let kanban = crate::kanban::load_or_default(&config.codex_home).await;
+
+        let state = AppState {
+            token: Arc::new("test-token".to_string()),
+            static_dir: None,
+            config: Arc::new(config),
+            cli_overrides: Vec::new(),
+            base_overrides,
+            auth_manager,
+            thread_manager,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            kanban: Arc::new(RwLock::new(kanban)),
+            workspaces: Arc::new(RwLock::new(crate::workspace::WorkspaceStore::default())),
+            github_webhook: None,
+            github_repos: Arc::new(RwLock::new(Vec::new())),
+            github_work_items: Arc::new(RwLock::new(super::GithubWorkItemsSnapshot::default())),
+            github_kanban: Arc::new(RwLock::new(crate::kanban::KanbanConfig::default())),
+            github_jobs: Arc::new(RwLock::new(HashMap::new())),
+            github_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            workspace_kanban_locks: Arc::new(RwLock::new(HashMap::new())),
+            events_tx,
+        };
+
+        let app = build_router(state.clone());
+        let create_req = Request::builder()
+            .method("POST")
+            .uri("/api/workspaces")
+            .header("authorization", "Bearer test-token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "name": "WS1",
+                    "repos": [{ "fullName": "owner/repo" }]
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let res = app.oneshot(create_req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let workspace_id = {
+            let store = state.workspaces.read().await;
+            store.list()[0].id.clone()
+        };
+
+        let move_req = Request::builder()
+            .method("PUT")
+            .uri(format!("/api/workspaces/{workspace_id}/kanban/cards"))
+            .header("authorization", "Bearer test-token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::json!({
+                    "workItemKey": "owner/repo#1:issue",
+                    "columnId": "running",
+                    "position": 0
+                })
+                .to_string(),
+            ))
+            .unwrap();
+        let res = build_router(state.clone()).oneshot(move_req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        let kanban_path = codex_home
+            .join("workspaces")
+            .join(&workspace_id)
+            .join("kanban.json");
+        let raw = tokio::fs::read(&kanban_path).await.expect("read kanban");
+        let parsed: crate::kanban::KanbanConfig =
+            serde_json::from_slice(&raw).expect("parse kanban");
+        let pos = parsed
+            .card_positions
+            .get("owner/repo#1:issue")
+            .expect("card position");
+        assert_eq!(pos.column_id, "running");
+
+        let _ = state.thread_manager.remove_and_close_all_threads().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn closed_loop_workspace_kanban_v1_writes_evidence_package() {
+        let _lock = ENV_LOCK.lock().await;
+        codex_core::test_support::set_thread_manager_test_mode(true);
+
+        let codex_home = temp_dir("codex-home");
+        let _env = EnvVarGuard::set("CODEX_HOME", codex_home.as_path());
+
+        let base_overrides = ConfigOverrides {
+            cwd: Some(codex_home.clone()),
+            ..Default::default()
+        };
+        let config = Config::load_with_cli_overrides_and_harness_overrides(
+            Vec::new(),
+            base_overrides.clone(),
+        )
+        .await
+        .expect("load config");
+
+        let auth_manager = AuthManager::shared(
+            config.codex_home.clone(),
+            false,
+            config.cli_auth_credentials_store_mode,
+        );
+        let thread_manager = Arc::new(ThreadManager::new(
+            config.codex_home.clone(),
+            auth_manager.clone(),
+            SessionSource::Cli,
+            config.model_catalog.clone(),
+            CollaborationModesConfig::default(),
+        ));
+        let (events_tx, _) = broadcast::channel(64);
+        let kanban = crate::kanban::load_or_default(&config.codex_home).await;
+
+        let state = AppState {
+            token: Arc::new("test-token".to_string()),
+            static_dir: None,
+            config: Arc::new(config),
+            cli_overrides: Vec::new(),
+            base_overrides,
+            auth_manager,
+            thread_manager,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            kanban: Arc::new(RwLock::new(kanban)),
+            workspaces: Arc::new(RwLock::new(crate::workspace::WorkspaceStore::default())),
+            github_webhook: None,
+            github_repos: Arc::new(RwLock::new(Vec::new())),
+            github_work_items: Arc::new(RwLock::new(super::GithubWorkItemsSnapshot::default())),
+            github_kanban: Arc::new(RwLock::new(crate::kanban::KanbanConfig::default())),
+            github_jobs: Arc::new(RwLock::new(HashMap::new())),
+            github_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            workspace_kanban_locks: Arc::new(RwLock::new(HashMap::new())),
+            events_tx,
+        };
+
+        let stamp = chrono::Utc::now().format("%Y%m%d-%H%M%S").to_string();
+        let run_id = uuid::Uuid::new_v4().to_string();
+        let evidence_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../run")
+            .join(format!("kanban-workspace-closed-loop-{stamp}-{run_id}"));
+        tokio::fs::create_dir_all(&evidence_root)
+            .await
+            .expect("create evidence root");
+
+        let req_res_dir = evidence_root.join("request-response");
+        let db_dir = evidence_root.join("db");
+        let logs_dir = evidence_root.join("logs");
+        let metrics_dir = evidence_root.join("metrics");
+        let trace_dir = evidence_root.join("trace");
+        let ui_dir = evidence_root.join("ui");
+        tokio::fs::create_dir_all(&req_res_dir)
+            .await
+            .expect("create request-response dir");
+        tokio::fs::create_dir_all(&db_dir)
+            .await
+            .expect("create db dir");
+        tokio::fs::create_dir_all(&logs_dir)
+            .await
+            .expect("create logs dir");
+        tokio::fs::create_dir_all(&metrics_dir)
+            .await
+            .expect("create metrics dir");
+        tokio::fs::create_dir_all(&trace_dir)
+            .await
+            .expect("create trace dir");
+        tokio::fs::create_dir_all(&ui_dir)
+            .await
+            .expect("create ui dir");
+        tokio::fs::create_dir_all(logs_dir.join("queries"))
+            .await
+            .expect("create logs queries dir");
+        tokio::fs::create_dir_all(metrics_dir.join("queries"))
+            .await
+            .expect("create metrics queries dir");
+        tokio::fs::create_dir_all(trace_dir.join("queries"))
+            .await
+            .expect("create trace queries dir");
+
+        let observability_note = "\
+# Observability (artifacts-only)\n\
+\n\
+本次闭环运行没有接入可本地查询的 logs/metrics/trace 栈（例如 Loki/Prometheus/Tempo）。\n\
+因此只做：HTTP request/response 证据 + 文件落盘状态校验。\n\
+\n\
+如需升级到 query-backed（V2/V3）：\n\
+- 为每次 run 注入可过滤的 run_id/workspace_id，并落到日志字段/trace span attribute\n\
+- 记录 LogQL/PromQL/TraceQL 及其结果快照到对应 queries/ 下\n\
+";
+        tokio::fs::write(
+            logs_dir.join("queries").join("README.md"),
+            observability_note,
+        )
+        .await
+        .expect("write logs queries note");
+        tokio::fs::write(
+            metrics_dir.join("queries").join("README.md"),
+            observability_note,
+        )
+        .await
+        .expect("write metrics queries note");
+        tokio::fs::write(
+            trace_dir.join("queries").join("README.md"),
+            observability_note,
+        )
+        .await
+        .expect("write trace queries note");
+        tokio::fs::write(
+            ui_dir.join("README.md"),
+            "# UI\n\nV1 未做浏览器截图/录像；仅验证静态嵌入资源与 API 行为。\n",
+        )
+        .await
+        .expect("write ui note");
+
+        let mut checks: Vec<serde_json::Value> = Vec::new();
+        let mut primary_workspace_id: Option<String> = None;
+        let mut status = "fail";
+        let mut failure: Option<String> = None;
+
+        let result: anyhow::Result<()> = async {
+            let app = build_router(state.clone());
+
+            async fn write_pair(
+                req_res_dir: &std::path::Path,
+                seq: u32,
+                name: &str,
+                request: &str,
+                status_code: StatusCode,
+                response: &str,
+            ) -> anyhow::Result<()> {
+                let req_path = req_res_dir.join(format!("{seq:02}-{name}.request.json"));
+                let res_path = req_res_dir.join(format!("{seq:02}-{name}.response.txt"));
+                let status_path = req_res_dir.join(format!("{seq:02}-{name}.status.txt"));
+                tokio::fs::write(&req_path, request).await?;
+                tokio::fs::write(&res_path, response).await?;
+                tokio::fs::write(&status_path, status_code.as_str()).await?;
+                Ok(())
+            }
+
+            async fn snapshot_file(
+                db_dir: &std::path::Path,
+                src_path: &std::path::Path,
+                name: &str,
+            ) -> anyhow::Result<()> {
+                match tokio::fs::read(src_path).await {
+                    Ok(content) => {
+                        tokio::fs::write(db_dir.join(name), content).await?;
+                        Ok(())
+                    }
+                    Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+                    Err(err) => Err(err.into()),
+                }
+            }
+
+            let create_payload = serde_json::json!({
+                "name": "WS1",
+                "repos": [{ "fullName": "owner/repo" }]
+            })
+            .to_string();
+            let create_req = Request::builder()
+                .method("POST")
+                .uri("/api/workspaces")
+                .header("authorization", "Bearer test-token")
+                .header("content-type", "application/json")
+                .body(Body::from(create_payload.clone()))?;
+            let res = app.clone().oneshot(create_req).await?;
+            let status_code = res.status();
+            let body = collect_body_bytes(res.into_body()).await?;
+            let body_text = String::from_utf8_lossy(&body).to_string();
+            write_pair(
+                &req_res_dir,
+                1,
+                "create-workspace",
+                &create_payload,
+                status_code,
+                &body_text,
+            )
+            .await?;
+            anyhow::ensure!(
+                status_code == StatusCode::OK,
+                "create workspace: {status_code}"
+            );
+            checks.push(serde_json::json!({
+                "name": "workspace_create",
+                "blocking": true,
+                "result": "pass"
+            }));
+
+            let created: serde_json::Value = serde_json::from_slice(&body)?;
+            let workspace_id = created
+                .get("id")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| anyhow::anyhow!("missing workspace id"))?
+                .to_string();
+            primary_workspace_id = Some(workspace_id.clone());
+
+            let workspaces_root = codex_home.join("workspaces");
+            let ws_dir = workspaces_root.join(&workspace_id);
+            snapshot_file(
+                &db_dir,
+                &workspaces_root.join("index.json"),
+                "workspaces.index.json",
+            )
+            .await?;
+            snapshot_file(&db_dir, &ws_dir.join("workspace.json"), "workspace.json").await?;
+
+            let list_payload = "{}";
+            let list_req = Request::builder()
+                .method("GET")
+                .uri("/api/workspaces")
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())?;
+            let res = build_router(state.clone()).oneshot(list_req).await?;
+            let status_code = res.status();
+            let body = collect_body_bytes(res.into_body()).await?;
+            let body_text = String::from_utf8_lossy(&body).to_string();
+            write_pair(
+                &req_res_dir,
+                2,
+                "list-workspaces",
+                list_payload,
+                status_code,
+                &body_text,
+            )
+            .await?;
+            anyhow::ensure!(
+                status_code == StatusCode::OK,
+                "list workspaces: {status_code}"
+            );
+            let listed: serde_json::Value = serde_json::from_slice(&body)?;
+            anyhow::ensure!(
+                listed
+                    .as_array()
+                    .is_some_and(|arr| arr.iter().any(|v| v.get("id") == Some(&created["id"]))),
+                "workspace id missing from list"
+            );
+            checks.push(serde_json::json!({
+                "name": "workspace_list_contains_created",
+                "blocking": true,
+                "result": "pass"
+            }));
+
+            let get_payload = "{}";
+            let get_req = Request::builder()
+                .method("GET")
+                .uri(format!("/api/workspaces/{workspace_id}"))
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())?;
+            let res = build_router(state.clone()).oneshot(get_req).await?;
+            let status_code = res.status();
+            let body = collect_body_bytes(res.into_body()).await?;
+            let body_text = String::from_utf8_lossy(&body).to_string();
+            write_pair(
+                &req_res_dir,
+                3,
+                "get-workspace",
+                get_payload,
+                status_code,
+                &body_text,
+            )
+            .await?;
+            anyhow::ensure!(
+                status_code == StatusCode::OK,
+                "get workspace: {status_code}"
+            );
+            checks.push(serde_json::json!({
+                "name": "workspace_get",
+                "blocking": true,
+                "result": "pass"
+            }));
+
+            let work_items_payload = "{}";
+            let work_items_req = Request::builder()
+                .method("GET")
+                .uri(format!("/api/workspaces/{workspace_id}/work-items"))
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())?;
+            let res = build_router(state.clone()).oneshot(work_items_req).await?;
+            let status_code = res.status();
+            let body = collect_body_bytes(res.into_body()).await?;
+            let body_text = String::from_utf8_lossy(&body).to_string();
+            write_pair(
+                &req_res_dir,
+                4,
+                "workspace-work-items",
+                work_items_payload,
+                status_code,
+                &body_text,
+            )
+            .await?;
+            anyhow::ensure!(
+                status_code == StatusCode::OK,
+                "workspace work-items: {status_code}"
+            );
+            checks.push(serde_json::json!({
+                "name": "workspace_work_items_get",
+                "blocking": true,
+                "result": "pass"
+            }));
+            snapshot_file(&db_dir, &ws_dir.join("work-items.json"), "work-items.json").await?;
+
+            let kanban_payload = "{}";
+            let kanban_req = Request::builder()
+                .method("GET")
+                .uri(format!("/api/workspaces/{workspace_id}/kanban"))
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())?;
+            let res = build_router(state.clone()).oneshot(kanban_req).await?;
+            let status_code = res.status();
+            let body = collect_body_bytes(res.into_body()).await?;
+            let body_text = String::from_utf8_lossy(&body).to_string();
+            write_pair(
+                &req_res_dir,
+                5,
+                "workspace-kanban",
+                kanban_payload,
+                status_code,
+                &body_text,
+            )
+            .await?;
+            anyhow::ensure!(
+                status_code == StatusCode::OK,
+                "workspace kanban: {status_code}"
+            );
+            let kanban_path = codex_home
+                .join("workspaces")
+                .join(&workspace_id)
+                .join("kanban.json");
+            anyhow::ensure!(
+                tokio::fs::metadata(&kanban_path).await.is_ok(),
+                "workspace kanban.json not persisted"
+            );
+            snapshot_file(&db_dir, &kanban_path, "kanban.json").await?;
+            checks.push(serde_json::json!({
+                "name": "workspace_kanban_get_and_persist",
+                "blocking": true,
+                "result": "pass"
+            }));
+
+            let move_payload = serde_json::json!({
+                "workItemKey": "owner/repo#1:issue",
+                "columnId": "running",
+                "position": 0
+            })
+            .to_string();
+            let move_req = Request::builder()
+                .method("PUT")
+                .uri(format!("/api/workspaces/{workspace_id}/kanban/cards"))
+                .header("authorization", "Bearer test-token")
+                .header("content-type", "application/json")
+                .body(Body::from(move_payload.clone()))?;
+            let res = build_router(state.clone()).oneshot(move_req).await?;
+            let status_code = res.status();
+            let body = collect_body_bytes(res.into_body()).await?;
+            let body_text = String::from_utf8_lossy(&body).to_string();
+            write_pair(
+                &req_res_dir,
+                6,
+                "move-card",
+                &move_payload,
+                status_code,
+                &body_text,
+            )
+            .await?;
+            anyhow::ensure!(status_code == StatusCode::OK, "move card: {status_code}");
+
+            let raw = tokio::fs::read(&kanban_path).await?;
+            let parsed: crate::kanban::KanbanConfig = serde_json::from_slice(&raw)?;
+            let pos = parsed
+                .card_positions
+                .get("owner/repo#1:issue")
+                .ok_or_else(|| anyhow::anyhow!("card position missing"))?;
+            anyhow::ensure!(pos.column_id == "running", "card not in running");
+            snapshot_file(&db_dir, &kanban_path, "kanban.after-move.json").await?;
+            checks.push(serde_json::json!({
+                "name": "workspace_kanban_move_persist",
+                "blocking": true,
+                "result": "pass"
+            }));
+
+            let jobs_payload = "{}";
+            let jobs_req = Request::builder()
+                .method("GET")
+                .uri(format!("/api/workspaces/{workspace_id}/jobs"))
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())?;
+            let res = build_router(state.clone()).oneshot(jobs_req).await?;
+            let status_code = res.status();
+            let body = collect_body_bytes(res.into_body()).await?;
+            let body_text = String::from_utf8_lossy(&body).to_string();
+            write_pair(
+                &req_res_dir,
+                7,
+                "workspace-jobs",
+                jobs_payload,
+                status_code,
+                &body_text,
+            )
+            .await?;
+            anyhow::ensure!(
+                status_code == StatusCode::OK,
+                "workspace jobs: {status_code}"
+            );
+            let jobs: serde_json::Value = serde_json::from_slice(&body)?;
+            anyhow::ensure!(
+                jobs.get("jobs")
+                    .and_then(|v| v.as_array())
+                    .is_some_and(|arr| arr.is_empty()),
+                "expected empty jobs list without github_webhook"
+            );
+            checks.push(serde_json::json!({
+                "name": "workspace_jobs_empty_without_github",
+                "blocking": true,
+                "result": "pass"
+            }));
+
+            let delete_payload = "{}";
+            let delete_req = Request::builder()
+                .method("DELETE")
+                .uri(format!("/api/workspaces/{workspace_id}"))
+                .header("authorization", "Bearer test-token")
+                .body(Body::empty())?;
+            let res = build_router(state.clone()).oneshot(delete_req).await?;
+            let status_code = res.status();
+            let body = collect_body_bytes(res.into_body()).await?;
+            let body_text = String::from_utf8_lossy(&body).to_string();
+            write_pair(
+                &req_res_dir,
+                8,
+                "delete-workspace",
+                delete_payload,
+                status_code,
+                &body_text,
+            )
+            .await?;
+            anyhow::ensure!(
+                status_code == StatusCode::NO_CONTENT,
+                "delete workspace: {status_code}"
+            );
+            checks.push(serde_json::json!({
+                "name": "workspace_delete",
+                "blocking": true,
+                "result": "pass"
+            }));
+
+            Ok(())
+        }
+        .await;
+
+        if let Err(err) = result {
+            failure = Some(format!("{err:#}"));
+        } else {
+            status = "pass";
+        }
+
+        let verdict = serde_json::json!({
+            "status": status,
+            "generatedAt": chrono::Utc::now().to_rfc3339(),
+            "date": chrono::Utc::now().format("%Y-%m-%d").to_string(),
+            "slice": "kanban-workspace-v1",
+            "version": 1,
+            "mode": "artifacts-only",
+            "runId": run_id,
+            "primaryIds": {
+                "workspaceId": primary_workspace_id
+            },
+            "checks": checks,
+            "error": failure,
+            "risks": [
+                "未做真实 GitHub API / webhook e2e；Workspace `/sync` 与 `Done->close` 依赖 github_webhook enabled。",
+                "未实现 PRD Phase 2+（WebSocket 日志流、细粒度 job 状态机、Epic/泳道等）。"
+            ]
+        });
+        let verdict_path = evidence_root.join("verdict.json");
+        let mut verdict_bytes = serde_json::to_vec_pretty(&verdict).expect("serialize verdict");
+        verdict_bytes.push(b'\n');
+        tokio::fs::write(&verdict_path, verdict_bytes)
+            .await
+            .expect("write verdict");
+
+        let report = format!(
+            "\
+# Closed Loop Report: kanban-workspace-v1\n\
+\n\
+- status: {status}\n\
+- mode: artifacts-only\n\
+- runId: {run_id}\n\
+- workspaceId: {}\n\
+- evidence: {}\n\
+\n\
+## Entrypoints\n\
+\n\
+- POST /api/workspaces\n\
+- GET /api/workspaces\n\
+- GET /api/workspaces/{{id}}\n\
+- GET /api/workspaces/{{id}}/work-items\n\
+- GET /api/workspaces/{{id}}/kanban\n\
+- PUT /api/workspaces/{{id}}/kanban/cards\n\
+- GET /api/workspaces/{{id}}/jobs\n\
+- DELETE /api/workspaces/{{id}}\n\
+\n\
+## Blocking Checks\n\
+\n\
+见 `verdict.json` 的 `checks[]`（均为 blocking）。\n\
+\n\
+## Evidence\n\
+\n\
+- request/response：`request-response/`\n\
+- 文件落盘快照：`db/`（workspace/work-items/kanban 等）\n\
+- logs/metrics/trace：未接入本地可查询栈，仅写入说明文件（见各自 `queries/README.md`）\n\
+",
+            primary_workspace_id
+                .clone()
+                .unwrap_or_else(|| "<missing>".to_string()),
+            evidence_root.display(),
+        );
+        tokio::fs::write(evidence_root.join("REPORT.md"), report)
+            .await
+            .expect("write report");
+
+        let _ = state.thread_manager.remove_and_close_all_threads().await;
+        if let Some(err) = failure {
+            panic!("closed loop failed: {err}");
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
     async fn github_webhook_route_is_not_token_protected() {
         let _lock = ENV_LOCK.lock().await;
         codex_core::test_support::set_thread_manager_test_mode(true);
@@ -1268,12 +2063,14 @@ mod tests {
             thread_manager,
             sessions: Arc::new(RwLock::new(HashMap::new())),
             kanban: Arc::new(RwLock::new(kanban)),
+            workspaces: Arc::new(RwLock::new(crate::workspace::WorkspaceStore::default())),
             github_webhook: None,
             github_repos: Arc::new(RwLock::new(Vec::new())),
             github_work_items: Arc::new(RwLock::new(super::GithubWorkItemsSnapshot::default())),
             github_kanban: Arc::new(RwLock::new(crate::kanban::KanbanConfig::default())),
             github_jobs: Arc::new(RwLock::new(HashMap::new())),
             github_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            workspace_kanban_locks: Arc::new(RwLock::new(HashMap::new())),
             events_tx,
         };
 
@@ -1487,6 +2284,7 @@ pub async fn run(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::
 
     let config = Arc::new(config);
     let kanban = kanban::load_or_default(&config.codex_home).await;
+    let workspaces = workspace::WorkspaceStore::load_or_default(&config.codex_home).await;
     let github_repos = if github_webhook.is_some() {
         let repos = load_github_repos(&config.codex_home).await;
         if repos.is_empty() {
@@ -1522,12 +2320,14 @@ pub async fn run(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::
         thread_manager,
         sessions: Arc::new(RwLock::new(HashMap::new())),
         kanban: Arc::new(RwLock::new(kanban)),
+        workspaces: Arc::new(RwLock::new(workspaces)),
         github_webhook,
         github_repos: Arc::new(RwLock::new(github_repos)),
         github_work_items: Arc::new(RwLock::new(github_work_items)),
         github_kanban: Arc::new(RwLock::new(github_kanban)),
         github_jobs: Arc::new(RwLock::new(github_jobs)),
         github_sync_lock: Arc::new(Mutex::new(())),
+        workspace_kanban_locks: Arc::new(RwLock::new(HashMap::new())),
         events_tx,
     };
 
@@ -1596,6 +2396,44 @@ fn build_router(state: AppState) -> Router {
         )
         .route("/github/jobs", get(handle_github_jobs))
         .route("/github/jobs/{job_id}/log", get(handle_github_job_log))
+        .route(
+            "/workspaces",
+            get(handle_list_workspaces).post(handle_create_workspace),
+        )
+        .route(
+            "/workspaces/{workspace_id}",
+            get(handle_get_workspace)
+                .put(handle_update_workspace)
+                .delete(handle_delete_workspace),
+        )
+        .route(
+            "/workspaces/{workspace_id}/sync",
+            post(handle_workspace_sync),
+        )
+        .route(
+            "/workspaces/{workspace_id}/work-items",
+            get(handle_workspace_work_items),
+        )
+        .route(
+            "/workspaces/{workspace_id}/kanban",
+            get(handle_workspace_kanban),
+        )
+        .route(
+            "/workspaces/{workspace_id}/kanban/cards",
+            put(handle_move_workspace_kanban_card),
+        )
+        .route(
+            "/workspaces/{workspace_id}/kanban/cards/settings",
+            put(handle_update_workspace_kanban_card_settings),
+        )
+        .route(
+            "/workspaces/{workspace_id}/jobs",
+            get(handle_workspace_jobs),
+        )
+        .route(
+            "/workspaces/{workspace_id}/jobs/{job_id}/log",
+            get(handle_workspace_job_log),
+        )
         .route(
             "/sessions/{id}",
             get(handle_session)
@@ -1883,6 +2721,42 @@ struct UpdateGithubKanbanCardSettingsRequest {
     reasoning_effort: Option<ReasoningEffort>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct WorkspaceRepoInput {
+    full_name: String,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    short_label: Option<String>,
+    #[serde(default)]
+    default_branch: Option<String>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CreateWorkspaceRequest {
+    name: String,
+    repos: Vec<WorkspaceRepoInput>,
+    #[serde(default)]
+    board: Option<workspace::BoardConfig>,
+    #[serde(default)]
+    default_exec: Option<workspace::ExecConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct UpdateWorkspaceRequest {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    repos: Option<Vec<WorkspaceRepoInput>>,
+    #[serde(default)]
+    board: Option<workspace::BoardConfig>,
+    #[serde(default)]
+    default_exec: Option<workspace::ExecConfig>,
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ModelsCatalogResponse {
@@ -2085,8 +2959,16 @@ async fn handle_github_work_items(State(state): State<AppState>) -> Response {
         )
             .into_response();
     }
-    let snapshot = state.github_work_items.read().await.clone();
-    Json(snapshot).into_response()
+    let full = state.github_work_items.read().await.clone();
+    let filtered = GithubWorkItemsSnapshot {
+        fetched_at: full.fetched_at,
+        items: full
+            .items
+            .into_iter()
+            .filter(|i| i.state.eq_ignore_ascii_case("open"))
+            .collect(),
+    };
+    Json(filtered).into_response()
 }
 
 async fn handle_github_work_item_detail(
@@ -2281,6 +3163,630 @@ async fn handle_github_sync(State(state): State<AppState>) -> Response {
     Json(serde_json::json!({})).into_response()
 }
 
+async fn handle_list_workspaces(State(state): State<AppState>) -> Response {
+    let store = state.workspaces.read().await;
+    Json(store.list()).into_response()
+}
+
+async fn handle_create_workspace(
+    State(state): State<AppState>,
+    Json(body): Json<CreateWorkspaceRequest>,
+) -> Response {
+    let name = body.name.trim().to_string();
+    if name.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_error("workspace_invalid_name")),
+        )
+            .into_response();
+    }
+    if body.repos.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_error("workspace_invalid_repos")),
+        )
+            .into_response();
+    }
+    {
+        let mut seen = HashSet::new();
+        for repo in &body.repos {
+            let full_name = repo.full_name.trim();
+            if !is_valid_repo_full_name(full_name) || !seen.insert(full_name.to_string()) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json_error("workspace_invalid_repos")),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let repos = body
+        .repos
+        .into_iter()
+        .map(|repo| workspace::RepoInput {
+            full_name: repo.full_name,
+            color: repo.color,
+            short_label: repo.short_label,
+            default_branch: repo.default_branch,
+        })
+        .collect::<Vec<_>>();
+
+    let mut store = state.workspaces.write().await;
+    match store
+        .create(
+            &state.config.codex_home,
+            workspace::CreateWorkspaceInput {
+                name,
+                repos,
+                board: body.board,
+                default_exec: body.default_exec,
+                now_ms: now_ms(),
+            },
+        )
+        .await
+    {
+        Ok(ws) => Json(ws).into_response(),
+        Err(err) => {
+            warn!("failed to create workspace: {err:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json_error("workspace_create_failed")),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn handle_get_workspace(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    let store = state.workspaces.read().await;
+    let Some(ws) = store.get(workspace_id.trim()) else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("workspace_not_found")),
+        )
+            .into_response();
+    };
+    Json(ws).into_response()
+}
+
+async fn handle_update_workspace(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    Json(body): Json<UpdateWorkspaceRequest>,
+) -> Response {
+    if let Some(name) = body.name.as_deref()
+        && name.trim().is_empty()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_error("workspace_invalid_name")),
+        )
+            .into_response();
+    }
+    if let Some(repos) = body.repos.as_ref()
+        && repos.is_empty()
+    {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_error("workspace_invalid_repos")),
+        )
+            .into_response();
+    }
+    if let Some(repos) = body.repos.as_ref() {
+        let mut seen = HashSet::new();
+        for repo in repos {
+            let full_name = repo.full_name.trim();
+            if !is_valid_repo_full_name(full_name) || !seen.insert(full_name.to_string()) {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(json_error("workspace_invalid_repos")),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let repos = body.repos.map(|repos| {
+        repos
+            .into_iter()
+            .map(|repo| workspace::RepoInput {
+                full_name: repo.full_name,
+                color: repo.color,
+                short_label: repo.short_label,
+                default_branch: repo.default_branch,
+            })
+            .collect()
+    });
+
+    let mut store = state.workspaces.write().await;
+    match store
+        .update(
+            &state.config.codex_home,
+            workspace_id.trim(),
+            workspace::UpdateWorkspaceInput {
+                name: body.name.map(|name| name.trim().to_string()),
+                repos,
+                board: body.board,
+                default_exec: body.default_exec,
+                now_ms: now_ms(),
+            },
+        )
+        .await
+    {
+        Ok(Some(ws)) => Json(ws).into_response(),
+        Ok(None) => (
+            StatusCode::NOT_FOUND,
+            Json(json_error("workspace_not_found")),
+        )
+            .into_response(),
+        Err(err) => {
+            warn!("failed to update workspace {workspace_id}: {err:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json_error("workspace_update_failed")),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn handle_delete_workspace(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    let mut store = state.workspaces.write().await;
+    match store
+        .delete(&state.config.codex_home, workspace_id.trim())
+        .await
+    {
+        Ok(true) => StatusCode::NO_CONTENT.into_response(),
+        Ok(false) => (
+            StatusCode::NOT_FOUND,
+            Json(json_error("workspace_not_found")),
+        )
+            .into_response(),
+        Err(err) => {
+            warn!("failed to delete workspace {workspace_id}: {err:#}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json_error("workspace_delete_failed")),
+            )
+                .into_response()
+        }
+    }
+}
+
+async fn handle_workspace_sync(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    if state.github_webhook.is_none() {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("github_not_enabled")),
+        )
+            .into_response();
+    }
+    let workspace_id = workspace_id.trim();
+    if workspace_id.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_error("workspace_not_found")),
+        )
+            .into_response();
+    }
+    let exists = state.workspaces.read().await.get(workspace_id).is_some();
+    if !exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("workspace_not_found")),
+        )
+            .into_response();
+    }
+
+    if let Err(err) = sync_workspace_work_items(&state, workspace_id).await {
+        warn!("workspace sync failed for {workspace_id}: {err:#}");
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json_error("github_sync_failed")),
+        )
+            .into_response();
+    }
+    Json(serde_json::json!({})).into_response()
+}
+
+async fn handle_workspace_work_items(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    let workspace_id = workspace_id.trim();
+    let exists = state.workspaces.read().await.get(workspace_id).is_some();
+    if !exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("workspace_not_found")),
+        )
+            .into_response();
+    }
+    let full = load_workspace_work_items_snapshot(&state.config.codex_home, workspace_id).await;
+    let filtered = GithubWorkItemsSnapshot {
+        fetched_at: full.fetched_at,
+        items: full
+            .items
+            .into_iter()
+            .filter(|i| i.state.eq_ignore_ascii_case("open"))
+            .collect(),
+    };
+    Json(filtered).into_response()
+}
+
+async fn handle_workspace_kanban(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    let workspace_id = workspace_id.trim();
+    let workspace = state.workspaces.read().await.get(workspace_id);
+    let Some(workspace) = workspace else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("workspace_not_found")),
+        )
+            .into_response();
+    };
+
+    let lock = get_workspace_kanban_lock(&state, workspace_id).await;
+    let _guard = lock.lock().await;
+
+    let keys: HashSet<String> =
+        load_workspace_work_items_snapshot(&state.config.codex_home, workspace_id)
+            .await
+            .items
+            .iter()
+            .filter(|i| i.state.eq_ignore_ascii_case("open"))
+            .map(|i| i.work_item_key.clone())
+            .collect();
+
+    let mut kanban =
+        load_or_init_workspace_kanban(&state.config.codex_home, workspace_id, &workspace.board)
+            .await;
+    let changed = kanban.reconcile_sessions(&keys);
+    let snapshot = kanban.clone();
+    if changed {
+        persist_workspace_kanban(&state.config.codex_home, workspace_id, &snapshot).await;
+    }
+    Json(snapshot).into_response()
+}
+
+async fn handle_update_workspace_kanban_card_settings(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    Json(body): Json<UpdateGithubKanbanCardSettingsRequest>,
+) -> Response {
+    let workspace_id = workspace_id.trim();
+    let workspace = state.workspaces.read().await.get(workspace_id);
+    let Some(workspace) = workspace else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("workspace_not_found")),
+        )
+            .into_response();
+    };
+
+    let work_item_key = body.work_item_key.trim().to_string();
+    if work_item_key.is_empty() || parse_github_work_item_key(&work_item_key).is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_error("github_invalid_work_item_key")),
+        )
+            .into_response();
+    }
+
+    let lock = get_workspace_kanban_lock(&state, workspace_id).await;
+    let _guard = lock.lock().await;
+
+    let prompt_prefix = normalize_optional_text(body.prompt_prefix.as_deref());
+    let model = normalize_optional_text(body.model.as_deref());
+    let reasoning_effort = body.reasoning_effort;
+
+    let mut kanban =
+        load_or_init_workspace_kanban(&state.config.codex_home, workspace_id, &workspace.board)
+            .await;
+    let mut changed = false;
+    let current = kanban
+        .card_settings
+        .get(&work_item_key)
+        .cloned()
+        .unwrap_or_default();
+    let next = kanban::KanbanCardSettings {
+        prompt_prefix,
+        model,
+        reasoning_effort,
+    };
+    if current != next {
+        changed = true;
+        if next.prompt_prefix.is_none() && next.model.is_none() && next.reasoning_effort.is_none() {
+            kanban.card_settings.remove(&work_item_key);
+        } else {
+            kanban.card_settings.insert(work_item_key.clone(), next);
+        }
+    }
+    let snapshot = kanban.clone();
+
+    if changed {
+        persist_workspace_kanban(&state.config.codex_home, workspace_id, &snapshot).await;
+        // TODO: add a dedicated workspace kanban SSE variant
+        let data = serde_json::to_value(&snapshot).unwrap_or(JsonValue::Null);
+        let _ = state
+            .events_tx
+            .send(SyncEvent::GithubKanbanUpdated { data });
+    }
+
+    Json(serde_json::json!({})).into_response()
+}
+
+async fn handle_move_workspace_kanban_card(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+    Json(body): Json<MoveGithubKanbanCardRequest>,
+) -> Response {
+    let workspace_id = workspace_id.trim();
+    let workspace = state.workspaces.read().await.get(workspace_id);
+    let Some(workspace) = workspace else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("workspace_not_found")),
+        )
+            .into_response();
+    };
+
+    let work_item_key = body.work_item_key.trim().to_string();
+    if work_item_key.is_empty() || parse_github_work_item_key(&work_item_key).is_none() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_error("github_invalid_work_item_key")),
+        )
+            .into_response();
+    }
+
+    // Keep a clone of the board config for autoTrigger lookup after kanban ops
+    let board = workspace.board.clone();
+
+    let lock = get_workspace_kanban_lock(&state, workspace_id).await;
+    let _guard = lock.lock().await;
+
+    let mut kanban =
+        load_or_init_workspace_kanban(&state.config.codex_home, workspace_id, &workspace.board)
+            .await;
+    if !kanban.has_column(&body.column_id) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json_error("kanban_unknown_column")),
+        )
+            .into_response();
+    }
+
+    let mut settings_changed = false;
+    let prompt_prefix = normalize_optional_text(body.prompt_prefix.as_deref());
+    let model = normalize_optional_text(body.model.as_deref());
+    if body.prompt_prefix.is_some() || body.model.is_some() || body.reasoning_effort.is_some() {
+        let current = kanban
+            .card_settings
+            .get(&work_item_key)
+            .cloned()
+            .unwrap_or_default();
+        let mut next = current.clone();
+        if body.prompt_prefix.is_some() {
+            next.prompt_prefix = prompt_prefix;
+        }
+        if body.model.is_some() {
+            next.model = model;
+        }
+        if body.reasoning_effort.is_some() {
+            next.reasoning_effort = body.reasoning_effort;
+        }
+        if next != current {
+            settings_changed = true;
+            if next.prompt_prefix.is_none()
+                && next.model.is_none()
+                && next.reasoning_effort.is_none()
+            {
+                kanban.card_settings.remove(&work_item_key);
+            } else {
+                kanban.card_settings.insert(work_item_key.clone(), next);
+            }
+        }
+    }
+
+    let prev_col = kanban
+        .card_positions
+        .get(&work_item_key)
+        .map(|pos| pos.column_id.clone());
+    let changed = kanban.move_card(&work_item_key, &body.column_id, body.position);
+    let run_settings = kanban
+        .card_settings
+        .get(&work_item_key)
+        .cloned()
+        .unwrap_or_default();
+    let snapshot = kanban.clone();
+    if changed || settings_changed {
+        persist_workspace_kanban(&state.config.codex_home, workspace_id, &snapshot).await;
+        // TODO: add a dedicated workspace kanban SSE variant
+        let data = serde_json::to_value(&snapshot).unwrap_or(JsonValue::Null);
+        let _ = state
+            .events_tx
+            .send(SyncEvent::GithubKanbanUpdated { data });
+    }
+
+    // Use autoTrigger from board columns instead of hardcoded column names
+    let target_trigger = board
+        .columns
+        .iter()
+        .find(|c| c.id == body.column_id)
+        .and_then(|c| c.auto_trigger);
+
+    if changed
+        && matches!(target_trigger, Some(workspace::AutoTrigger::StartExecution))
+        && prev_col.as_deref() != Some(&body.column_id)
+        && state.github_webhook.is_some()
+    {
+        if let Err(err) =
+            enqueue_workspace_github_job(&state, workspace_id, &work_item_key, run_settings).await
+        {
+            warn!("failed to enqueue github job for {work_item_key}: {err:#}");
+        }
+    }
+
+    if changed
+        && matches!(target_trigger, Some(workspace::AutoTrigger::CloseIssue))
+        && prev_col.as_deref() != Some(&body.column_id)
+    {
+        if let Some(webhook) = state.github_webhook.as_ref()
+            && let Some((repo, number, kind)) = parse_github_work_item_key(&work_item_key)
+            && kind == "issue"
+        {
+            if let Err(err) = webhook.set_work_item_state(&repo, number, "closed").await {
+                warn!(
+                    "failed to close github issue {repo}#{number} for workspace {workspace_id}: {err:#}"
+                );
+            }
+        }
+    }
+
+    Json(serde_json::json!({})).into_response()
+}
+
+async fn handle_workspace_jobs(
+    State(state): State<AppState>,
+    Path(workspace_id): Path<String>,
+) -> Response {
+    let workspace_id = workspace_id.trim();
+    let exists = state.workspaces.read().await.get(workspace_id).is_some();
+    if !exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("workspace_not_found")),
+        )
+            .into_response();
+    }
+
+    let keys: HashSet<String> =
+        load_workspace_work_items_snapshot(&state.config.codex_home, workspace_id)
+            .await
+            .items
+            .iter()
+            .map(|i| i.work_item_key.clone())
+            .collect();
+    let jobs = state.github_jobs.read().await;
+    let mut out: Vec<GithubJob> = jobs
+        .values()
+        .filter(|job| keys.contains(&job.work_item_key))
+        .cloned()
+        .collect();
+    out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+    Json(serde_json::json!({ "jobs": out })).into_response()
+}
+
+async fn handle_workspace_job_log(
+    State(state): State<AppState>,
+    Path((workspace_id, job_id)): Path<(String, String)>,
+) -> Response {
+    let workspace_id = workspace_id.trim();
+    let exists = state.workspaces.read().await.get(workspace_id).is_some();
+    if !exists {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("workspace_not_found")),
+        )
+            .into_response();
+    }
+
+    let keys: HashSet<String> =
+        load_workspace_work_items_snapshot(&state.config.codex_home, workspace_id)
+            .await
+            .items
+            .iter()
+            .map(|i| i.work_item_key.clone())
+            .collect();
+
+    let job = {
+        let jobs = state.github_jobs.read().await;
+        jobs.get(job_id.trim()).cloned()
+    };
+    let Some(job) = job else {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("github_job_not_found")),
+        )
+            .into_response();
+    };
+    if !keys.contains(&job.work_item_key) {
+        return (
+            StatusCode::NOT_FOUND,
+            Json(json_error("github_job_not_found")),
+        )
+            .into_response();
+    }
+
+    let Some(rel) = job.log_path.clone() else {
+        return (StatusCode::NOT_FOUND, Json(json_error("github_job_no_log"))).into_response();
+    };
+
+    let path = match safe_join(&state.config.codex_home, &rel) {
+        Ok(path) => path,
+        Err(_) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json_error("github_job_log_path_invalid")),
+            )
+                .into_response();
+        }
+    };
+
+    match tokio::fs::metadata(&path).await {
+        Ok(_) => {}
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(json_error("github_job_log_not_found")),
+            )
+                .into_response();
+        }
+        Err(err) => {
+            warn!(
+                "failed to stat github job log for {} at {}: {err}",
+                job.job_id,
+                path.display()
+            );
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json_error("github_job_log_read_failed")),
+            )
+                .into_response();
+        }
+    }
+
+    match read_tail_file(&path, GITHUB_JOB_LOG_MAX_BYTES).await {
+        Ok((log_text, truncated)) => Json(GithubJobLogResponse {
+            job_id: job.job_id,
+            log_text,
+            truncated,
+        })
+        .into_response(),
+        Err(err) => {
+            warn!("failed to read github job log for {}: {err:#}", job.job_id);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json_error("github_job_log_read_failed")),
+            )
+                .into_response()
+        }
+    }
+}
+
 async fn handle_update_github_kanban_card_settings(
     State(state): State<AppState>,
     Json(body): Json<UpdateGithubKanbanCardSettingsRequest>,
@@ -2353,6 +3859,7 @@ async fn handle_get_github_kanban(State(state): State<AppState>) -> Response {
         .await
         .items
         .iter()
+        .filter(|i| i.state.eq_ignore_ascii_case("open"))
         .map(|i| i.work_item_key.clone())
         .collect();
 
@@ -4433,6 +5940,20 @@ fn parse_repo_full_name_from_git_remote_url(input: &str) -> Option<String> {
     Some(format!("{owner}/{repo}"))
 }
 
+fn is_valid_repo_full_name(input: &str) -> bool {
+    let input = input.trim();
+    let Some((owner, repo)) = input.split_once('/') else {
+        return false;
+    };
+    if owner.trim().is_empty() || repo.trim().is_empty() {
+        return false;
+    }
+    if owner.contains(' ') || repo.contains(' ') {
+        return false;
+    }
+    !repo.contains('/')
+}
+
 async fn resolve_github_repos_for_kanban(
     config_toml: &codex_core::config::ConfigToml,
     config_cwd: &AbsolutePathBuf,
@@ -4598,6 +6119,195 @@ async fn persist_github_jobs(codex_home: &FsPath, jobs: &HashMap<String, GithubJ
     }
 }
 
+async fn get_workspace_kanban_lock(state: &AppState, workspace_id: &str) -> Arc<Mutex<()>> {
+    let locks = state.workspace_kanban_locks.read().await;
+    if let Some(lock) = locks.get(workspace_id) {
+        return Arc::clone(lock);
+    }
+    drop(locks);
+    let mut locks = state.workspace_kanban_locks.write().await;
+    let lock = locks
+        .entry(workspace_id.to_string())
+        .or_insert_with(|| Arc::new(Mutex::new(())));
+    Arc::clone(lock)
+}
+
+fn workspace_storage_dir(codex_home: &FsPath, workspace_id: &str) -> anyhow::Result<PathBuf> {
+    if uuid::Uuid::parse_str(workspace_id).is_err() {
+        anyhow::bail!("invalid workspace id format");
+    }
+    Ok(codex_home.join("workspaces").join(workspace_id))
+}
+
+async fn load_workspace_work_items_snapshot(
+    codex_home: &FsPath,
+    workspace_id: &str,
+) -> GithubWorkItemsSnapshot {
+    let dir = match workspace_storage_dir(codex_home, workspace_id) {
+        Ok(dir) => dir,
+        Err(_) => return GithubWorkItemsSnapshot::default(),
+    };
+    let path = dir.join(WORKSPACE_WORK_ITEMS_FILE_NAME);
+    let content = match tokio::fs::read(&path).await {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            return GithubWorkItemsSnapshot::default();
+        }
+        Err(err) => {
+            warn!("failed to read workspace work items snapshot for {workspace_id}: {err}");
+            return GithubWorkItemsSnapshot::default();
+        }
+    };
+    match serde_json::from_slice::<GithubWorkItemsSnapshot>(&content) {
+        Ok(snapshot) => snapshot,
+        Err(err) => {
+            warn!("failed to parse workspace work items snapshot for {workspace_id}: {err}");
+            GithubWorkItemsSnapshot::default()
+        }
+    }
+}
+
+async fn persist_workspace_work_items_snapshot(
+    codex_home: &FsPath,
+    workspace_id: &str,
+    snapshot: &GithubWorkItemsSnapshot,
+) {
+    let dir = match workspace_storage_dir(codex_home, workspace_id) {
+        Ok(dir) => dir,
+        Err(err) => {
+            warn!("skipping persist workspace work items for {workspace_id}: {err}");
+            return;
+        }
+    };
+    if let Err(err) = tokio::fs::create_dir_all(&dir).await {
+        warn!("failed to create workspace dir for {workspace_id}: {err}");
+        return;
+    }
+    let path = dir.join(WORKSPACE_WORK_ITEMS_FILE_NAME);
+    let tmp_path = path.with_extension("json.tmp");
+    let mut body = match serde_json::to_vec_pretty(snapshot) {
+        Ok(body) => body,
+        Err(err) => {
+            warn!("failed to serialize workspace work items snapshot for {workspace_id}: {err}");
+            return;
+        }
+    };
+    body.push(b'\n');
+    if let Err(err) = tokio::fs::write(&tmp_path, body).await {
+        warn!("failed to write workspace work items snapshot tmp for {workspace_id}: {err}");
+        return;
+    }
+    if let Err(_err) = tokio::fs::rename(&tmp_path, &path).await {
+        let _ = tokio::fs::remove_file(&path).await;
+        if let Err(err) = tokio::fs::rename(&tmp_path, &path).await {
+            warn!("failed to persist workspace work items snapshot for {workspace_id}: {err}");
+        }
+    }
+}
+
+fn workspace_default_kanban(board: &workspace::BoardConfig) -> kanban::KanbanConfig {
+    let mut columns = board
+        .columns
+        .iter()
+        .map(|col| kanban::KanbanColumn {
+            id: col.id.clone(),
+            name: col.name.clone(),
+            position: col.position,
+        })
+        .collect::<Vec<_>>();
+    columns.sort_by(|a, b| a.position.cmp(&b.position));
+    kanban::KanbanConfig {
+        columns,
+        card_positions: HashMap::new(),
+        card_settings: HashMap::new(),
+    }
+}
+
+async fn load_or_init_workspace_kanban(
+    codex_home: &FsPath,
+    workspace_id: &str,
+    board: &workspace::BoardConfig,
+) -> kanban::KanbanConfig {
+    let dir = match workspace_storage_dir(codex_home, workspace_id) {
+        Ok(dir) => dir,
+        Err(_) => return workspace_default_kanban(board),
+    };
+    let path = dir.join(WORKSPACE_KANBAN_FILE_NAME);
+    let content = match tokio::fs::read(&path).await {
+        Ok(content) => content,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let cfg = workspace_default_kanban(board);
+            persist_workspace_kanban(codex_home, workspace_id, &cfg).await;
+            return cfg;
+        }
+        Err(err) => {
+            warn!("failed to read workspace kanban for {workspace_id}: {err}");
+            return workspace_default_kanban(board);
+        }
+    };
+
+    match serde_json::from_slice::<kanban::KanbanConfig>(&content) {
+        Ok(mut cfg) => {
+            let desired_columns = workspace_default_kanban(board).columns;
+            let columns_match = cfg.columns.len() == desired_columns.len()
+                && cfg
+                    .columns
+                    .iter()
+                    .zip(desired_columns.iter())
+                    .all(|(a, b)| a.id == b.id && a.name == b.name && a.position == b.position);
+
+            let mut changed = false;
+            if cfg.columns.is_empty() || !columns_match {
+                cfg.columns = desired_columns;
+                changed = true;
+            }
+
+            let column_ids = cfg
+                .columns
+                .iter()
+                .map(|col| col.id.clone())
+                .collect::<HashSet<_>>();
+            if let Some(first_col) = cfg
+                .columns
+                .iter()
+                .min_by_key(|c| c.position)
+                .map(|c| c.id.as_str())
+            {
+                for pos in cfg.card_positions.values_mut() {
+                    if !column_ids.contains(&pos.column_id) {
+                        pos.column_id = first_col.to_string();
+                        changed = true;
+                    }
+                }
+            }
+
+            if changed {
+                persist_workspace_kanban(codex_home, workspace_id, &cfg).await;
+            }
+            cfg
+        }
+        Err(err) => {
+            warn!("failed to parse workspace kanban for {workspace_id}, using default: {err}");
+            workspace_default_kanban(board)
+        }
+    }
+}
+
+async fn persist_workspace_kanban(
+    codex_home: &FsPath,
+    workspace_id: &str,
+    cfg: &kanban::KanbanConfig,
+) {
+    let dir = match workspace_storage_dir(codex_home, workspace_id) {
+        Ok(dir) => dir,
+        Err(err) => {
+            warn!("skipping persist workspace kanban for {workspace_id}: {err}");
+            return;
+        }
+    };
+    kanban::persist_to(&dir, WORKSPACE_KANBAN_FILE_NAME, cfg).await;
+}
+
 async fn sync_github_work_items(state: &AppState) -> anyhow::Result<()> {
     let Some(webhook) = state.github_webhook.as_ref() else {
         return Ok(());
@@ -4631,12 +6341,46 @@ async fn sync_github_work_items(state: &AppState) -> anyhow::Result<()> {
     Ok(())
 }
 
+async fn sync_workspace_work_items(state: &AppState, workspace_id: &str) -> anyhow::Result<()> {
+    let Some(webhook) = state.github_webhook.as_ref() else {
+        return Ok(());
+    };
+    let Some(workspace) = state.workspaces.read().await.get(workspace_id) else {
+        return Ok(());
+    };
+    if workspace.repos.is_empty() {
+        return Ok(());
+    }
+
+    let mut all = Vec::new();
+    for repo in &workspace.repos {
+        let items = webhook.list_repo_work_items(&repo.full_name).await?;
+        all.extend(items);
+    }
+
+    let mut by_key: HashMap<String, GithubWorkItem> = HashMap::new();
+    for raw in all {
+        let item = convert_work_item(raw);
+        by_key.insert(item.work_item_key.clone(), item);
+    }
+    let mut items: Vec<GithubWorkItem> = by_key.into_values().collect();
+    items.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    let snapshot = GithubWorkItemsSnapshot {
+        fetched_at: now_ms(),
+        items,
+    };
+
+    persist_workspace_work_items_snapshot(&state.config.codex_home, workspace_id, &snapshot).await;
+    Ok(())
+}
+
 async fn github_sync_loop(state: AppState) {
     {
         let _guard = state.github_sync_lock.lock().await;
         if let Err(err) = sync_github_work_items(&state).await {
             warn!("github sync failed: {err:#}");
         }
+        sync_all_workspace_work_items(&state).await;
     }
 
     let mut interval = tokio::time::interval(GITHUB_SYNC_INTERVAL);
@@ -4646,6 +6390,23 @@ async fn github_sync_loop(state: AppState) {
         let _guard = state.github_sync_lock.lock().await;
         if let Err(err) = sync_github_work_items(&state).await {
             warn!("github sync failed: {err:#}");
+        }
+        sync_all_workspace_work_items(&state).await;
+    }
+}
+
+async fn sync_all_workspace_work_items(state: &AppState) {
+    let workspace_ids: Vec<String> = state
+        .workspaces
+        .read()
+        .await
+        .list()
+        .iter()
+        .map(|s| s.id.clone())
+        .collect();
+    for ws_id in workspace_ids {
+        if let Err(err) = sync_workspace_work_items(state, &ws_id).await {
+            warn!("workspace sync failed for {ws_id}: {err:#}");
         }
     }
 }
@@ -4677,6 +6438,91 @@ async fn enqueue_github_job(
     let title = item.title.clone();
     drop(snapshot);
 
+    enqueue_github_job_inner(
+        state,
+        webhook,
+        repo,
+        number,
+        kind,
+        &work_item_key,
+        &title,
+        run_settings,
+    )
+    .await
+}
+
+async fn enqueue_workspace_github_job(
+    state: &AppState,
+    workspace_id: &str,
+    work_item_key: &str,
+    run_settings: kanban::KanbanCardSettings,
+) -> anyhow::Result<()> {
+    // Validate workspace_id early so callers get an error
+    workspace_storage_dir(&state.config.codex_home, workspace_id)?;
+
+    let work_item_key = work_item_key.trim().to_string();
+    let Some(webhook) = state.github_webhook.clone() else {
+        anyhow::bail!("github not enabled");
+    };
+    let Some((repo, number, kind)) = parse_github_work_item_key(&work_item_key) else {
+        anyhow::bail!("invalid work item key: {work_item_key}");
+    };
+
+    // Merge workspace default_exec with card-level run_settings (card wins)
+    let default_exec = state
+        .workspaces
+        .read()
+        .await
+        .get(workspace_id)
+        .map(|w| w.default_exec.clone());
+    let merged_settings = kanban::KanbanCardSettings {
+        model: run_settings
+            .model
+            .or_else(|| default_exec.as_ref().and_then(|e| e.model.clone())),
+        reasoning_effort: run_settings
+            .reasoning_effort
+            .or_else(|| default_exec.as_ref().and_then(|e| e.reasoning_effort)),
+        prompt_prefix: run_settings
+            .prompt_prefix
+            .or_else(|| default_exec.as_ref().and_then(|e| e.prompt.clone())),
+    };
+
+    let snapshot = load_workspace_work_items_snapshot(&state.config.codex_home, workspace_id).await;
+    let Some(item) = snapshot
+        .items
+        .iter()
+        .find(|i| i.work_item_key == work_item_key)
+    else {
+        return Ok(());
+    };
+    if !item.state.eq_ignore_ascii_case("open") {
+        return Ok(());
+    }
+    let title = item.title.clone();
+
+    enqueue_github_job_inner(
+        state,
+        webhook,
+        repo,
+        number,
+        kind,
+        &work_item_key,
+        &title,
+        merged_settings,
+    )
+    .await
+}
+
+async fn enqueue_github_job_inner(
+    state: &AppState,
+    webhook: GithubWebhook,
+    repo: String,
+    number: u64,
+    kind: String,
+    work_item_key: &str,
+    title: &str,
+    run_settings: kanban::KanbanCardSettings,
+) -> anyhow::Result<()> {
     let base_prompt = if title.is_empty() {
         format!("Work on {repo} {kind} #{number}.")
     } else {
@@ -4700,7 +6546,7 @@ async fn enqueue_github_job(
             job_id.clone(),
             GithubJob {
                 job_id: job_id.clone(),
-                work_item_key: work_item_key.clone(),
+                work_item_key: work_item_key.to_string(),
                 status: "queued".to_string(),
                 created_at,
                 started_at: None,
@@ -4715,14 +6561,14 @@ async fn enqueue_github_job(
     }
     let _ = state.events_tx.send(SyncEvent::GithubJobUpdated {
         job_id: job_id.clone(),
-        work_item_key: work_item_key.clone(),
+        work_item_key: work_item_key.to_string(),
         status: "queued".to_string(),
     });
 
     let jobs = Arc::clone(&state.github_jobs);
     let events_tx = state.events_tx.clone();
     let codex_home = state.config.codex_home.clone();
-    let work_item_key = work_item_key.clone();
+    let work_item_key = work_item_key.to_string();
     let model = run_settings.model.clone();
     let reasoning_effort = run_settings
         .reasoning_effort
