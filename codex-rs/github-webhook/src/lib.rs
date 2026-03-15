@@ -326,6 +326,12 @@ pub struct GithubCodexJobOutput {
     pub last_message: String,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct GithubCodexRunOverrides {
+    pub model: Option<String>,
+    pub reasoning_effort: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct GithubWorkItemDetail {
@@ -620,8 +626,7 @@ impl GithubWebhook {
         kind: &str,
         number: u64,
         prompt: String,
-        model: Option<String>,
-        reasoning_effort: Option<String>,
+        overrides: GithubCodexRunOverrides,
         log_path: Option<std::path::PathBuf>,
     ) -> Result<GithubCodexJobOutput> {
         let (owner, repo) = split_owner_repo(repo_full_name)?;
@@ -639,8 +644,12 @@ impl GithubWebhook {
             .context("busy")?;
 
         let response_target = match kind {
-            WorkKind::Issue => ResponseTarget::IssueComment { issue_number: number },
-            WorkKind::Pull => ResponseTarget::PullRequestReview { pull_number: number },
+            WorkKind::Issue => ResponseTarget::IssueComment {
+                issue_number: number,
+            },
+            WorkKind::Pull => ResponseTarget::PullRequestReview {
+                pull_number: number,
+            },
             WorkKind::Push => ResponseTarget::None,
         };
         let item = WorkItem {
@@ -672,14 +681,20 @@ impl GithubWebhook {
         };
         let _guard = work_lock.lock_owned().await;
 
-        let mut overrides = Vec::new();
-        if let Some(model) = model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let mut override_args = Vec::new();
+        if let Some(model) = overrides
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+        {
             if model.contains('\"') || model.contains('\n') || model.contains('\r') {
                 anyhow::bail!("invalid model override");
             }
-            overrides.push(format!("model=\"{model}\""));
+            override_args.push(format!("model=\"{model}\""));
         }
-        if let Some(effort) = reasoning_effort
+        if let Some(effort) = overrides
+            .reasoning_effort
             .as_deref()
             .map(str::trim)
             .filter(|s| !s.is_empty())
@@ -687,11 +702,12 @@ impl GithubWebhook {
             if effort.contains('\"') || effort.contains('\n') || effort.contains('\r') {
                 anyhow::bail!("invalid reasoning effort override");
             }
-            overrides.push(format!("model_reasoning_effort=\"{effort}\""));
+            override_args.push(format!("model_reasoning_effort=\"{effort}\""));
         }
 
         let output =
-            run_work_item_inner_with_output(&state, &item, &overrides, log_path.as_deref()).await?;
+            run_work_item_inner_with_output(&state, &item, &override_args, log_path.as_deref())
+                .await?;
         drop(permit);
         Ok(GithubCodexJobOutput {
             thread_id: output.thread_id,

@@ -89,6 +89,7 @@ enum Subcommand {
     Exec(ExecCli),
 
     /// Start Codex as a Web UI server (HTTP+SSE).
+    #[clap(alias = "github")]
     Serve(ServeCli),
 
     /// Run a code review non-interactively.
@@ -1112,6 +1113,13 @@ mod tests {
     use codex_protocol::ThreadId;
     use codex_protocol::protocol::TokenUsage;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn github_subcommand_alias_parses_as_serve() {
+        let cli = MultitoolCli::try_parse_from(["codex", "github"].as_ref())
+            .expect("parse should succeed");
+        assert_matches!(cli.subcommand, Some(Subcommand::Serve(_)));
+    }
 
     fn finalize_resume_from_args(args: &[&str]) -> TuiCli {
         let cli = MultitoolCli::try_parse_from(args).expect("parse");

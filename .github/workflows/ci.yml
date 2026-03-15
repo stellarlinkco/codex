@@ -262,33 +262,33 @@ jobs:
 
           if [[ -n "${gnu_asset_name:-}" ]]; then
             cat <<'EOF' > "${server_root}/latest/download/${gnu_asset_name}"
-#!/usr/bin/env bash
-if [[ "${1:-}" == "--version" ]]; then
-  echo "codex-cli 9.9.9-gnu"
-  exit 0
-fi
-echo "gnu"
-EOF
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "codex-cli 9.9.9-gnu"
+            exit 0
+          fi
+          echo "gnu"
+          EOF
             chmod +x "${server_root}/latest/download/${gnu_asset_name}"
 
             cat <<'EOF' > "${server_root}/latest/download/${musl_asset_name}"
-#!/usr/bin/env bash
-if [[ "${1:-}" == "--version" ]]; then
-  echo "codex-cli 9.9.9-musl"
-  exit 0
-fi
-echo "musl"
-EOF
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "codex-cli 9.9.9-musl"
+            exit 0
+          fi
+          echo "musl"
+          EOF
             chmod +x "${server_root}/latest/download/${musl_asset_name}"
           else
             cat <<'EOF' > "${server_root}/latest/download/${asset_name}"
-#!/usr/bin/env bash
-if [[ "${1:-}" == "--version" ]]; then
-  echo "codex-cli 9.9.9"
-  exit 0
-fi
-echo "dummy"
-EOF
+          #!/usr/bin/env bash
+          if [[ "${1:-}" == "--version" ]]; then
+            echo "codex-cli 9.9.9"
+            exit 0
+          fi
+          echo "dummy"
+          EOF
             chmod +x "${server_root}/latest/download/${asset_name}"
           fi
 

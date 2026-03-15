@@ -36,6 +36,7 @@ use codex_core::models_manager::collaboration_mode_presets::CollaborationModesCo
 use codex_core::models_manager::manager::RefreshStrategy;
 use codex_core::skills::SkillLoadOutcome;
 use codex_github_webhook::GithubCodexJobOutput;
+use codex_github_webhook::GithubCodexRunOverrides;
 use codex_github_webhook::GithubRepoWorkItem as GithubRepoWorkItemRaw;
 use codex_github_webhook::GithubWebhook;
 use codex_protocol::ThreadId;
@@ -1900,7 +1901,7 @@ mod tests {
             anyhow::ensure!(
                 jobs.get("jobs")
                     .and_then(|v| v.as_array())
-                    .is_some_and(|arr| arr.is_empty()),
+                    .is_some_and(Vec::is_empty),
                 "expected empty jobs list without github_webhook"
             );
             checks.push(serde_json::json!({
@@ -3632,28 +3633,21 @@ async fn handle_move_workspace_kanban_card(
         && matches!(target_trigger, Some(workspace::AutoTrigger::StartExecution))
         && prev_col.as_deref() != Some(&body.column_id)
         && state.github_webhook.is_some()
-    {
-        if let Err(err) =
+        && let Err(err) =
             enqueue_workspace_github_job(&state, workspace_id, &work_item_key, run_settings).await
-        {
-            warn!("failed to enqueue github job for {work_item_key}: {err:#}");
-        }
+    {
+        warn!("failed to enqueue github job for {work_item_key}: {err:#}");
     }
 
     if changed
         && matches!(target_trigger, Some(workspace::AutoTrigger::CloseIssue))
         && prev_col.as_deref() != Some(&body.column_id)
+        && let Some(webhook) = state.github_webhook.as_ref()
+        && let Some((repo, number, kind)) = parse_github_work_item_key(&work_item_key)
+        && kind == "issue"
+        && let Err(err) = webhook.set_work_item_state(&repo, number, "closed").await
     {
-        if let Some(webhook) = state.github_webhook.as_ref()
-            && let Some((repo, number, kind)) = parse_github_work_item_key(&work_item_key)
-            && kind == "issue"
-        {
-            if let Err(err) = webhook.set_work_item_state(&repo, number, "closed").await {
-                warn!(
-                    "failed to close github issue {repo}#{number} for workspace {workspace_id}: {err:#}"
-                );
-            }
-        }
+        warn!("failed to close github issue {repo}#{number} for workspace {workspace_id}: {err:#}");
     }
 
     Json(serde_json::json!({})).into_response()
@@ -3963,10 +3957,12 @@ async fn handle_move_github_kanban_card(
         });
     }
 
-    if changed && body.column_id == "in-progress" && prev_col.as_deref() != Some("in-progress") {
-        if let Err(err) = enqueue_github_job(&state, &work_item_key, run_settings).await {
-            warn!("failed to enqueue github job for {work_item_key}: {err:#}");
-        }
+    if changed
+        && body.column_id == "in-progress"
+        && prev_col.as_deref() != Some("in-progress")
+        && let Err(err) = enqueue_github_job(&state, &work_item_key, run_settings).await
+    {
+        warn!("failed to enqueue github job for {work_item_key}: {err:#}");
     }
 
     Json(serde_json::json!({})).into_response()
@@ -6438,17 +6434,7 @@ async fn enqueue_github_job(
     let title = item.title.clone();
     drop(snapshot);
 
-    enqueue_github_job_inner(
-        state,
-        webhook,
-        repo,
-        number,
-        kind,
-        &work_item_key,
-        &title,
-        run_settings,
-    )
-    .await
+    enqueue_github_job_inner(state, webhook, repo, number, kind, &title, run_settings).await
 }
 
 async fn enqueue_workspace_github_job(
@@ -6469,22 +6455,21 @@ async fn enqueue_workspace_github_job(
     };
 
     // Merge workspace default_exec with card-level run_settings (card wins)
-    let default_exec = state
-        .workspaces
-        .read()
-        .await
-        .get(workspace_id)
-        .map(|w| w.default_exec.clone());
+    let (default_model, default_reasoning_effort, default_prompt) = {
+        let workspaces = state.workspaces.read().await;
+        match workspaces.get(workspace_id) {
+            Some(workspace) => (
+                workspace.default_exec.model,
+                workspace.default_exec.reasoning_effort,
+                workspace.default_exec.prompt,
+            ),
+            None => (None, None, None),
+        }
+    };
     let merged_settings = kanban::KanbanCardSettings {
-        model: run_settings
-            .model
-            .or_else(|| default_exec.as_ref().and_then(|e| e.model.clone())),
-        reasoning_effort: run_settings
-            .reasoning_effort
-            .or_else(|| default_exec.as_ref().and_then(|e| e.reasoning_effort)),
-        prompt_prefix: run_settings
-            .prompt_prefix
-            .or_else(|| default_exec.as_ref().and_then(|e| e.prompt.clone())),
+        model: run_settings.model.or(default_model),
+        reasoning_effort: run_settings.reasoning_effort.or(default_reasoning_effort),
+        prompt_prefix: run_settings.prompt_prefix.or(default_prompt),
     };
 
     let snapshot = load_workspace_work_items_snapshot(&state.config.codex_home, workspace_id).await;
@@ -6500,17 +6485,7 @@ async fn enqueue_workspace_github_job(
     }
     let title = item.title.clone();
 
-    enqueue_github_job_inner(
-        state,
-        webhook,
-        repo,
-        number,
-        kind,
-        &work_item_key,
-        &title,
-        merged_settings,
-    )
-    .await
+    enqueue_github_job_inner(state, webhook, repo, number, kind, &title, merged_settings).await
 }
 
 async fn enqueue_github_job_inner(
@@ -6519,7 +6494,6 @@ async fn enqueue_github_job_inner(
     repo: String,
     number: u64,
     kind: String,
-    work_item_key: &str,
     title: &str,
     run_settings: kanban::KanbanCardSettings,
 ) -> anyhow::Result<()> {
@@ -6536,6 +6510,7 @@ async fn enqueue_github_job_inner(
         .map(|prefix| format!("{prefix}\n\n{base_prompt}"))
         .unwrap_or(base_prompt);
 
+    let work_item_key = github_work_item_key(&repo, number, &kind);
     let job_id = uuid::Uuid::new_v4().to_string();
     let created_at = now_ms();
     let log_rel = format!("{GITHUB_JOB_LOGS_DIR}/{job_id}.log");
@@ -6546,7 +6521,7 @@ async fn enqueue_github_job_inner(
             job_id.clone(),
             GithubJob {
                 job_id: job_id.clone(),
-                work_item_key: work_item_key.to_string(),
+                work_item_key: work_item_key.clone(),
                 status: "queued".to_string(),
                 created_at,
                 started_at: None,
@@ -6561,14 +6536,14 @@ async fn enqueue_github_job_inner(
     }
     let _ = state.events_tx.send(SyncEvent::GithubJobUpdated {
         job_id: job_id.clone(),
-        work_item_key: work_item_key.to_string(),
+        work_item_key: work_item_key.clone(),
         status: "queued".to_string(),
     });
 
     let jobs = Arc::clone(&state.github_jobs);
     let events_tx = state.events_tx.clone();
     let codex_home = state.config.codex_home.clone();
-    let work_item_key = work_item_key.to_string();
+    let work_item_key = work_item_key.clone();
     let model = run_settings.model.clone();
     let reasoning_effort = run_settings
         .reasoning_effort
@@ -6588,18 +6563,13 @@ async fn enqueue_github_job_inner(
             status: "running".to_string(),
         });
 
+        let overrides = GithubCodexRunOverrides {
+            model,
+            reasoning_effort,
+        };
         let result: anyhow::Result<GithubCodexJobOutput> = webhook
-            .run_codex_for_work_item(
-                &repo,
-                &kind,
-                number,
-                prompt,
-                model,
-                reasoning_effort,
-                log_path,
-            )
-            .await
-            .map_err(Into::into);
+            .run_codex_for_work_item(&repo, &kind, number, prompt, overrides, log_path)
+            .await;
 
         {
             let mut map = jobs.write().await;

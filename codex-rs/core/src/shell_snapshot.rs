@@ -613,6 +613,7 @@ mod tests {
         assert!(snapshot.contains("setopts "));
     }
 
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     async fn get_snapshot(shell_type: ShellType) -> Result<String> {
         let dir = tempdir()?;
         let path = dir.path().join("snapshot.sh");
