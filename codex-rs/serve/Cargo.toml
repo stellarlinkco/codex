@@ -22,6 +22,7 @@ axum = { workspace = true, default-features = false, features = [
 base64 = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 codex-core = { workspace = true }
+codex-features = { workspace = true }
 codex-file-search = { workspace = true }
 codex-github-webhook = { workspace = true }
 codex-protocol = { workspace = true }

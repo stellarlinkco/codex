@@ -259,7 +259,8 @@ impl McpProcess {
 
     /// Send an `account/rateLimits/read` JSON-RPC request.
     pub async fn send_get_account_rate_limits_request(&mut self) -> anyhow::Result<i64> {
-        self.send_request("account/rateLimits/read", None).await
+        self.send_request("account/rateLimits/read", /*params*/ None)
+            .await
     }
 
     /// Send an `account/read` JSON-RPC request.
@@ -700,7 +701,7 @@ impl McpProcess {
 
     /// Send an `account/logout` JSON-RPC request.
     pub async fn send_logout_account_request(&mut self) -> anyhow::Result<i64> {
-        self.send_request("account/logout", None).await
+        self.send_request("account/logout", /*params*/ None).await
     }
 
     /// Send an `account/login/start` JSON-RPC request for API key login.

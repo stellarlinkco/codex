@@ -99,6 +99,7 @@ pub(crate) fn compile_permission_profile(
         allow_login_shell: true,
         shell_environment_policy: ShellEnvironmentPolicy::default(),
         windows_sandbox_mode: None,
+        windows_sandbox_private_desktop: false,
         macos_seatbelt_profile_extensions,
     })
 }

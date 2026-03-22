@@ -187,7 +187,6 @@ use codex_core::ThreadSortKey as CoreThreadSortKey;
 use codex_core::auth::AuthMode as CoreAuthMode;
 use codex_core::auth::CLIENT_ID;
 use codex_core::auth::login_with_api_key;
-use codex_core::auth::login_with_chatgpt_auth_tokens;
 use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::NetworkProxyAuditMetadata;
@@ -203,7 +202,6 @@ use codex_core::exec::ExecExpiration;
 use codex_core::exec::ExecParams;
 use codex_core::exec_env::create_env;
 use codex_core::features::FEATURES;
-use codex_core::features::Feature;
 use codex_core::features::Stage;
 use codex_core::find_archived_thread_path_by_id_str;
 use codex_core::find_thread_name_by_id;
@@ -216,7 +214,7 @@ use codex_core::models_manager::collaboration_mode_presets::CollaborationModesCo
 use codex_core::parse_cursor;
 use codex_core::plugins::AppConnectorId;
 use codex_core::plugins::MarketplaceError;
-use codex_core::plugins::MarketplacePluginSourceSummary;
+use codex_core::plugins::MarketplacePluginSource;
 use codex_core::plugins::PluginInstallError as CorePluginInstallError;
 use codex_core::plugins::PluginInstallRequest;
 use codex_core::plugins::PluginUninstallError as CorePluginUninstallError;
@@ -233,9 +231,12 @@ use codex_core::state_db::reconcile_rollout;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_core::windows_sandbox::WindowsSandboxSetupMode as CoreWindowsSandboxSetupMode;
 use codex_core::windows_sandbox::WindowsSandboxSetupRequest;
+use codex_features::Feature;
+use codex_features::canonical_feature_for_key;
 use codex_feedback::CodexFeedback;
 use codex_login::ServerOptions as LoginServerOptions;
 use codex_login::ShutdownHandle;
+use codex_login::auth::login_with_chatgpt_auth_tokens;
 use codex_login::run_login_server;
 use codex_protocol::ThreadId;
 use codex_protocol::config_types::CollaborationMode;
@@ -256,8 +257,6 @@ use codex_protocol::protocol::McpAuthStatus as CoreMcpAuthStatus;
 use codex_protocol::protocol::McpServerRefreshConfig;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RateLimitSnapshot as CoreRateLimitSnapshot;
-use codex_protocol::protocol::RemoteSkillHazelnutScope;
-use codex_protocol::protocol::RemoteSkillProductSurface;
 use codex_protocol::protocol::ReviewDelivery as CoreReviewDelivery;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget as CoreReviewTarget;
@@ -342,22 +341,32 @@ enum ThreadShutdownResult {
     TimedOut,
 }
 
-fn convert_remote_scope(scope: ApiHazelnutScope) -> RemoteSkillHazelnutScope {
+fn convert_remote_scope(scope: ApiHazelnutScope) -> codex_core::skills::remote::RemoteSkillScope {
     match scope {
-        ApiHazelnutScope::WorkspaceShared => RemoteSkillHazelnutScope::WorkspaceShared,
-        ApiHazelnutScope::AllShared => RemoteSkillHazelnutScope::AllShared,
-        ApiHazelnutScope::Personal => RemoteSkillHazelnutScope::Personal,
-        ApiHazelnutScope::Example => RemoteSkillHazelnutScope::Example,
+        ApiHazelnutScope::WorkspaceShared => {
+            codex_core::skills::remote::RemoteSkillScope::WorkspaceShared
+        }
+        ApiHazelnutScope::AllShared => codex_core::skills::remote::RemoteSkillScope::AllShared,
+        ApiHazelnutScope::Personal => codex_core::skills::remote::RemoteSkillScope::Personal,
+        ApiHazelnutScope::Example => codex_core::skills::remote::RemoteSkillScope::Example,
     }
 }
 
-fn convert_remote_product_surface(product_surface: ApiProductSurface) -> RemoteSkillProductSurface {
+fn convert_remote_product_surface(
+    product_surface: ApiProductSurface,
+) -> codex_core::skills::remote::RemoteSkillProductSurface {
     match product_surface {
-        ApiProductSurface::Chatgpt => RemoteSkillProductSurface::Chatgpt,
-        ApiProductSurface::Codex => RemoteSkillProductSurface::Codex,
-        ApiProductSurface::Api => RemoteSkillProductSurface::Api,
-        ApiProductSurface::Atlas => RemoteSkillProductSurface::Atlas,
+        ApiProductSurface::Chatgpt => {
+            codex_core::skills::remote::RemoteSkillProductSurface::Chatgpt
+        }
+        ApiProductSurface::Codex => codex_core::skills::remote::RemoteSkillProductSurface::Codex,
+        ApiProductSurface::Api => codex_core::skills::remote::RemoteSkillProductSurface::Api,
+        ApiProductSurface::Atlas => codex_core::skills::remote::RemoteSkillProductSurface::Atlas,
     }
+}
+
+fn feature_enabled(config: &Config, feature: codex_core::features::Feature) -> bool {
+    canonical_feature_for_key(feature.key()).is_some_and(|mapped| config.features.enabled(mapped))
 }
 
 impl Drop for ActiveLogin {
@@ -429,11 +438,11 @@ impl CodexMessageProcessor {
     }
 
     pub(crate) async fn maybe_start_curated_repo_sync_for_latest_config(&self) {
-        match self.load_latest_config(None).await {
+        match self.load_latest_config(/*fallback_cwd*/ None).await {
             Ok(config) => self
                 .thread_manager
                 .plugins_manager()
-                .maybe_start_curated_repo_sync_for_config(&config),
+                .maybe_start_plugin_startup_tasks_for_config(&config, self.auth_manager.clone()),
             Err(err) => warn!("failed to load latest config for curated plugin sync: {err:?}"),
         }
     }
@@ -694,14 +703,6 @@ impl CodexMessageProcessor {
                 self.plugin_list(to_connection_request_id(request_id), params)
                     .await;
             }
-            ClientRequest::SkillsRemoteList { request_id, params } => {
-                self.skills_remote_list(to_connection_request_id(request_id), params)
-                    .await;
-            }
-            ClientRequest::SkillsRemoteExport { request_id, params } => {
-                self.skills_remote_export(to_connection_request_id(request_id), params)
-                    .await;
-            }
             ClientRequest::AppsList { request_id, params } => {
                 self.apps_list(to_connection_request_id(request_id), params)
                     .await;
@@ -881,6 +882,13 @@ impl CodexMessageProcessor {
             ClientRequest::FeedbackUpload { request_id, params } => {
                 self.upload_feedback(to_connection_request_id(request_id), params)
                     .await;
+            }
+            other => {
+                self.send_invalid_request_error(
+                    to_connection_request_id(other.id().clone()),
+                    format!("unsupported request method: {}", other.method()),
+                )
+                .await;
             }
         }
     }
@@ -1391,7 +1399,7 @@ impl CodexMessageProcessor {
         let account = match self.auth_manager.auth_cached() {
             Some(auth) => match auth.auth_mode() {
                 CoreAuthMode::ApiKey => Some(Account::ApiKey {}),
-                CoreAuthMode::Chatgpt => {
+                CoreAuthMode::Chatgpt | CoreAuthMode::ChatgptAuthTokens => {
                     let email = auth.get_account_email();
                     let plan_type = auth.account_plan_type();
 
@@ -1579,7 +1587,10 @@ impl CodexMessageProcessor {
         }
 
         let cwd = cwd.unwrap_or_else(|| self.config.cwd.clone());
-        let mut env = create_env(&self.config.permissions.shell_environment_policy, None);
+        let mut env = create_env(
+            &self.config.permissions.shell_environment_policy,
+            /*thread_id*/ None,
+        );
         if let Some(env_overrides) = env_overrides {
             for (key, value) in env_overrides {
                 match value {
@@ -1615,8 +1626,8 @@ impl CodexMessageProcessor {
             Some(spec) => match spec
                 .start_proxy(
                     self.config.permissions.sandbox_policy.get(),
-                    None,
-                    None,
+                    /*policy_decider*/ None,
+                    /*blocked_request_observer*/ None,
                     managed_network_requirements_enabled,
                     NetworkProxyAuditMetadata::default(),
                 )
@@ -1653,12 +1664,17 @@ impl CodexMessageProcessor {
             command,
             cwd,
             expiration,
+            capture_policy: codex_core::exec::ExecCapturePolicy::ShellTool,
             env,
             network: started_network_proxy
                 .as_ref()
                 .map(codex_core::config::StartedNetworkProxy::proxy),
             sandbox_permissions: SandboxPermissions::UseDefault,
             windows_sandbox_level,
+            windows_sandbox_private_desktop: self
+                .config
+                .permissions
+                .windows_sandbox_private_desktop,
             justification: None,
             arg0: None,
         };
@@ -1801,6 +1817,7 @@ impl CodexMessageProcessor {
             service_tier,
             cwd,
             approval_policy,
+            approvals_reviewer,
             sandbox,
             config,
             service_name,
@@ -1819,6 +1836,7 @@ impl CodexMessageProcessor {
             service_tier,
             cwd,
             approval_policy,
+            approvals_reviewer,
             sandbox,
             base_instructions,
             developer_instructions,
@@ -1911,6 +1929,7 @@ impl CodexMessageProcessor {
                     name: tool.name,
                     description: tool.description,
                     input_schema: tool.input_schema,
+                    defer_loading: tool.defer_loading,
                 })
                 .collect()
         };
@@ -1964,7 +1983,7 @@ impl CodexMessageProcessor {
                         .thread_watch_manager
                         .loaded_status_for_thread(&thread.id)
                         .await,
-                    false,
+                    /*has_in_progress_turn*/ false,
                 );
 
                 let response = ThreadStartResponse {
@@ -1974,6 +1993,7 @@ impl CodexMessageProcessor {
                     service_tier: config_snapshot.service_tier,
                     cwd: config_snapshot.cwd,
                     approval_policy: config_snapshot.approval_policy.into(),
+                    approvals_reviewer: config_snapshot.approvals_reviewer.into(),
                     sandbox: config_snapshot.sandbox_policy.into(),
                     reasoning_effort: config_snapshot.reasoning_effort,
                 };
@@ -2011,6 +2031,7 @@ impl CodexMessageProcessor {
         service_tier: Option<Option<codex_protocol::config_types::ServiceTier>>,
         cwd: Option<String>,
         approval_policy: Option<codex_app_server_protocol::AskForApproval>,
+        approvals_reviewer: Option<codex_app_server_protocol::ApprovalsReviewer>,
         sandbox: Option<SandboxMode>,
         base_instructions: Option<String>,
         developer_instructions: Option<String>,
@@ -2023,6 +2044,8 @@ impl CodexMessageProcessor {
             cwd: cwd.map(PathBuf::from),
             approval_policy: approval_policy
                 .map(codex_app_server_protocol::AskForApproval::to_core),
+            approvals_reviewer: approvals_reviewer
+                .map(codex_app_server_protocol::ApprovalsReviewer::to_core),
             sandbox_mode: sandbox.map(SandboxMode::to_core),
             codex_linux_sandbox_exe: self.arg0_paths.codex_linux_sandbox_exe.clone(),
             main_execve_wrapper_exe: self.arg0_paths.main_execve_wrapper_exe.clone(),
@@ -2325,7 +2348,7 @@ impl CodexMessageProcessor {
             self.thread_watch_manager
                 .loaded_status_for_thread(&thread.id)
                 .await,
-            false,
+            /*has_in_progress_turn*/ false,
         );
 
         self.outgoing
@@ -2376,10 +2399,10 @@ impl CodexMessageProcessor {
                 Some(state_db_ctx),
                 rollout_path.as_path(),
                 self.config.model_provider_id.as_str(),
-                None,
+                /*builder*/ None,
                 &[],
-                None,
-                None,
+                /*archived_only*/ None,
+                /*new_thread_memory_mode*/ None,
             )
             .await;
 
@@ -2447,10 +2470,10 @@ impl CodexMessageProcessor {
             Some(state_db_ctx),
             rollout_path.as_path(),
             self.config.model_provider_id.as_str(),
-            None,
+            /*builder*/ None,
             &[],
-            None,
-            None,
+            /*archived_only*/ None,
+            /*new_thread_memory_mode*/ None,
         )
         .await;
 
@@ -2637,7 +2660,7 @@ impl CodexMessageProcessor {
                     self.thread_watch_manager
                         .loaded_status_for_thread(&thread.id)
                         .await,
-                    false,
+                    /*has_in_progress_turn*/ false,
                 );
                 self.attach_thread_name(thread_id, &mut thread).await;
                 let thread_id = thread.id.clone();
@@ -3044,7 +3067,7 @@ impl CodexMessageProcessor {
             self.thread_watch_manager
                 .loaded_status_for_thread(&thread.id)
                 .await,
-            false,
+            /*has_in_progress_turn*/ false,
         );
         let response = ThreadReadResponse { thread };
         self.outgoing.send_response(request_id, response).await;
@@ -3088,8 +3111,13 @@ impl CodexMessageProcessor {
 
         for connection_id in connection_ids {
             Self::log_listener_attach_result(
-                self.ensure_conversation_listener(thread_id, connection_id, false, ApiVersion::V2)
-                    .await,
+                self.ensure_conversation_listener(
+                    thread_id,
+                    connection_id,
+                    /*raw_events_enabled*/ false,
+                    ApiVersion::V2,
+                )
+                .await,
                 thread_id,
                 connection_id,
                 "thread",
@@ -3131,6 +3159,7 @@ impl CodexMessageProcessor {
             service_tier,
             cwd,
             approval_policy,
+            approvals_reviewer,
             sandbox,
             config: request_overrides,
             base_instructions,
@@ -3164,6 +3193,7 @@ impl CodexMessageProcessor {
             service_tier,
             cwd,
             approval_policy,
+            approvals_reviewer,
             sandbox,
             base_instructions,
             developer_instructions,
@@ -3225,7 +3255,7 @@ impl CodexMessageProcessor {
                     self.ensure_conversation_listener(
                         thread_id,
                         request_id.connection_id,
-                        false,
+                        /*raw_events_enabled*/ false,
                         ApiVersion::V2,
                     )
                     .await,
@@ -3256,7 +3286,7 @@ impl CodexMessageProcessor {
                     self.thread_watch_manager
                         .loaded_status_for_thread(&thread.id)
                         .await,
-                    false,
+                    /*has_in_progress_turn*/ false,
                 );
 
                 let response = ThreadResumeResponse {
@@ -3266,6 +3296,7 @@ impl CodexMessageProcessor {
                     service_tier: session_configured.service_tier,
                     cwd: session_configured.cwd,
                     approval_policy: session_configured.approval_policy.into(),
+                    approvals_reviewer: session_configured.approvals_reviewer.into(),
                     sandbox: session_configured.sandbox_policy.into(),
                     reasoning_effort: session_configured.reasoning_effort,
                 };
@@ -3574,7 +3605,7 @@ impl CodexMessageProcessor {
         if let Err(message) = populate_resume_turns(
             &mut thread,
             ResumeTurnSource::HistoryItems(&history_items),
-            None,
+            /*active_turn*/ None,
         )
         .await
         {
@@ -3605,10 +3636,12 @@ impl CodexMessageProcessor {
             service_tier,
             cwd,
             approval_policy,
+            approvals_reviewer,
             sandbox,
             config: cli_overrides,
             base_instructions,
             developer_instructions,
+            ephemeral,
             persist_extended_history,
         } = params;
 
@@ -3680,17 +3713,19 @@ impl CodexMessageProcessor {
         } else {
             Some(cli_overrides)
         };
-        let typesafe_overrides = self.build_thread_config_overrides(
+        let mut typesafe_overrides = self.build_thread_config_overrides(
             model,
             model_provider,
             service_tier,
             cwd,
             approval_policy,
+            approvals_reviewer,
             sandbox,
             base_instructions,
             developer_instructions,
-            None,
+            /*personality*/ None,
         );
+        typesafe_overrides.ephemeral = Some(ephemeral);
         // Derive a Config using the same logic as new conversation, honoring overrides if provided.
         let cloud_requirements = self.current_cloud_requirements();
         let config = match derive_config_for_cwd(
@@ -3764,7 +3799,7 @@ impl CodexMessageProcessor {
             self.ensure_conversation_listener(
                 thread_id,
                 request_id.connection_id,
-                false,
+                /*raw_events_enabled*/ false,
                 ApiVersion::V2,
             )
             .await,
@@ -3818,7 +3853,7 @@ impl CodexMessageProcessor {
             self.thread_watch_manager
                 .loaded_status_for_thread(&thread.id)
                 .await,
-            false,
+            /*has_in_progress_turn*/ false,
         );
 
         let response = ThreadForkResponse {
@@ -3828,6 +3863,7 @@ impl CodexMessageProcessor {
             service_tier: session_configured.service_tier,
             cwd: session_configured.cwd,
             approval_policy: session_configured.approval_policy.into(),
+            approvals_reviewer: session_configured.approvals_reviewer.into(),
             sandbox: session_configured.sandbox_policy.into(),
             reasoning_effort: session_configured.reasoning_effort,
         };
@@ -4130,7 +4166,7 @@ impl CodexMessageProcessor {
         params: ExperimentalFeatureListParams,
     ) {
         let ExperimentalFeatureListParams { cursor, limit } = params;
-        let config = match self.load_latest_config(None).await {
+        let config = match self.load_latest_config(/*fallback_cwd*/ None).await {
             Ok(config) => config,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
@@ -4171,7 +4207,7 @@ impl CodexMessageProcessor {
                     display_name,
                     description,
                     announcement,
-                    enabled: config.features.enabled(spec.id),
+                    enabled: feature_enabled(&config, spec.id),
                     default_enabled: spec.default_enabled,
                 }
             })
@@ -4245,7 +4281,7 @@ impl CodexMessageProcessor {
     }
 
     async fn mcp_server_refresh(&self, request_id: ConnectionRequestId, _params: Option<()>) {
-        let config = match self.load_latest_config(None).await {
+        let config = match self.load_latest_config(/*fallback_cwd*/ None).await {
             Ok(config) => config,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
@@ -4304,7 +4340,7 @@ impl CodexMessageProcessor {
         request_id: ConnectionRequestId,
         params: McpServerOauthLoginParams,
     ) {
-        let config = match self.load_latest_config(None).await {
+        let config = match self.load_latest_config(/*fallback_cwd*/ None).await {
             Ok(config) => config,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
@@ -4410,7 +4446,7 @@ impl CodexMessageProcessor {
         let request = request_id.clone();
 
         let outgoing = Arc::clone(&self.outgoing);
-        let config = match self.load_latest_config(None).await {
+        let config = match self.load_latest_config(/*fallback_cwd*/ None).await {
             Ok(config) => config,
             Err(error) => {
                 self.outgoing.send_error(request, error).await;
@@ -4563,6 +4599,8 @@ impl CodexMessageProcessor {
             }
             MarketplaceError::InvalidMarketplaceFile { .. }
             | MarketplaceError::PluginNotFound { .. }
+            | MarketplaceError::PluginNotAvailable { .. }
+            | MarketplaceError::PluginsDisabled
             | MarketplaceError::InvalidPlugin(_) => {
                 self.send_invalid_request_error(request_id, err.to_string())
                     .await;
@@ -4597,7 +4635,7 @@ impl CodexMessageProcessor {
     async fn finalize_thread_teardown(&mut self, thread_id: ThreadId) {
         self.pending_thread_unloads.lock().await.remove(&thread_id);
         self.outgoing
-            .cancel_requests_for_thread(thread_id, None)
+            .cancel_requests_for_thread(thread_id, /*error*/ None)
             .await;
         self.thread_state_manager
             .remove_thread_state(thread_id)
@@ -4660,7 +4698,7 @@ impl CodexMessageProcessor {
             // Any pending app-server -> client requests for this thread can no longer be
             // answered; cancel their callbacks before shutdown/unload.
             self.outgoing
-                .cancel_requests_for_thread(thread_id, None)
+                .cancel_requests_for_thread(thread_id, /*error*/ None)
                 .await;
             self.thread_state_manager
                 .remove_thread_state(thread_id)
@@ -4833,7 +4871,7 @@ impl CodexMessageProcessor {
     }
 
     async fn apps_list(&self, request_id: ConnectionRequestId, params: AppsListParams) {
-        let mut config = match self.load_latest_config(None).await {
+        let mut config = match self.load_latest_config(/*fallback_cwd*/ None).await {
             Ok(config) => config,
             Err(error) => {
                 self.outgoing.send_error(request_id, error).await;
@@ -5191,7 +5229,12 @@ impl CodexMessageProcessor {
                 .get(&cwd)
                 .map_or(&[][..], std::vec::Vec::as_slice);
             let outcome = skills_manager
-                .skills_for_cwd_with_extra_user_roots(&cwd, force_reload, extra_roots)
+                .skills_for_cwd_with_extra_user_roots(
+                    &cwd,
+                    self.config.as_ref(),
+                    force_reload,
+                    extra_roots,
+                )
                 .await;
             let errors = errors_to_info(&outcome.errors);
             let skills = skills_to_info(&outcome.skills, &outcome.disabled_paths);
@@ -5209,12 +5252,33 @@ impl CodexMessageProcessor {
     async fn plugin_list(&self, request_id: ConnectionRequestId, params: PluginListParams) {
         let plugins_manager = self.thread_manager.plugins_manager();
         let roots = params.cwds.unwrap_or_default();
+        let force_remote_sync = params.force_remote_sync;
 
-        let config = match self.load_latest_config(None).await {
+        let config = match self.load_latest_config(/*fallback_cwd*/ None).await {
             Ok(config) => config,
             Err(err) => {
                 self.outgoing.send_error(request_id, err).await;
                 return;
+            }
+        };
+
+        let auth = self.auth_manager.auth().await;
+        let mut remote_sync_error = None;
+        if force_remote_sync
+            && let Err(err) = plugins_manager
+                .sync_plugins_from_remote(&config, auth.as_ref(), /*additive_only*/ false)
+                .await
+        {
+            remote_sync_error = Some(err.to_string());
+        }
+        let featured_plugin_ids = match plugins_manager
+            .featured_plugin_ids_for_config(&config, auth.as_ref())
+            .await
+        {
+            Ok(ids) => ids,
+            Err(err) => {
+                remote_sync_error.get_or_insert_with(|| err.to_string());
+                Vec::new()
             }
         };
 
@@ -5226,6 +5290,11 @@ impl CodexMessageProcessor {
                     .map(|marketplace| PluginMarketplaceEntry {
                         name: marketplace.name,
                         path: marketplace.path,
+                        interface: marketplace.interface.map(|interface| {
+                            codex_app_server_protocol::MarketplaceInterface {
+                                display_name: interface.display_name,
+                            }
+                        }),
                         plugins: marketplace
                             .plugins
                             .into_iter()
@@ -5235,10 +5304,12 @@ impl CodexMessageProcessor {
                                 enabled: plugin.enabled,
                                 name: plugin.name,
                                 source: match plugin.source {
-                                    MarketplacePluginSourceSummary::Local { path } => {
+                                    MarketplacePluginSource::Local { path } => {
                                         PluginSource::Local { path }
                                     }
                                 },
+                                install_policy: plugin.policy.installation.into(),
+                                auth_policy: plugin.policy.authentication.into(),
                                 interface: plugin.interface.map(|interface| PluginInterface {
                                     display_name: interface.display_name,
                                     short_description: interface.short_description,
@@ -5280,7 +5351,14 @@ impl CodexMessageProcessor {
         };
 
         self.outgoing
-            .send_response(request_id, PluginListResponse { marketplaces: data })
+            .send_response(
+                request_id,
+                PluginListResponse {
+                    marketplaces: data,
+                    remote_sync_error,
+                    featured_plugin_ids,
+                },
+            )
             .await;
     }
 
@@ -5396,6 +5474,7 @@ impl CodexMessageProcessor {
         let PluginInstallParams {
             marketplace_path,
             plugin_name,
+            force_remote_sync,
         } = params;
         let config_cwd = marketplace_path.as_path().parent().map(Path::to_path_buf);
 
@@ -5405,7 +5484,31 @@ impl CodexMessageProcessor {
             marketplace_path,
         };
 
-        match plugins_manager.install_plugin(request).await {
+        let config_for_remote_sync = if force_remote_sync {
+            match self.load_latest_config(config_cwd.clone()).await {
+                Ok(config) => Some(config),
+                Err(err) => {
+                    self.outgoing.send_error(request_id, err).await;
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let auth = if force_remote_sync {
+            self.auth_manager.auth().await
+        } else {
+            None
+        };
+        let install_result = if let Some(config) = config_for_remote_sync.as_ref() {
+            plugins_manager
+                .install_plugin_with_remote_sync(config, auth.as_ref(), request)
+                .await
+        } else {
+            plugins_manager.install_plugin(request).await
+        };
+
+        match install_result {
             Ok(result) => {
                 let config = match self.load_latest_config(config_cwd).await {
                     Ok(config) => config,
@@ -5423,9 +5526,13 @@ impl CodexMessageProcessor {
                     Vec::new()
                 } else {
                     let (all_connectors_result, accessible_connectors_result) = tokio::join!(
-                        connectors::list_all_connectors_with_options(&config, true),
+                        connectors::list_all_connectors_with_options(
+                            &config,
+                            /*force_refetch*/ true,
+                        ),
                         connectors::list_accessible_connectors_from_mcp_tools_with_options_and_status(
-                            &config, true
+                            &config,
+                            /*force_refetch*/ true,
                         ),
                     );
 
@@ -5482,7 +5589,13 @@ impl CodexMessageProcessor {
 
                 self.clear_plugin_related_caches();
                 self.outgoing
-                    .send_response(request_id, PluginInstallResponse { apps_needing_auth })
+                    .send_response(
+                        request_id,
+                        PluginInstallResponse {
+                            auth_policy: result.auth_policy.into(),
+                            apps_needing_auth,
+                        },
+                    )
                     .await;
             }
             Err(err) => {
@@ -5511,6 +5624,10 @@ impl CodexMessageProcessor {
                         )
                         .await;
                     }
+                    CorePluginInstallError::Remote(err) => {
+                        self.send_invalid_request_error(request_id, err.to_string())
+                            .await;
+                    }
                     CorePluginInstallError::Store(err) => {
                         self.send_internal_error(
                             request_id,
@@ -5528,9 +5645,37 @@ impl CodexMessageProcessor {
         request_id: ConnectionRequestId,
         params: PluginUninstallParams,
     ) {
+        let PluginUninstallParams {
+            plugin_id,
+            force_remote_sync,
+        } = params;
         let plugins_manager = self.thread_manager.plugins_manager();
+        let config_for_remote_sync = if force_remote_sync {
+            match self.load_latest_config(/*fallback_cwd*/ None).await {
+                Ok(config) => Some(config),
+                Err(err) => {
+                    self.outgoing.send_error(request_id, err).await;
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let auth = if force_remote_sync {
+            self.auth_manager.auth().await
+        } else {
+            None
+        };
 
-        match plugins_manager.uninstall_plugin(params.plugin_id).await {
+        let uninstall_result = if let Some(config) = config_for_remote_sync.as_ref() {
+            plugins_manager
+                .uninstall_plugin_with_remote_sync(config, auth.as_ref(), plugin_id)
+                .await
+        } else {
+            plugins_manager.uninstall_plugin(plugin_id).await
+        };
+
+        match uninstall_result {
             Ok(()) => {
                 self.clear_plugin_related_caches();
                 self.outgoing
@@ -5565,6 +5710,10 @@ impl CodexMessageProcessor {
                             format!("failed to uninstall plugin: {err}"),
                         )
                         .await;
+                    }
+                    CorePluginUninstallError::Remote(err) => {
+                        self.send_invalid_request_error(request_id, err.to_string())
+                            .await;
                     }
                     CorePluginUninstallError::InvalidPluginId(_) => {
                         unreachable!("invalid plugin ids are handled above");
@@ -5614,6 +5763,7 @@ impl CodexMessageProcessor {
 
         let has_any_overrides = params.cwd.is_some()
             || params.approval_policy.is_some()
+            || params.approvals_reviewer.is_some()
             || params.sandbox_policy.is_some()
             || params.model.is_some()
             || params.service_tier.is_some()
@@ -5628,6 +5778,9 @@ impl CodexMessageProcessor {
                 .submit(Op::OverrideTurnContext {
                     cwd: params.cwd,
                     approval_policy: params.approval_policy.map(AskForApproval::to_core),
+                    approvals_reviewer: params
+                        .approvals_reviewer
+                        .map(codex_app_server_protocol::ApprovalsReviewer::to_core),
                     sandbox_policy: params.sandbox_policy.map(|p| p.to_core()),
                     windows_sandbox_level: None,
                     model: params.model,
@@ -5763,7 +5916,7 @@ impl CodexMessageProcessor {
             .ensure_conversation_listener(
                 thread_id,
                 request_id.connection_id,
-                false,
+                /*raw_events_enabled*/ false,
                 ApiVersion::V2,
             )
             .await
@@ -6022,7 +6175,12 @@ impl CodexMessageProcessor {
             ..
         } = self
             .thread_manager
-            .fork_thread(usize::MAX, config, rollout_path, false)
+            .fork_thread(
+                usize::MAX,
+                config,
+                rollout_path,
+                /*persist_extended_history*/ false,
+            )
             .await
             .map_err(|err| JSONRPCErrorError {
                 code: INTERNAL_ERROR_CODE,
@@ -6034,7 +6192,7 @@ impl CodexMessageProcessor {
             self.ensure_conversation_listener(
                 thread_id,
                 request_id.connection_id,
-                false,
+                /*raw_events_enabled*/ false,
                 ApiVersion::V2,
             )
             .await,
@@ -6055,7 +6213,7 @@ impl CodexMessageProcessor {
                         self.thread_watch_manager
                             .loaded_status_for_thread(&thread.id)
                             .await,
-                        false,
+                        /*has_in_progress_turn*/ false,
                     );
                     let notif = ThreadStartedNotification { thread };
                     self.outgoing
@@ -6721,7 +6879,7 @@ impl CodexMessageProcessor {
         tokio::spawn(async move {
             let derived_config = derive_config_for_cwd(
                 &cli_overrides,
-                None,
+                /*request_overrides*/ None,
                 ConfigOverrides {
                     cwd: Some(command_cwd.clone()),
                     ..Default::default()
@@ -6880,6 +7038,7 @@ async fn handle_pending_thread_resume_request(
         model_provider_id,
         service_tier,
         approval_policy,
+        approvals_reviewer,
         sandbox_policy,
         cwd,
         reasoning_effort,
@@ -6892,6 +7051,7 @@ async fn handle_pending_thread_resume_request(
         service_tier,
         cwd,
         approval_policy: approval_policy.into(),
+        approvals_reviewer: approvals_reviewer.into(),
         sandbox: sandbox_policy.into(),
         reasoning_effort,
     };
@@ -7622,6 +7782,7 @@ fn with_thread_spawn_agent_metadata(
             codex_protocol::protocol::SubAgentSource::ThreadSpawn {
                 parent_thread_id,
                 depth,
+                agent_path,
                 agent_nickname: existing_agent_nickname,
                 agent_role: existing_agent_role,
             },
@@ -7629,6 +7790,7 @@ fn with_thread_spawn_agent_metadata(
             codex_protocol::protocol::SubAgentSource::ThreadSpawn {
                 parent_thread_id,
                 depth,
+                agent_path,
                 agent_nickname: agent_nickname.or(existing_agent_nickname),
                 agent_role: agent_role.or(existing_agent_role),
             },

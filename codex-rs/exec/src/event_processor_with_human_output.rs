@@ -693,6 +693,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 call_id,
                 sender_thread_id: _,
                 prompt,
+                ..
             }) => {
                 ts_msg!(
                     self,
@@ -771,7 +772,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     self,
                     "{} {}",
                     "collab".style(self.magenta),
-                    format_collab_invocation("wait", &call_id, None).style(self.bold)
+                    format_collab_invocation("wait", &call_id, /*prompt*/ None).style(self.bold)
                 );
                 eprintln!(
                     "  receivers: {}",
@@ -788,7 +789,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     ts_msg!(
                         self,
                         "{} {}:",
-                        format_collab_invocation("wait", &call_id, None),
+                        format_collab_invocation("wait", &call_id, /*prompt*/ None),
                         "timed out".style(self.yellow)
                     );
                     return CodexStatus::Running;
@@ -797,7 +798,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 let title_style = if success { self.green } else { self.red };
                 let title = format!(
                     "{} {} agents complete:",
-                    format_collab_invocation("wait", &call_id, None),
+                    format_collab_invocation("wait", &call_id, /*prompt*/ None),
                     statuses.len()
                 );
                 ts_msg!(self, "{}", title.style(title_style));
@@ -823,7 +824,8 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     self,
                     "{} {}",
                     "collab".style(self.magenta),
-                    format_collab_invocation("close_agent", &call_id, None).style(self.bold)
+                    format_collab_invocation("close_agent", &call_id, /*prompt*/ None)
+                        .style(self.bold)
                 );
                 eprintln!(
                     "  receiver: {}",
@@ -841,7 +843,7 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                 let title_style = if success { self.green } else { self.red };
                 let title = format!(
                     "{} {}:",
-                    format_collab_invocation("close_agent", &call_id, None),
+                    format_collab_invocation("close_agent", &call_id, /*prompt*/ None),
                     format_collab_status(&status)
                 );
                 ts_msg!(self, "{}", title.style(title_style));
@@ -849,6 +851,94 @@ impl EventProcessor for EventProcessorWithHumanOutput {
                     "  receiver: {}",
                     receiver_thread_id.to_string().style(self.dimmed)
                 );
+            }
+            EventMsg::GuardianAssessment(event) => {
+                let (status_text, status_style) = match event.status {
+                    codex_protocol::approvals::GuardianAssessmentStatus::InProgress => {
+                        ("guardian review in progress", self.yellow)
+                    }
+                    codex_protocol::approvals::GuardianAssessmentStatus::Approved => {
+                        ("guardian approved", self.green)
+                    }
+                    codex_protocol::approvals::GuardianAssessmentStatus::Denied => {
+                        ("guardian denied", self.red)
+                    }
+                    codex_protocol::approvals::GuardianAssessmentStatus::Aborted => {
+                        ("guardian aborted", self.yellow)
+                    }
+                };
+                ts_msg!(self, "{}", status_text.style(status_style));
+                if let Some(risk_level) = event.risk_level {
+                    let risk_score = event
+                        .risk_score
+                        .map(|score| format!(" ({score})"))
+                        .unwrap_or_default();
+                    ts_msg!(
+                        self,
+                        "  risk: {}{}",
+                        format!("{risk_level:?}").to_lowercase(),
+                        risk_score.style(self.dimmed)
+                    );
+                }
+                if let Some(rationale) = event.rationale
+                    && !rationale.trim().is_empty()
+                {
+                    ts_msg!(self, "  {}", rationale.style(self.dimmed));
+                }
+            }
+            EventMsg::HookStarted(event) => {
+                let event_name = match event.run.event_name {
+                    codex_protocol::protocol::HookEventName::SessionStart => "session_start",
+                    codex_protocol::protocol::HookEventName::UserPromptSubmit => {
+                        "user_prompt_submit"
+                    }
+                    codex_protocol::protocol::HookEventName::Stop => "stop",
+                };
+                ts_msg!(
+                    self,
+                    "{} {} {}",
+                    "hook".style(self.magenta),
+                    event_name.style(self.bold),
+                    event
+                        .run
+                        .source_path
+                        .display()
+                        .to_string()
+                        .style(self.dimmed)
+                );
+            }
+            EventMsg::HookCompleted(event) => {
+                let event_name = match event.run.event_name {
+                    codex_protocol::protocol::HookEventName::SessionStart => "session_start",
+                    codex_protocol::protocol::HookEventName::UserPromptSubmit => {
+                        "user_prompt_submit"
+                    }
+                    codex_protocol::protocol::HookEventName::Stop => "stop",
+                };
+                let (status_text, status_style) = match event.run.status {
+                    codex_protocol::protocol::HookRunStatus::Running => ("running", self.yellow),
+                    codex_protocol::protocol::HookRunStatus::Completed => ("completed", self.green),
+                    codex_protocol::protocol::HookRunStatus::Failed => ("failed", self.red),
+                    codex_protocol::protocol::HookRunStatus::Blocked => ("blocked", self.yellow),
+                    codex_protocol::protocol::HookRunStatus::Stopped => ("stopped", self.yellow),
+                };
+                ts_msg!(
+                    self,
+                    "{} {} {}",
+                    "hook".style(self.magenta),
+                    format!("{event_name} {status_text}").style(status_style),
+                    event
+                        .run
+                        .source_path
+                        .display()
+                        .to_string()
+                        .style(self.dimmed)
+                );
+                if let Some(message) = event.run.status_message
+                    && !message.trim().is_empty()
+                {
+                    ts_msg!(self, "  {}", message.style(self.dimmed));
+                }
             }
             EventMsg::ShutdownComplete => return CodexStatus::Shutdown,
             EventMsg::ThreadNameUpdated(_)
@@ -1154,7 +1244,7 @@ fn format_collab_invocation(tool: &str, call_id: &str, prompt: Option<&str>) -> 
     let prompt = prompt
         .map(str::trim)
         .filter(|prompt| !prompt.is_empty())
-        .map(|prompt| truncate_preview(prompt, 120));
+        .map(|prompt| truncate_preview(prompt, /*max_chars*/ 120));
     match prompt {
         Some(prompt) => format!("{tool}({call_id}, prompt=\"{prompt}\")"),
         None => format!("{tool}({call_id})"),
@@ -1165,8 +1255,9 @@ fn format_collab_status(status: &AgentStatus) -> String {
     match status {
         AgentStatus::PendingInit => "pending init".to_string(),
         AgentStatus::Running => "running".to_string(),
+        AgentStatus::Interrupted => "interrupted".to_string(),
         AgentStatus::Completed(Some(message)) => {
-            let preview = truncate_preview(message.trim(), 120);
+            let preview = truncate_preview(message.trim(), /*max_chars*/ 120);
             if preview.is_empty() {
                 "completed".to_string()
             } else {
@@ -1175,7 +1266,7 @@ fn format_collab_status(status: &AgentStatus) -> String {
         }
         AgentStatus::Completed(None) => "completed".to_string(),
         AgentStatus::Errored(message) => {
-            let preview = truncate_preview(message.trim(), 120);
+            let preview = truncate_preview(message.trim(), /*max_chars*/ 120);
             if preview.is_empty() {
                 "errored".to_string()
             } else {
@@ -1194,6 +1285,7 @@ fn style_for_agent_status(
     match status {
         AgentStatus::PendingInit | AgentStatus::Shutdown => processor.dimmed,
         AgentStatus::Running => processor.cyan,
+        AgentStatus::Interrupted => processor.yellow,
         AgentStatus::Completed(_) => processor.green,
         AgentStatus::Errored(_) | AgentStatus::NotFound => processor.red,
     }

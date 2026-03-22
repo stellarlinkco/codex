@@ -1,0 +1,24 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "description": "EXPERIMENTAL - start a thread-scoped realtime session.",
+  "properties": {
+    "prompt": {
+      "type": "string"
+    },
+    "sessionId": {
+      "type": [
+        "string",
+        "null"
+      ]
+    },
+    "threadId": {
+      "type": "string"
+    }
+  },
+  "required": [
+    "prompt",
+    "threadId"
+  ],
+  "title": "ThreadRealtimeStartParams",
+  "type": "object"
+}

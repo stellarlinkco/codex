@@ -2991,7 +2991,7 @@ impl PresentationArtifactManager {
         let args: ElementIdArgs = parse_args(&request.action, &request.args)?;
         let artifact_id = required_artifact_id(&request)?;
         let document = self.get_document_mut(&artifact_id, &request.action)?;
-        document.set_z_order(&args.element_id, 0, &request.action)?;
+        document.set_z_order(&args.element_id, /*target_index*/ 0, &request.action)?;
         Ok(PresentationArtifactResponse::new(
             artifact_id,
             request.action,

@@ -38,10 +38,6 @@ use codex_app_server_protocol::experimental_required_message;
 use codex_arg0::Arg0DispatchPaths;
 use codex_core::AuthManager;
 use codex_core::ThreadManager;
-use codex_core::auth::ExternalAuthRefreshContext;
-use codex_core::auth::ExternalAuthRefreshReason;
-use codex_core::auth::ExternalAuthRefresher;
-use codex_core::auth::ExternalAuthTokens;
 use codex_core::config::Config;
 use codex_core::config_loader::CloudRequirementsLoader;
 use codex_core::config_loader::LoaderOverrides;
@@ -51,7 +47,12 @@ use codex_core::default_client::get_codex_user_agent;
 use codex_core::default_client::set_default_client_residency_requirement;
 use codex_core::default_client::set_default_originator;
 use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
+use codex_features::Feature;
 use codex_feedback::CodexFeedback;
+use codex_login::auth::ExternalAuthRefreshContext;
+use codex_login::auth::ExternalAuthRefreshReason;
+use codex_login::auth::ExternalAuthRefresher;
+use codex_login::auth::ExternalAuthTokens;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionSource;
 use codex_state::log_db::LogDbLayer;
@@ -154,6 +155,8 @@ pub(crate) struct MessageProcessorArgs {
     pub(crate) cli_overrides: Vec<(String, TomlValue)>,
     pub(crate) loader_overrides: LoaderOverrides,
     pub(crate) cloud_requirements: CloudRequirementsLoader,
+    pub(crate) auth_manager: Option<Arc<AuthManager>>,
+    pub(crate) thread_manager: Option<Arc<ThreadManager>>,
     pub(crate) feedback: CodexFeedback,
     pub(crate) log_db: Option<LogDbLayer>,
     pub(crate) config_warnings: Vec<ConfigWarningNotification>,
@@ -172,36 +175,42 @@ impl MessageProcessor {
             cli_overrides,
             loader_overrides,
             cloud_requirements,
+            auth_manager,
+            thread_manager,
             feedback,
             log_db,
             config_warnings,
             session_source,
             enable_codex_api_key_env,
         } = args;
-        let auth_manager = AuthManager::shared(
-            config.codex_home.clone(),
-            enable_codex_api_key_env,
-            config.cli_auth_credentials_store_mode,
-        );
+        let auth_manager = auth_manager.unwrap_or_else(|| {
+            AuthManager::shared(
+                config.codex_home.clone(),
+                enable_codex_api_key_env,
+                config.cli_auth_credentials_store_mode,
+            )
+        });
         auth_manager.set_forced_chatgpt_workspace_id(config.forced_chatgpt_workspace_id.clone());
         auth_manager.set_external_auth_refresher(Arc::new(ExternalAuthRefreshBridge {
             outgoing: outgoing.clone(),
         }));
-        let thread_manager = Arc::new(ThreadManager::new(
-            config.codex_home.clone(),
-            auth_manager.clone(),
-            session_source,
-            config.model_catalog.clone(),
-            CollaborationModesConfig {
-                default_mode_request_user_input: config
-                    .features
-                    .enabled(codex_core::features::Feature::DefaultModeRequestUserInput),
-            },
-        ));
+        let thread_manager = thread_manager.unwrap_or_else(|| {
+            Arc::new(ThreadManager::new(
+                config.codex_home.clone(),
+                auth_manager.clone(),
+                session_source,
+                config.model_catalog.clone(),
+                CollaborationModesConfig {
+                    default_mode_request_user_input: config
+                        .features
+                        .enabled(Feature::DefaultModeRequestUserInput),
+                },
+            ))
+        });
         // TODO(xl): Move into PluginManager once this no longer depends on config feature gating.
         thread_manager
             .plugins_manager()
-            .maybe_start_curated_repo_sync_for_config(&config);
+            .maybe_start_plugin_startup_tasks_for_config(&config, auth_manager.clone());
         let cloud_requirements = Arc::new(RwLock::new(cloud_requirements));
         let codex_message_processor = CodexMessageProcessor::new(CodexMessageProcessorArgs {
             auth_manager,
@@ -283,8 +292,14 @@ impl MessageProcessor {
             // session state into outbound state and sending initialize notifications to
             // this specific connection. Passing `None` avoids marking the connection
             // ready too early from inside the shared request handler.
-            self.handle_client_request(connection_id, request_id, codex_request, session, None)
-                .await;
+            self.handle_client_request(
+                connection_id,
+                request_id,
+                codex_request,
+                session,
+                /*outbound_initialized*/ None,
+            )
+            .await;
         }
         .instrument(request_span)
         .await;

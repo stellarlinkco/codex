@@ -63,8 +63,8 @@ use codex_app_server_protocol::TurnStartResponse;
 use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput as V2UserInput;
 use codex_core::config::Config;
+use codex_otel::OtelProvider;
 use codex_otel::current_span_w3c_trace_context;
-use codex_otel::otel_provider::OtelProvider;
 use codex_protocol::protocol::W3cTraceContext;
 use codex_utils_cli::CliConfigOverrides;
 use serde::Serialize;
@@ -543,7 +543,7 @@ pub async fn send_message_v2(
         &endpoint,
         config_overrides,
         user_message,
-        true,
+        /*experimental_api*/ true,
         dynamic_tools,
     )
     .await
@@ -1167,7 +1167,7 @@ impl CodexClient {
     }
 
     fn initialize(&mut self) -> Result<InitializeResponse> {
-        self.initialize_with_experimental_api(true)
+        self.initialize_with_experimental_api(/*experimental_api*/ true)
     }
 
     fn initialize_with_experimental_api(

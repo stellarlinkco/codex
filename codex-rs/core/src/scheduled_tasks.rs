@@ -269,11 +269,21 @@ impl CronSchedule {
             );
         }
 
-        let minutes = CronField::parse(parts[0], 0, 59, false)?;
-        let hours = CronField::parse(parts[1], 0, 23, false)?;
-        let days_of_month = CronField::parse(parts[2], 1, 31, false)?;
-        let months = CronField::parse(parts[3], 1, 12, false)?;
-        let days_of_week = CronField::parse(parts[4], 0, 7, true)?;
+        let minutes = CronField::parse(
+            parts[0], /*min*/ 0, /*max*/ 59, /*normalize_sunday*/ false,
+        )?;
+        let hours = CronField::parse(
+            parts[1], /*min*/ 0, /*max*/ 23, /*normalize_sunday*/ false,
+        )?;
+        let days_of_month = CronField::parse(
+            parts[2], /*min*/ 1, /*max*/ 31, /*normalize_sunday*/ false,
+        )?;
+        let months = CronField::parse(
+            parts[3], /*min*/ 1, /*max*/ 12, /*normalize_sunday*/ false,
+        )?;
+        let days_of_week = CronField::parse(
+            parts[4], /*min*/ 0, /*max*/ 7, /*normalize_sunday*/ true,
+        )?;
 
         Ok(Self {
             original: expression.trim().to_string(),

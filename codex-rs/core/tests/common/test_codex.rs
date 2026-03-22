@@ -11,8 +11,8 @@ use codex_core::ModelProviderInfo;
 use codex_core::ThreadManager;
 use codex_core::built_in_model_providers;
 use codex_core::config::Config;
-use codex_core::features::Feature;
 use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
+use codex_features::Feature;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::openai_models::ModelsResponse;
 use codex_protocol::protocol::AskForApproval;
@@ -105,7 +105,7 @@ impl TestCodexBuilder {
             Some(home) => home,
             None => Arc::new(TempDir::new()?),
         };
-        Box::pin(self.build_with_home(server, home, None)).await
+        Box::pin(self.build_with_home(server, home, /*resume_from*/ None)).await
     }
 
     pub async fn build_with_streaming_server(
@@ -117,7 +117,12 @@ impl TestCodexBuilder {
             Some(home) => home,
             None => Arc::new(TempDir::new()?),
         };
-        Box::pin(self.build_with_home_and_base_url(format!("{base_url}/v1"), home, None)).await
+        Box::pin(self.build_with_home_and_base_url(
+            format!("{base_url}/v1"),
+            home,
+            /*resume_from*/ None,
+        ))
+        .await
     }
 
     pub async fn build_with_websocket_server(
@@ -138,7 +143,7 @@ impl TestCodexBuilder {
                 .enable(Feature::ResponsesWebsockets)
                 .expect("enable ResponsesWebsockets");
         }));
-        Box::pin(self.build_with_home_and_base_url(base_url, home, None)).await
+        Box::pin(self.build_with_home_and_base_url(base_url, home, /*resume_from*/ None)).await
     }
 
     pub async fn resume(
@@ -226,7 +231,7 @@ impl TestCodexBuilder {
     ) -> anyhow::Result<(Config, Arc<TempDir>)> {
         let model_provider = ModelProviderInfo {
             base_url: Some(base_url),
-            ..built_in_model_providers()["openai"].clone()
+            ..built_in_model_providers(/*openai_base_url*/ None)["openai"].clone()
         };
         let cwd = Arc::new(TempDir::new()?);
         let mut config = load_default_config_for_test(home).await;
@@ -351,8 +356,13 @@ impl TestCodex {
         approval_policy: AskForApproval,
         sandbox_policy: SandboxPolicy,
     ) -> Result<()> {
-        self.submit_turn_with_context(prompt, approval_policy, sandbox_policy, None)
-            .await
+        self.submit_turn_with_context(
+            prompt,
+            approval_policy,
+            sandbox_policy,
+            /*service_tier*/ None,
+        )
+        .await
     }
 
     async fn submit_turn_with_context(

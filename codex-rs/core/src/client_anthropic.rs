@@ -429,7 +429,9 @@ fn build_anthropic_request(prompt: &Prompt, model_info: &ModelInfo) -> Result<Me
                     output.success == Some(false),
                 ));
             }
-            ResponseItem::CustomToolCallOutput { call_id, output } => {
+            ResponseItem::CustomToolCallOutput {
+                call_id, output, ..
+            } => {
                 messages.push(anthropic_tool_result_message(
                     call_id,
                     anthropic_tool_result_text(&output),
@@ -636,6 +638,11 @@ fn tool_spec_to_anthropic_tool(spec: &ToolSpec) -> Option<Value> {
                 "input_schema": input_schema,
             }))
         }
+        ToolSpec::ToolSearch { parameters, .. } => Some(json!({
+            "name": "tool_search",
+            "description": "Searches enabled tools and returns matching tool metadata.",
+            "input_schema": serde_json::to_value(parameters).ok()?,
+        })),
         ToolSpec::Freeform(tool) => Some(json!({
             "name": tool.name,
             "description": tool.description,
@@ -1042,6 +1049,7 @@ fn tool_use_to_response_item(
     Some(ResponseItem::FunctionCall {
         id: None,
         name,
+        namespace: None,
         arguments,
         call_id,
     })
@@ -1175,8 +1183,12 @@ fn extract_schema_matching_json(schema: &Value, assistant_output: &str) -> Optio
     }
 
     if assistant_output.len() <= ANTHROPIC_SCHEMA_REPAIR_SCAN_MAX_BYTES {
-        return find_schema_matching_json_in_output(&compiled_schema, assistant_output, 0)
-            .map(|(_, candidate)| candidate);
+        return find_schema_matching_json_in_output(
+            &compiled_schema,
+            assistant_output,
+            /*offset*/ 0,
+        )
+        .map(|(_, candidate)| candidate);
     }
 
     let mut suffix_start = assistant_output
@@ -1193,7 +1205,9 @@ fn extract_schema_matching_json(schema: &Value, assistant_output: &str) -> Optio
         prefix_end -= 1;
     }
     let prefix = &assistant_output[..prefix_end];
-    if let Some(candidate) = find_schema_matching_json_in_output(&compiled_schema, prefix, 0) {
+    if let Some(candidate) =
+        find_schema_matching_json_in_output(&compiled_schema, prefix, /*offset*/ 0)
+    {
         match &best {
             Some((best_start, _)) if *best_start <= candidate.0 => {}
             _ => best = Some(candidate),
@@ -1336,6 +1350,8 @@ fn map_to_unexpected_status(status: StatusCode, api_error: anthropic_sdk::ApiErr
         url: None,
         cf_ray: None,
         request_id: api_error.request_id,
+        identity_authorization_error: None,
+        identity_error_code: None,
     })
 }
 

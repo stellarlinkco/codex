@@ -392,6 +392,7 @@ impl ReasoningSummaryCell {
         append_markdown(
             &self.content,
             Some((width as usize).saturating_sub(2)),
+            /*cwd*/ None,
             &mut lines,
         );
         let summary_style = Style::default().dim().italic();
@@ -776,7 +777,7 @@ fn truncate_exec_snippet(full_cmd: &str) -> String {
         Some((first, _)) => format!("{first} ..."),
         None => full_cmd.to_string(),
     };
-    snippet = truncate_text(&snippet, 80);
+    snippet = truncate_text(&snippet, /*max_graphemes*/ 80);
     snippet
 }
 
@@ -930,7 +931,7 @@ pub(crate) fn card_inner_width(width: u16, max_inner_width: usize) -> Option<usi
 
 /// Render `lines` inside a border sized to the widest span in the content.
 pub(crate) fn with_border(lines: Vec<Line<'static>>) -> Vec<Line<'static>> {
-    with_border_internal(lines, None)
+    with_border_internal(lines, /*forced_inner_width*/ None)
 }
 
 /// Render `lines` inside a border whose inner width is at least `inner_width`.
@@ -1016,6 +1017,7 @@ impl HistoryCell for TooltipHistoryCell {
         append_markdown(
             &format!("**Tip:** {}", self.tip),
             Some(wrap_width),
+            /*cwd*/ None,
             &mut lines,
         );
 
@@ -1582,7 +1584,7 @@ pub(crate) fn new_active_web_search_call(
     query: String,
     animations_enabled: bool,
 ) -> WebSearchCell {
-    WebSearchCell::new(call_id, query, None, animations_enabled)
+    WebSearchCell::new(call_id, query, /*action*/ None, animations_enabled)
 }
 
 pub(crate) fn new_web_search_call(
@@ -1590,7 +1592,12 @@ pub(crate) fn new_web_search_call(
     query: String,
     action: WebSearchAction,
 ) -> WebSearchCell {
-    let mut cell = WebSearchCell::new(call_id, query, Some(action), false);
+    let mut cell = WebSearchCell::new(
+        call_id,
+        query,
+        Some(action),
+        /*animations_enabled*/ false,
+    );
     cell.complete();
     cell
 }
@@ -1734,7 +1741,7 @@ pub(crate) fn new_mcp_tools_output(
     }
 
     let mcp_manager = McpManager::new(Arc::new(PluginsManager::new(config.codex_home.clone())));
-    let effective_servers = mcp_manager.effective_servers(config, None);
+    let effective_servers = mcp_manager.effective_servers(config, /*auth*/ None);
     let mut servers: Vec<_> = effective_servers.iter().collect();
     servers.sort_by(|(a, _), (b, _)| a.cmp(b));
 
@@ -2081,7 +2088,12 @@ impl HistoryCell for ProposedPlanCell {
         let plan_style = proposed_plan_style();
         let wrap_width = width.saturating_sub(4).max(1) as usize;
         let mut body: Vec<Line<'static>> = Vec::new();
-        append_markdown(&self.plan_markdown, Some(wrap_width), &mut body);
+        append_markdown(
+            &self.plan_markdown,
+            Some(wrap_width),
+            /*cwd*/ None,
+            &mut body,
+        );
         if body.is_empty() {
             body.push(Line::from("(empty)".dim().italic()));
         }
@@ -2245,7 +2257,7 @@ pub(crate) fn new_reasoning_summary_block(full_reasoning_buffer: String) -> Box<
                 return Box::new(ReasoningSummaryCell::new(
                     header_buffer,
                     summary_buffer,
-                    false,
+                    /*transcript_only*/ false,
                 ));
             }
         }
@@ -2253,7 +2265,7 @@ pub(crate) fn new_reasoning_summary_block(full_reasoning_buffer: String) -> Box<
     Box::new(ReasoningSummaryCell::new(
         "".to_string(),
         full_reasoning_buffer.to_string(),
-        true,
+        /*transcript_only*/ true,
     ))
 }
 

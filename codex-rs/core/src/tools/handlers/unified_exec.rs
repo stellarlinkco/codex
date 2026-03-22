@@ -1,4 +1,3 @@
-use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
 use crate::is_safe_command::is_known_safe_command;
 use crate::protocol::EventMsg;
@@ -7,8 +6,8 @@ use crate::sandboxing::SandboxPermissions;
 use crate::shell::Shell;
 use crate::shell::get_shell_by_model_provided_path;
 use crate::skills::maybe_emit_implicit_skill_invocation;
+use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
-use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::handlers::apply_granted_turn_permissions;
 use crate::tools::handlers::apply_patch::intercept_apply_patch;
@@ -24,7 +23,7 @@ use crate::unified_exec::UnifiedExecProcessManager;
 use crate::unified_exec::UnifiedExecResponse;
 use crate::unified_exec::WriteStdinRequest;
 use async_trait::async_trait;
-use codex_protocol::models::FunctionCallOutputBody;
+use codex_features::Feature;
 use codex_protocol::models::PermissionProfile;
 use serde::Deserialize;
 use std::path::PathBuf;
@@ -83,6 +82,7 @@ fn default_tty() -> bool {
 
 #[async_trait]
 impl ToolHandler for UnifiedExecHandler {
+    type Output = FunctionToolOutput;
     fn kind(&self) -> ToolKind {
         ToolKind::Function
     }
@@ -114,7 +114,10 @@ impl ToolHandler for UnifiedExecHandler {
         !is_known_safe_command(&command)
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    async fn handle(
+        &self,
+        invocation: ToolInvocation,
+    ) -> Result<FunctionToolOutput, FunctionCallError> {
         let ToolInvocation {
             session,
             turn,
@@ -170,7 +173,7 @@ impl ToolHandler for UnifiedExecHandler {
                 } = args;
 
                 let request_permission_enabled =
-                    session.features().enabled(Feature::RequestPermissions);
+                    session.features().enabled(Feature::RequestPermissionsTool);
                 let effective_additional_permissions = apply_granted_turn_permissions(
                     context.session.as_ref(),
                     sandbox_permissions,
@@ -291,10 +294,7 @@ impl ToolHandler for UnifiedExecHandler {
 
         let content = format_response(&response);
 
-        Ok(ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success: Some(true),
-        })
+        Ok(FunctionToolOutput::from_text(content, Some(true)))
     }
 }
 

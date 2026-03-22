@@ -224,9 +224,10 @@ fn skill_roots_from_layer_stack_inner(
 ) -> Vec<SkillRoot> {
     let mut roots = Vec::new();
 
-    for layer in
-        config_layer_stack.get_layers(ConfigLayerStackOrdering::HighestPrecedenceFirst, true)
-    {
+    for layer in config_layer_stack.get_layers(
+        ConfigLayerStackOrdering::HighestPrecedenceFirst,
+        /*include_disabled*/ true,
+    ) {
         let Some(config_folder) = layer.config_folder() else {
             continue;
         };
@@ -298,9 +299,10 @@ fn repo_agents_skill_roots(config_layer_stack: &ConfigLayerStack, cwd: &Path) ->
 
 fn project_root_markers_from_stack(config_layer_stack: &ConfigLayerStack) -> Vec<String> {
     let mut merged = TomlValue::Table(toml::map::Map::new());
-    for layer in
-        config_layer_stack.get_layers(ConfigLayerStackOrdering::LowestPrecedenceFirst, false)
-    {
+    for layer in config_layer_stack.get_layers(
+        ConfigLayerStackOrdering::LowestPrecedenceFirst,
+        /*include_disabled*/ false,
+    ) {
         if matches!(layer.name, ConfigLayerSource::Project { .. }) {
             continue;
         }
@@ -551,6 +553,7 @@ fn parse_skill_file(path: &Path, scope: SkillScope) -> Result<SkillMetadata, Ski
         interface,
         dependencies,
         policy,
+        managed_network_override: None,
         permission_profile,
         path_to_skills_md: resolved_path,
         scope,
@@ -673,6 +676,7 @@ fn resolve_dependencies(dependencies: Option<Dependencies>) -> Option<SkillDepen
 fn resolve_policy(policy: Option<Policy>) -> Option<SkillPolicy> {
     policy.map(|policy| SkillPolicy {
         allow_implicit_invocation: policy.allow_implicit_invocation,
+        products: Vec::new(),
     })
 }
 

@@ -1,11 +1,13 @@
 use crate::error::CodexErr;
 use crate::error::Result;
+use codex_protocol::AgentPath;
 use codex_protocol::ThreadId;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::SubAgentSource;
 use rand::prelude::IndexedRandom;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::hash_map::Entry;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::AtomicUsize;
@@ -25,10 +27,17 @@ pub(crate) struct Guards {
 
 #[derive(Default)]
 struct ActiveAgents {
-    threads_set: HashSet<ThreadId>,
-    thread_agent_nicknames: HashMap<ThreadId, String>,
+    agent_tree: HashMap<String, AgentMetadata>,
     used_agent_nicknames: HashSet<String>,
     nickname_reset_count: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(crate) struct AgentMetadata {
+    pub(crate) agent_id: Option<ThreadId>,
+    pub(crate) agent_path: Option<AgentPath>,
+    pub(crate) agent_nickname: Option<String>,
+    pub(crate) agent_role: Option<String>,
 }
 
 fn format_agent_nickname(name: &str, nickname_reset_count: usize) -> String {
@@ -82,46 +91,93 @@ impl Guards {
             state: Arc::clone(self),
             active: true,
             reserved_agent_nickname: None,
+            reserved_agent_path: None,
         })
     }
 
     pub(crate) fn release_spawned_thread(&self, thread_id: ThreadId) {
-        let removed = {
+        let removed_counted_agent = {
             let mut active_agents = self
                 .active_agents
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let removed = active_agents.threads_set.remove(&thread_id);
-            active_agents.thread_agent_nicknames.remove(&thread_id);
-            removed
+            let removed_key = active_agents
+                .agent_tree
+                .iter()
+                .find_map(|(key, metadata)| (metadata.agent_id == Some(thread_id)).then_some(key))
+                .cloned();
+            removed_key
+                .and_then(|key| active_agents.agent_tree.remove(key.as_str()))
+                .is_some_and(|metadata| {
+                    !metadata.agent_path.as_ref().is_some_and(AgentPath::is_root)
+                })
         };
-        if removed {
+        if removed_counted_agent {
             self.total_count.fetch_sub(1, Ordering::AcqRel);
         }
     }
 
-    pub(crate) fn spawned_thread_ids(&self) -> Vec<ThreadId> {
-        let active_agents = self
-            .active_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        active_agents.threads_set.iter().cloned().collect()
-    }
-
-    fn register_spawned_thread(&self, thread_id: ThreadId, agent_nickname: Option<String>) {
+    pub(crate) fn register_root_thread(&self, thread_id: ThreadId) {
         let mut active_agents = self
             .active_agents
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        active_agents.threads_set.insert(thread_id);
-        if let Some(agent_nickname) = agent_nickname {
-            active_agents
-                .used_agent_nicknames
-                .insert(agent_nickname.clone());
-            active_agents
-                .thread_agent_nicknames
-                .insert(thread_id, agent_nickname);
+        active_agents
+            .agent_tree
+            .entry(AgentPath::ROOT.to_string())
+            .or_insert_with(|| AgentMetadata {
+                agent_id: Some(thread_id),
+                agent_path: Some(AgentPath::root()),
+                ..Default::default()
+            });
+    }
+
+    pub(crate) fn agent_id_for_path(&self, agent_path: &AgentPath) -> Option<ThreadId> {
+        self.active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .agent_tree
+            .get(agent_path.as_str())
+            .and_then(|metadata| metadata.agent_id)
+    }
+
+    pub(crate) fn agent_metadata_for_thread(&self, thread_id: ThreadId) -> Option<AgentMetadata> {
+        self.active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .agent_tree
+            .values()
+            .find(|metadata| metadata.agent_id == Some(thread_id))
+            .cloned()
+    }
+
+    pub(crate) fn spawned_thread_ids(&self) -> Vec<ThreadId> {
+        self.active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .agent_tree
+            .values()
+            .filter_map(|metadata| metadata.agent_id)
+            .collect()
+    }
+
+    fn register_spawned_thread(&self, agent_metadata: AgentMetadata) {
+        let Some(thread_id) = agent_metadata.agent_id else {
+            return;
+        };
+        let mut active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = agent_metadata
+            .agent_path
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_else(|| format!("thread:{thread_id}"));
+        if let Some(agent_nickname) = agent_metadata.agent_nickname.clone() {
+            active_agents.used_agent_nicknames.insert(agent_nickname);
         }
+        active_agents.agent_tree.insert(key, agent_metadata);
     }
 
     fn reserve_agent_nickname(&self, names: &[&str], preferred: Option<&str>) -> Option<String> {
@@ -146,7 +202,11 @@ impl Guards {
                 active_agents.used_agent_nicknames.clear();
                 active_agents.nickname_reset_count += 1;
                 if let Some(metrics) = codex_otel::metrics::global() {
-                    let _ = metrics.counter("codex.multi_agent.nickname_pool_reset", 1, &[]);
+                    let _ = metrics.counter(
+                        "codex.multi_agent.nickname_pool_reset",
+                        /*inc*/ 1,
+                        &[],
+                    );
                 }
                 format_agent_nickname(
                     names.choose(&mut rand::rng())?,
@@ -158,6 +218,39 @@ impl Guards {
             .used_agent_nicknames
             .insert(agent_nickname.clone());
         Some(agent_nickname)
+    }
+
+    fn reserve_agent_path(&self, agent_path: &AgentPath) -> Result<()> {
+        let mut active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        match active_agents.agent_tree.entry(agent_path.to_string()) {
+            Entry::Occupied(_) => Err(CodexErr::UnsupportedOperation(format!(
+                "agent path `{agent_path}` already exists"
+            ))),
+            Entry::Vacant(entry) => {
+                entry.insert(AgentMetadata {
+                    agent_path: Some(agent_path.clone()),
+                    ..Default::default()
+                });
+                Ok(())
+            }
+        }
+    }
+
+    fn release_reserved_agent_path(&self, agent_path: &AgentPath) {
+        let mut active_agents = self
+            .active_agents
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if active_agents
+            .agent_tree
+            .get(agent_path.as_str())
+            .is_some_and(|metadata| metadata.agent_id.is_none())
+        {
+            active_agents.agent_tree.remove(agent_path.as_str());
+        }
     }
 
     fn try_increment_spawned(&self, max_threads: usize) -> bool {
@@ -183,13 +276,10 @@ pub(crate) struct SpawnReservation {
     state: Arc<Guards>,
     active: bool,
     reserved_agent_nickname: Option<String>,
+    reserved_agent_path: Option<AgentPath>,
 }
 
 impl SpawnReservation {
-    pub(crate) fn reserve_agent_nickname(&mut self, names: &[&str]) -> Result<String> {
-        self.reserve_agent_nickname_with_preference(names, None)
-    }
-
     pub(crate) fn reserve_agent_nickname_with_preference(
         &mut self,
         names: &[&str],
@@ -205,18 +295,16 @@ impl SpawnReservation {
         Ok(agent_nickname)
     }
 
-    pub(crate) fn commit(self, thread_id: ThreadId) {
-        self.commit_with_agent_nickname(thread_id, None);
+    pub(crate) fn reserve_agent_path(&mut self, agent_path: &AgentPath) -> Result<()> {
+        self.state.reserve_agent_path(agent_path)?;
+        self.reserved_agent_path = Some(agent_path.clone());
+        Ok(())
     }
 
-    pub(crate) fn commit_with_agent_nickname(
-        mut self,
-        thread_id: ThreadId,
-        agent_nickname: Option<String>,
-    ) {
-        let agent_nickname = self.reserved_agent_nickname.take().or(agent_nickname);
-        self.state
-            .register_spawned_thread(thread_id, agent_nickname);
+    pub(crate) fn commit(mut self, agent_metadata: AgentMetadata) {
+        self.reserved_agent_nickname = None;
+        self.reserved_agent_path = None;
+        self.state.register_spawned_thread(agent_metadata);
         self.active = false;
     }
 }
@@ -224,255 +312,14 @@ impl SpawnReservation {
 impl Drop for SpawnReservation {
     fn drop(&mut self) {
         if self.active {
+            if let Some(agent_path) = self.reserved_agent_path.take() {
+                self.state.release_reserved_agent_path(&agent_path);
+            }
             self.state.total_count.fetch_sub(1, Ordering::AcqRel);
         }
     }
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use pretty_assertions::assert_eq;
-    use std::collections::HashSet;
-
-    #[test]
-    fn format_agent_nickname_adds_ordinals_after_reset() {
-        assert_eq!(format_agent_nickname("Plato", 0), "Plato");
-        assert_eq!(format_agent_nickname("Plato", 1), "Plato the 2nd");
-        assert_eq!(format_agent_nickname("Plato", 2), "Plato the 3rd");
-        assert_eq!(format_agent_nickname("Plato", 10), "Plato the 11th");
-        assert_eq!(format_agent_nickname("Plato", 20), "Plato the 21st");
-    }
-
-    #[test]
-    fn session_depth_defaults_to_zero_for_root_sources() {
-        assert_eq!(session_depth(&SessionSource::Cli), 0);
-    }
-
-    #[test]
-    fn thread_spawn_depth_increments_and_enforces_limit() {
-        let session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
-            parent_thread_id: ThreadId::new(),
-            depth: 1,
-            agent_nickname: None,
-            agent_role: None,
-        });
-        let child_depth = next_thread_spawn_depth(&session_source);
-        assert_eq!(child_depth, 2);
-        assert!(exceeds_thread_spawn_depth_limit(child_depth, 1));
-    }
-
-    #[test]
-    fn non_thread_spawn_subagents_default_to_depth_zero() {
-        let session_source = SessionSource::SubAgent(SubAgentSource::Review);
-        assert_eq!(session_depth(&session_source), 0);
-        assert_eq!(next_thread_spawn_depth(&session_source), 1);
-        assert!(!exceeds_thread_spawn_depth_limit(1, 1));
-    }
-
-    #[test]
-    fn reservation_drop_releases_slot() {
-        let guards = Arc::new(Guards::default());
-        let reservation = guards.reserve_spawn_slot(Some(1)).expect("reserve slot");
-        drop(reservation);
-
-        let reservation = guards.reserve_spawn_slot(Some(1)).expect("slot released");
-        drop(reservation);
-    }
-
-    #[test]
-    fn commit_holds_slot_until_release() {
-        let guards = Arc::new(Guards::default());
-        let reservation = guards.reserve_spawn_slot(Some(1)).expect("reserve slot");
-        let thread_id = ThreadId::new();
-        reservation.commit(thread_id);
-
-        let err = match guards.reserve_spawn_slot(Some(1)) {
-            Ok(_) => panic!("limit should be enforced"),
-            Err(err) => err,
-        };
-        let CodexErr::AgentLimitReached { max_threads } = err else {
-            panic!("expected CodexErr::AgentLimitReached");
-        };
-        assert_eq!(max_threads, 1);
-
-        guards.release_spawned_thread(thread_id);
-        let reservation = guards
-            .reserve_spawn_slot(Some(1))
-            .expect("slot released after thread removal");
-        drop(reservation);
-    }
-
-    #[test]
-    fn release_ignores_unknown_thread_id() {
-        let guards = Arc::new(Guards::default());
-        let reservation = guards.reserve_spawn_slot(Some(1)).expect("reserve slot");
-        let thread_id = ThreadId::new();
-        reservation.commit(thread_id);
-
-        guards.release_spawned_thread(ThreadId::new());
-
-        let err = match guards.reserve_spawn_slot(Some(1)) {
-            Ok(_) => panic!("limit should still be enforced"),
-            Err(err) => err,
-        };
-        let CodexErr::AgentLimitReached { max_threads } = err else {
-            panic!("expected CodexErr::AgentLimitReached");
-        };
-        assert_eq!(max_threads, 1);
-
-        guards.release_spawned_thread(thread_id);
-        let reservation = guards
-            .reserve_spawn_slot(Some(1))
-            .expect("slot released after real thread removal");
-        drop(reservation);
-    }
-
-    #[test]
-    fn release_is_idempotent_for_registered_threads() {
-        let guards = Arc::new(Guards::default());
-        let reservation = guards.reserve_spawn_slot(Some(1)).expect("reserve slot");
-        let first_id = ThreadId::new();
-        reservation.commit(first_id);
-
-        guards.release_spawned_thread(first_id);
-
-        let reservation = guards.reserve_spawn_slot(Some(1)).expect("slot reused");
-        let second_id = ThreadId::new();
-        reservation.commit(second_id);
-
-        guards.release_spawned_thread(first_id);
-
-        let err = match guards.reserve_spawn_slot(Some(1)) {
-            Ok(_) => panic!("limit should still be enforced"),
-            Err(err) => err,
-        };
-        let CodexErr::AgentLimitReached { max_threads } = err else {
-            panic!("expected CodexErr::AgentLimitReached");
-        };
-        assert_eq!(max_threads, 1);
-
-        guards.release_spawned_thread(second_id);
-        let reservation = guards
-            .reserve_spawn_slot(Some(1))
-            .expect("slot released after second thread removal");
-        drop(reservation);
-    }
-
-    #[test]
-    fn failed_spawn_keeps_nickname_marked_used() {
-        let guards = Arc::new(Guards::default());
-        let mut reservation = guards.reserve_spawn_slot(None).expect("reserve slot");
-        let agent_nickname = reservation
-            .reserve_agent_nickname(&["alpha"])
-            .expect("reserve agent name");
-        assert_eq!(agent_nickname, "alpha");
-        drop(reservation);
-
-        let mut reservation = guards.reserve_spawn_slot(None).expect("reserve slot");
-        let agent_nickname = reservation
-            .reserve_agent_nickname(&["alpha", "beta"])
-            .expect("unused name should still be preferred");
-        assert_eq!(agent_nickname, "beta");
-    }
-
-    #[test]
-    fn agent_nickname_resets_used_pool_when_exhausted() {
-        let guards = Arc::new(Guards::default());
-        let mut first = guards.reserve_spawn_slot(None).expect("reserve first slot");
-        let first_name = first
-            .reserve_agent_nickname(&["alpha"])
-            .expect("reserve first agent name");
-        let first_id = ThreadId::new();
-        first.commit(first_id);
-        assert_eq!(first_name, "alpha");
-
-        let mut second = guards
-            .reserve_spawn_slot(None)
-            .expect("reserve second slot");
-        let second_name = second
-            .reserve_agent_nickname(&["alpha"])
-            .expect("name should be reused after pool reset");
-        assert_eq!(second_name, "alpha the 2nd");
-        let active_agents = guards
-            .active_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(active_agents.nickname_reset_count, 1);
-    }
-
-    #[test]
-    fn released_nickname_stays_used_until_pool_reset() {
-        let guards = Arc::new(Guards::default());
-
-        let mut first = guards.reserve_spawn_slot(None).expect("reserve first slot");
-        let first_name = first
-            .reserve_agent_nickname(&["alpha"])
-            .expect("reserve first agent name");
-        let first_id = ThreadId::new();
-        first.commit(first_id);
-        assert_eq!(first_name, "alpha");
-
-        guards.release_spawned_thread(first_id);
-
-        let mut second = guards
-            .reserve_spawn_slot(None)
-            .expect("reserve second slot");
-        let second_name = second
-            .reserve_agent_nickname(&["alpha", "beta"])
-            .expect("released name should still be marked used");
-        assert_eq!(second_name, "beta");
-        let second_id = ThreadId::new();
-        second.commit(second_id);
-        guards.release_spawned_thread(second_id);
-
-        let mut third = guards.reserve_spawn_slot(None).expect("reserve third slot");
-        let third_name = third
-            .reserve_agent_nickname(&["alpha", "beta"])
-            .expect("pool reset should permit a duplicate");
-        let expected_names =
-            HashSet::from(["alpha the 2nd".to_string(), "beta the 2nd".to_string()]);
-        assert!(expected_names.contains(&third_name));
-        let active_agents = guards
-            .active_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(active_agents.nickname_reset_count, 1);
-    }
-
-    #[test]
-    fn repeated_resets_advance_the_ordinal_suffix() {
-        let guards = Arc::new(Guards::default());
-
-        let mut first = guards.reserve_spawn_slot(None).expect("reserve first slot");
-        let first_name = first
-            .reserve_agent_nickname(&["Plato"])
-            .expect("reserve first agent name");
-        let first_id = ThreadId::new();
-        first.commit(first_id);
-        assert_eq!(first_name, "Plato");
-        guards.release_spawned_thread(first_id);
-
-        let mut second = guards
-            .reserve_spawn_slot(None)
-            .expect("reserve second slot");
-        let second_name = second
-            .reserve_agent_nickname(&["Plato"])
-            .expect("reserve second agent name");
-        let second_id = ThreadId::new();
-        second.commit(second_id);
-        assert_eq!(second_name, "Plato the 2nd");
-        guards.release_spawned_thread(second_id);
-
-        let mut third = guards.reserve_spawn_slot(None).expect("reserve third slot");
-        let third_name = third
-            .reserve_agent_nickname(&["Plato"])
-            .expect("reserve third agent name");
-        assert_eq!(third_name, "Plato the 3rd");
-        let active_agents = guards
-            .active_agents
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        assert_eq!(active_agents.nickname_reset_count, 2);
-    }
-}
+#[path = "guards_tests.rs"]
+mod tests;

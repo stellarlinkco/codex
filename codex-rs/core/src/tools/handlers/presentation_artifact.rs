@@ -12,23 +12,23 @@ use std::path::PathBuf;
 
 use crate::codex::Session;
 use crate::codex::TurnContext;
-use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
 use crate::path_utils::normalize_for_path_comparison;
 use crate::path_utils::resolve_symlink_write_paths;
+use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
-use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 use crate::tools::sandboxing::with_cached_approval;
-use codex_protocol::models::FunctionCallOutputBody;
+use codex_features::Feature;
 
 pub struct PresentationArtifactHandler;
 
 #[async_trait]
 impl ToolHandler for PresentationArtifactHandler {
+    type Output = FunctionToolOutput;
     fn kind(&self) -> ToolKind {
         ToolKind::Function
     }
@@ -43,7 +43,10 @@ impl ToolHandler for PresentationArtifactHandler {
         request.is_mutating().unwrap_or(true)
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    async fn handle(
+        &self,
+        invocation: ToolInvocation,
+    ) -> Result<FunctionToolOutput, FunctionCallError> {
         let ToolInvocation {
             session,
             turn,
@@ -85,14 +88,14 @@ impl ToolHandler for PresentationArtifactHandler {
             .await
             .map_err(presentation_error)?;
 
-        Ok(ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(to_string(&response).map_err(|error| {
+        Ok(FunctionToolOutput::from_text(
+            to_string(&response).map_err(|error| {
                 FunctionCallError::RespondToModel(format!(
                     "failed to serialize presentation_artifact response: {error}"
                 ))
-            })?),
-            success: Some(true),
-        })
+            })?,
+            Some(true),
+        ))
     }
 }
 
@@ -149,7 +152,7 @@ async fn authorize_path_access(
                     .request_command_approval(
                         turn,
                         call_id.to_string(),
-                        None,
+                        /*approval_id*/ None,
                         vec![
                             "presentation_artifact".to_string(),
                             action,
@@ -161,11 +164,11 @@ async fn authorize_path_access(
                             access_kind_verb(access.kind),
                             path.display()
                         )),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
+                        /*network_approval_context*/ None,
+                        /*proposed_execpolicy_amendment*/ None,
+                        /*additional_permissions*/ None,
+                        /*skill_metadata*/ None,
+                        /*available_decisions*/ None,
                     )
                     .await
             }

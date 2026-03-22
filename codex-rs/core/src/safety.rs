@@ -43,6 +43,7 @@ pub fn assess_patch_safety(
         AskForApproval::OnFailure
         | AskForApproval::Never
         | AskForApproval::OnRequest
+        | AskForApproval::Granular(_)
         | AskForApproval::Reject(_) => {
             // Continue to see if this can be auto-approved.
         }

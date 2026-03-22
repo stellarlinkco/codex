@@ -2,6 +2,8 @@ use crate::CodexAuth;
 use crate::api_bridge::map_api_error;
 use crate::auth::read_openai_api_key_from_env;
 use crate::codex::Session;
+use crate::config::RealtimeWsMode;
+use crate::config::RealtimeWsVersion;
 use crate::default_client::default_headers;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
@@ -12,7 +14,9 @@ use async_channel::TrySendError;
 use codex_api::Provider as ApiProvider;
 use codex_api::RealtimeAudioFrame;
 use codex_api::RealtimeEvent;
+use codex_api::RealtimeEventParser;
 use codex_api::RealtimeSessionConfig;
+use codex_api::RealtimeSessionMode;
 use codex_api::RealtimeWebsocketClient;
 use codex_api::endpoint::realtime_websocket::RealtimeWebsocketEvents;
 use codex_api::endpoint::realtime_websocket::RealtimeWebsocketWriter;
@@ -54,6 +58,7 @@ pub(crate) struct RealtimeConversationManager {
 struct RealtimeHandoffState {
     output_tx: Sender<HandoffOutput>,
     active_handoff: Arc<Mutex<Option<String>>>,
+    last_output_text: Arc<Mutex<Option<String>>>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -67,6 +72,7 @@ impl RealtimeHandoffState {
         Self {
             output_tx,
             active_handoff: Arc::new(Mutex::new(None)),
+            last_output_text: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -74,6 +80,7 @@ impl RealtimeHandoffState {
         let Some(handoff_id) = self.active_handoff.lock().await.clone() else {
             return Ok(());
         };
+        *self.last_output_text.lock().await = Some(output_text.clone());
 
         self.output_tx
             .send(HandoffOutput {
@@ -117,6 +124,8 @@ impl RealtimeConversationManager {
         prompt: String,
         model: Option<String>,
         session_id: Option<String>,
+        event_parser: RealtimeEventParser,
+        session_mode: RealtimeSessionMode,
     ) -> CodexResult<(Receiver<RealtimeEvent>, Arc<AtomicBool>)> {
         let previous_state = {
             let mut guard = self.state.lock().await;
@@ -132,6 +141,8 @@ impl RealtimeConversationManager {
             instructions: prompt,
             model,
             session_id,
+            event_parser,
+            session_mode,
         };
         let client = RealtimeWebsocketClient::new(api_provider);
         let connection = client
@@ -234,6 +245,31 @@ impl RealtimeConversationManager {
         handoff.send_output(output_text).await
     }
 
+    pub(crate) async fn handoff_complete(&self) -> CodexResult<()> {
+        let handoff = {
+            let guard = self.state.lock().await;
+            guard.as_ref().map(|state| state.handoff.clone())
+        };
+        let Some(handoff) = handoff else {
+            return Ok(());
+        };
+        let Some(handoff_id) = handoff.active_handoff.lock().await.clone() else {
+            return Ok(());
+        };
+        let Some(output_text) = handoff.last_output_text.lock().await.clone() else {
+            return Ok(());
+        };
+
+        handoff
+            .output_tx
+            .send(HandoffOutput {
+                handoff_id,
+                output_text,
+            })
+            .await
+            .map_err(|_| CodexErr::InvalidRequest("conversation is not running".to_string()))
+    }
+
     pub(crate) async fn active_handoff_id(&self) -> Option<String> {
         let handoff = {
             let guard = self.state.lock().await;
@@ -298,6 +334,15 @@ pub(crate) async fn handle_start(
         format!("{prompt}\n\n{startup_context}")
     };
     let model = config.experimental_realtime_ws_model.clone();
+    let realtime_version = config.realtime.version;
+    let event_parser = match realtime_version {
+        RealtimeWsVersion::V1 => RealtimeEventParser::V1,
+        RealtimeWsVersion::V2 => RealtimeEventParser::RealtimeV2,
+    };
+    let session_mode = match config.realtime.session_type {
+        RealtimeWsMode::Conversational => RealtimeSessionMode::Conversational,
+        RealtimeWsMode::Transcription => RealtimeSessionMode::Transcription,
+    };
 
     let requested_session_id = params
         .session_id
@@ -313,6 +358,8 @@ pub(crate) async fn handle_start(
             prompt,
             model,
             requested_session_id.clone(),
+            event_parser,
+            session_mode,
         )
         .await
     {
@@ -330,6 +377,7 @@ pub(crate) async fn handle_start(
         id: sub_id.clone(),
         msg: EventMsg::RealtimeConversationStarted(RealtimeConversationStartedEvent {
             session_id: requested_session_id,
+            version: realtime_version,
         }),
     })
     .await;

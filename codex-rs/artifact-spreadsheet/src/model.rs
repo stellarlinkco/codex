@@ -891,7 +891,11 @@ impl SpreadsheetSheet {
         range: &CellRange,
         fields: Option<&[String]>,
     ) -> Result<(), SpreadsheetArtifactError> {
-        self.ensure_range_write_allowed(range, false, "clear_range")?;
+        self.ensure_range_write_allowed(
+            range,
+            /*allow_exact_merged_cell*/ false,
+            "clear_range",
+        )?;
         for address in range.addresses() {
             if let Some(cell) = self.get_cell_mut(address) {
                 match fields {
@@ -930,7 +934,11 @@ impl SpreadsheetSheet {
         value: Option<SpreadsheetCellValue>,
     ) -> Result<(), SpreadsheetArtifactError> {
         let range = CellRange::from_start_end(address, address);
-        self.ensure_range_write_allowed(&range, false, "set_value")?;
+        self.ensure_range_write_allowed(
+            &range,
+            /*allow_exact_merged_cell*/ false,
+            "set_value",
+        )?;
         let cell = self.get_or_create_cell_mut(address);
         cell.formula = None;
         cell.value = value;
@@ -945,7 +953,11 @@ impl SpreadsheetSheet {
         range: &CellRange,
         value: Option<SpreadsheetCellValue>,
     ) -> Result<(), SpreadsheetArtifactError> {
-        self.ensure_range_write_allowed(range, false, "set_range_to_value")?;
+        self.ensure_range_write_allowed(
+            range,
+            /*allow_exact_merged_cell*/ false,
+            "set_range_to_value",
+        )?;
         for address in range.addresses() {
             let cell = self.get_or_create_cell_mut(address);
             cell.formula = None;
@@ -961,7 +973,11 @@ impl SpreadsheetSheet {
         formula: Option<String>,
     ) -> Result<(), SpreadsheetArtifactError> {
         let range = CellRange::from_start_end(address, address);
-        self.ensure_range_write_allowed(&range, false, "set_formula")?;
+        self.ensure_range_write_allowed(
+            &range,
+            /*allow_exact_merged_cell*/ false,
+            "set_formula",
+        )?;
         let cell = self.get_or_create_cell_mut(address);
         cell.formula = formula;
         if cell.formula.is_none() {
@@ -978,7 +994,11 @@ impl SpreadsheetSheet {
         range: &CellRange,
         formula: Option<String>,
     ) -> Result<(), SpreadsheetArtifactError> {
-        self.ensure_range_write_allowed(range, false, "set_range_to_formula")?;
+        self.ensure_range_write_allowed(
+            range,
+            /*allow_exact_merged_cell*/ false,
+            "set_range_to_formula",
+        )?;
         for address in range.addresses() {
             let cell = self.get_or_create_cell_mut(address);
             cell.formula = formula.clone();
@@ -1010,7 +1030,11 @@ impl SpreadsheetSheet {
         range: &CellRange,
         style_index: u32,
     ) -> Result<(), SpreadsheetArtifactError> {
-        self.ensure_range_write_allowed(range, false, "set_style_index")?;
+        self.ensure_range_write_allowed(
+            range,
+            /*allow_exact_merged_cell*/ false,
+            "set_style_index",
+        )?;
         for address in range.addresses() {
             let cell = self.get_or_create_cell_mut(address);
             cell.style_index = style_index;
@@ -1024,7 +1048,11 @@ impl SpreadsheetSheet {
         range: &CellRange,
         citation: SpreadsheetCitation,
     ) -> Result<(), SpreadsheetArtifactError> {
-        self.ensure_range_write_allowed(range, true, "cite_range")?;
+        self.ensure_range_write_allowed(
+            range,
+            /*allow_exact_merged_cell*/ true,
+            "cite_range",
+        )?;
         for address in range.addresses() {
             let cell = self.get_or_create_cell_mut(address);
             cell.citations.push(citation.clone());
@@ -1037,7 +1065,11 @@ impl SpreadsheetSheet {
         range: &CellRange,
         values: &[Vec<Option<SpreadsheetCellValue>>],
     ) -> Result<(), SpreadsheetArtifactError> {
-        self.ensure_range_write_allowed(range, false, "set_values_matrix")?;
+        self.ensure_range_write_allowed(
+            range,
+            /*allow_exact_merged_cell*/ false,
+            "set_values_matrix",
+        )?;
         if values.len() != range.height() || values.iter().any(|row| row.len() != range.width()) {
             return Err(SpreadsheetArtifactError::InvalidArgs {
                 action: "set_range_values".to_string(),
@@ -1071,7 +1103,11 @@ impl SpreadsheetSheet {
         range: &CellRange,
         formulas: &[Vec<Option<String>>],
     ) -> Result<(), SpreadsheetArtifactError> {
-        self.ensure_range_write_allowed(range, false, "set_formulas_matrix")?;
+        self.ensure_range_write_allowed(
+            range,
+            /*allow_exact_merged_cell*/ false,
+            "set_formulas_matrix",
+        )?;
         if formulas.len() != range.height() || formulas.iter().any(|row| row.len() != range.width())
         {
             return Err(SpreadsheetArtifactError::InvalidArgs {

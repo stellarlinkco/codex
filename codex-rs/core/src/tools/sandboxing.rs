@@ -174,7 +174,7 @@ where
 
     services.session_telemetry.counter(
         "codex.approval.requested",
-        1,
+        /*inc*/ 1,
         &[
             ("tool", tool_name),
             ("approved", decision.to_opaque_string()),
@@ -250,10 +250,12 @@ pub(crate) fn default_exec_approval_requirement(
 ) -> ExecApprovalRequirement {
     let needs_approval = match policy {
         AskForApproval::Never | AskForApproval::OnFailure => false,
-        AskForApproval::OnRequest | AskForApproval::Reject(_) => !matches!(
-            sandbox_policy,
-            SandboxPolicy::DangerFullAccess | SandboxPolicy::ExternalSandbox { .. }
-        ),
+        AskForApproval::OnRequest | AskForApproval::Reject(_) | AskForApproval::Granular(_) => {
+            !matches!(
+                sandbox_policy,
+                SandboxPolicy::DangerFullAccess | SandboxPolicy::ExternalSandbox { .. }
+            )
+        }
         AskForApproval::UnlessTrusted => true,
     };
 
@@ -346,6 +348,7 @@ pub(crate) trait Approvable<Req> {
             AskForApproval::UnlessTrusted => true,
             AskForApproval::Never => false,
             AskForApproval::OnRequest => false,
+            AskForApproval::Granular(_) => true,
             AskForApproval::Reject(reject_config) => !reject_config.sandbox_approval,
         }
     }
@@ -408,7 +411,7 @@ pub(crate) struct SandboxAttempt<'a> {
     pub(crate) manager: &'a SandboxManager,
     pub(crate) sandbox_cwd: &'a Path,
     pub codex_linux_sandbox_exe: Option<&'a std::path::PathBuf>,
-    pub use_linux_sandbox_bwrap: bool,
+    pub use_legacy_landlock: bool,
     pub windows_sandbox_level: codex_protocol::config_types::WindowsSandboxLevel,
 }
 
@@ -431,8 +434,9 @@ impl<'a> SandboxAttempt<'a> {
                 #[cfg(target_os = "macos")]
                 macos_seatbelt_profile_extensions: None,
                 codex_linux_sandbox_exe: self.codex_linux_sandbox_exe,
-                use_linux_sandbox_bwrap: self.use_linux_sandbox_bwrap,
+                use_legacy_landlock: self.use_legacy_landlock,
                 windows_sandbox_level: self.windows_sandbox_level,
+                windows_sandbox_private_desktop: false,
             })
     }
 }

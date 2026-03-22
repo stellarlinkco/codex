@@ -15,6 +15,7 @@ use crate::error::Result as CodexResult;
 use crate::protocol::RateLimitSnapshot;
 use crate::protocol::TokenUsage;
 use crate::protocol::TokenUsageInfo;
+use crate::session_startup_prewarm::SessionStartupPrewarmHandle;
 use crate::tasks::RegularTask;
 use crate::truncate::TruncationPolicy;
 use codex_protocol::protocol::TurnContextItem;
@@ -39,8 +40,10 @@ pub(crate) struct SessionState {
     previous_turn_settings: Option<PreviousTurnSettings>,
     /// Startup regular task pre-created during session initialization.
     pub(crate) startup_regular_task: Option<JoinHandle<CodexResult<RegularTask>>>,
+    pub(crate) startup_prewarm: Option<SessionStartupPrewarmHandle>,
     pub(crate) active_mcp_tool_selection: Option<Vec<String>>,
     pub(crate) active_connector_selection: HashSet<String>,
+    pub(crate) pending_session_start_source: Option<codex_hooks::SessionStartSource>,
     pub(crate) artifacts: SessionArtifacts,
     granted_permissions: Option<PermissionProfile>,
 }
@@ -58,8 +61,10 @@ impl SessionState {
             mcp_dependency_prompted: HashSet::new(),
             previous_turn_settings: None,
             startup_regular_task: None,
+            startup_prewarm: None,
             active_mcp_tool_selection: None,
             active_connector_selection: HashSet::new(),
+            pending_session_start_source: None,
             artifacts: SessionArtifacts::default(),
             granted_permissions: None,
         }
@@ -184,6 +189,17 @@ impl SessionState {
         self.startup_regular_task.take()
     }
 
+    pub(crate) fn set_session_startup_prewarm(
+        &mut self,
+        startup_prewarm: SessionStartupPrewarmHandle,
+    ) {
+        self.startup_prewarm = Some(startup_prewarm);
+    }
+
+    pub(crate) fn take_session_startup_prewarm(&mut self) -> Option<SessionStartupPrewarmHandle> {
+        self.startup_prewarm.take()
+    }
+
     pub(crate) fn merge_mcp_tool_selection(&mut self, tool_names: Vec<String>) -> Vec<String> {
         if tool_names.is_empty() {
             return self.active_mcp_tool_selection.clone().unwrap_or_default();
@@ -259,6 +275,19 @@ impl SessionState {
     // Removes all currently tracked connector selections.
     pub(crate) fn clear_connector_selection(&mut self) {
         self.active_connector_selection.clear();
+    }
+
+    pub(crate) fn set_pending_session_start_source(
+        &mut self,
+        value: Option<codex_hooks::SessionStartSource>,
+    ) {
+        self.pending_session_start_source = value;
+    }
+
+    pub(crate) fn take_pending_session_start_source(
+        &mut self,
+    ) -> Option<codex_hooks::SessionStartSource> {
+        self.pending_session_start_source.take()
     }
 }
 

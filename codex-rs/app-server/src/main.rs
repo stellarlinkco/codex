@@ -32,12 +32,11 @@ fn main() -> anyhow::Result<()> {
             ..Default::default()
         };
         let transport = args.listen;
-
         run_main_with_transport(
             arg0_paths,
             CliConfigOverrides::default(),
             loader_overrides,
-            false,
+            /*default_analytics_enabled*/ false,
             transport,
         )
         .await?;

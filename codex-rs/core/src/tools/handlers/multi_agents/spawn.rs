@@ -4,6 +4,7 @@ use crate::agent::role::apply_role_to_config;
 use crate::agent::control::SpawnAgentOptions;
 use crate::agent::exceeds_thread_spawn_depth_limit;
 use crate::agent::next_thread_spawn_depth;
+use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use std::sync::Arc;
 
 #[derive(Debug, Deserialize)]
@@ -31,7 +32,7 @@ pub async fn handle(
     turn: Arc<TurnContext>,
     call_id: String,
     arguments: String,
-) -> Result<ToolOutput, FunctionCallError> {
+) -> Result<FunctionToolOutput, FunctionCallError> {
     let args: SpawnAgentArgs = parse_arguments(&arguments)?;
     if let Some(team_id) = find_team_for_member(session.conversation_id)? {
         return Err(FunctionCallError::RespondToModel(format!(
@@ -56,17 +57,6 @@ pub async fn handle(
             "Agent depth limit reached. Solve the task yourself.".to_string(),
         ));
     }
-    session
-        .send_event(
-            &turn,
-            CollabAgentSpawnBeginEvent {
-                call_id: call_id.clone(),
-                sender_thread_id: session.conversation_id,
-                prompt: prompt.clone(),
-            }
-            .into(),
-        )
-        .await;
     let thread_spawn_session_source = Some(thread_spawn_source_with_role(
         session.conversation_id,
         child_depth,
@@ -83,6 +73,27 @@ pub async fn handle(
     apply_member_model_overrides(&mut config, model_provider, model)?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
     apply_spawn_agent_overrides(&mut config, child_depth);
+    let spawn_model = config
+        .model
+        .clone()
+        .unwrap_or_else(|| turn.model_info.slug.clone());
+    let spawn_reasoning_effort = config
+        .model_reasoning_effort
+        .or(turn.reasoning_effort)
+        .unwrap_or(ReasoningEffortConfig::default());
+    session
+        .send_event(
+            &turn,
+            CollabAgentSpawnBeginEvent {
+                call_id: call_id.clone(),
+                sender_thread_id: session.conversation_id,
+                prompt: prompt.clone(),
+                model: spawn_model.clone(),
+                reasoning_effort: spawn_reasoning_effort,
+            }
+            .into(),
+        )
+        .await;
     let worktree_lease = if use_worktree {
         match create_agent_worktree(&session, &turn).await {
             Ok(lease) => {
@@ -100,6 +111,8 @@ pub async fn handle(
                             new_agent_nickname: None,
                             new_agent_role: None,
                             prompt,
+                            model: spawn_model.clone(),
+                            reasoning_effort: spawn_reasoning_effort,
                             status: AgentStatus::NotFound,
                         }
                         .into(),
@@ -125,7 +138,9 @@ pub async fn handle(
     let result = match spawn_result {
         Ok(result) => Ok(result),
         Err(err @ CodexErr::AgentLimitReached { .. }) => {
-            if reap_finished_agents_for_slots(session.as_ref(), turn.as_ref(), 1).await == 0 {
+            if reap_finished_agents_for_slots(session.as_ref(), turn.as_ref(), /*slots*/ 1).await
+                == 0
+            {
                 Err(err)
             } else {
                 session
@@ -162,6 +177,8 @@ pub async fn handle(
                         new_agent_nickname: None,
                         new_agent_role: None,
                         prompt,
+                        model: spawn_model.clone(),
+                        reasoning_effort: spawn_reasoning_effort,
                         status: AgentStatus::NotFound,
                     }
                     .into(),
@@ -214,6 +231,8 @@ pub async fn handle(
                     new_agent_nickname: None,
                     new_agent_role: None,
                     prompt,
+                    model: spawn_model.clone(),
+                    reasoning_effort: spawn_reasoning_effort,
                     status: AgentStatus::NotFound,
                 }
                 .into(),
@@ -246,6 +265,8 @@ pub async fn handle(
                 new_agent_nickname,
                 new_agent_role,
                 prompt,
+                model: spawn_model,
+                reasoning_effort: spawn_reasoning_effort,
                 status,
             }
             .into(),
@@ -259,8 +280,5 @@ pub async fn handle(
         FunctionCallError::Fatal(format!("failed to serialize spawn_agent result: {err}"))
     })?;
 
-    Ok(ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(content),
-        success: Some(true),
-    })
+    Ok(FunctionToolOutput::from_text(content, Some(true)))
 }

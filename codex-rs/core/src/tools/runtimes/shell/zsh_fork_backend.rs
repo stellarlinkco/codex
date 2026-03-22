@@ -5,6 +5,7 @@ use crate::tools::runtimes::unified_exec::UnifiedExecRequest;
 use crate::tools::sandboxing::SandboxAttempt;
 use crate::tools::sandboxing::ToolCtx;
 use crate::tools::sandboxing::ToolError;
+use crate::tools::spec::ZshForkConfig;
 use crate::unified_exec::SpawnLifecycleHandle;
 
 pub(crate) struct PreparedUnifiedExecSpawn {
@@ -37,8 +38,9 @@ pub(crate) async fn maybe_prepare_unified_exec(
     attempt: &SandboxAttempt<'_>,
     ctx: &ToolCtx,
     exec_request: ExecRequest,
+    zsh_fork_config: &ZshForkConfig,
 ) -> Result<Option<PreparedUnifiedExecSpawn>, ToolError> {
-    imp::maybe_prepare_unified_exec(req, attempt, ctx, exec_request).await
+    imp::maybe_prepare_unified_exec(req, attempt, ctx, exec_request, zsh_fork_config).await
 }
 
 #[cfg(unix)]
@@ -46,6 +48,7 @@ mod imp {
     use super::*;
     use crate::tools::runtimes::shell::unix_escalation;
     use crate::unified_exec::SpawnLifecycle;
+    use codex_shell_escalation::ESCALATE_SOCKET_ENV_VAR;
     use codex_shell_escalation::EscalationSession;
 
     #[derive(Debug)]
@@ -54,6 +57,15 @@ mod imp {
     }
 
     impl SpawnLifecycle for ZshForkSpawnLifecycle {
+        fn inherited_fds(&self) -> Vec<i32> {
+            self.escalation_session
+                .env()
+                .get(ESCALATE_SOCKET_ENV_VAR)
+                .and_then(|fd| fd.parse().ok())
+                .into_iter()
+                .collect()
+        }
+
         fn after_spawn(&mut self) {
             self.escalation_session.close_client_socket();
         }
@@ -73,6 +85,7 @@ mod imp {
         attempt: &SandboxAttempt<'_>,
         ctx: &ToolCtx,
         exec_request: ExecRequest,
+        _zsh_fork_config: &ZshForkConfig,
     ) -> Result<Option<PreparedUnifiedExecSpawn>, ToolError> {
         let Some(prepared) =
             unix_escalation::prepare_unified_exec_zsh_fork(req, attempt, ctx, exec_request).await?
@@ -108,8 +121,9 @@ mod imp {
         attempt: &SandboxAttempt<'_>,
         ctx: &ToolCtx,
         exec_request: ExecRequest,
+        zsh_fork_config: &ZshForkConfig,
     ) -> Result<Option<PreparedUnifiedExecSpawn>, ToolError> {
-        let _ = (req, attempt, ctx, exec_request);
+        let _ = (req, attempt, ctx, exec_request, zsh_fork_config);
         Ok(None)
     }
 }

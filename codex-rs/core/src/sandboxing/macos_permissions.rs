@@ -1,6 +1,7 @@
 use std::collections::BTreeSet;
 
 use codex_protocol::models::MacOsAutomationPermission;
+use codex_protocol::models::MacOsContactsPermission;
 use codex_protocol::models::MacOsPreferencesPermission;
 use codex_protocol::models::MacOsSeatbeltProfileExtensions;
 
@@ -20,12 +21,18 @@ pub(crate) fn merge_macos_seatbelt_profile_extensions(
                 &base.macos_preferences,
                 &permissions.macos_preferences,
             ),
+            macos_contacts: union_macos_contacts_permission(
+                &base.macos_contacts,
+                &permissions.macos_contacts,
+            ),
             macos_automation: union_macos_automation_permission(
                 &base.macos_automation,
                 &permissions.macos_automation,
             ),
+            macos_launch_services: base.macos_launch_services || permissions.macos_launch_services,
             macos_accessibility: base.macos_accessibility || permissions.macos_accessibility,
             macos_calendar: base.macos_calendar || permissions.macos_calendar,
+            macos_reminders: base.macos_reminders || permissions.macos_reminders,
         }),
         None => Some(permissions.clone()),
     }
@@ -44,9 +51,13 @@ pub(crate) fn intersect_macos_seatbelt_profile_extensions(
 
             Some(MacOsSeatbeltProfileExtensions {
                 macos_preferences: requested.macos_preferences.min(granted.macos_preferences),
+                macos_contacts: requested.macos_contacts.min(granted.macos_contacts),
                 macos_automation,
+                macos_launch_services: requested.macos_launch_services
+                    && granted.macos_launch_services,
                 macos_accessibility: requested.macos_accessibility && granted.macos_accessibility,
                 macos_calendar: requested.macos_calendar && granted.macos_calendar,
+                macos_reminders: requested.macos_reminders && granted.macos_reminders,
             })
         }
         _ => None,
@@ -61,6 +72,17 @@ fn union_macos_preferences_permission(
     base: &MacOsPreferencesPermission,
     requested: &MacOsPreferencesPermission,
 ) -> MacOsPreferencesPermission {
+    if base < requested {
+        requested.clone()
+    } else {
+        base.clone()
+    }
+}
+
+fn union_macos_contacts_permission(
+    base: &MacOsContactsPermission,
+    requested: &MacOsContactsPermission,
+) -> MacOsContactsPermission {
     if base < requested {
         requested.clone()
     } else {

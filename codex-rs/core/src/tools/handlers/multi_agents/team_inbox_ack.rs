@@ -20,7 +20,7 @@ pub async fn handle(
     turn: Arc<TurnContext>,
     _call_id: String,
     arguments: String,
-) -> Result<ToolOutput, FunctionCallError> {
+) -> Result<FunctionToolOutput, FunctionCallError> {
     let args: TeamInboxAckArgs = parse_arguments(&arguments)?;
     let team_id = normalized_team_id(&args.team_id)?;
 
@@ -33,10 +33,7 @@ pub async fn handle(
         .map_err(|err| {
             FunctionCallError::Fatal(format!("failed to serialize team_inbox_ack result: {err}"))
         })?;
-        return Ok(ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success: Some(true),
-        });
+        return Ok(FunctionToolOutput::from_text(content, Some(true)));
     }
 
     let config =
@@ -67,8 +64,5 @@ pub async fn handle(
         FunctionCallError::Fatal(format!("failed to serialize team_inbox_ack result: {err}"))
     })?;
 
-    Ok(ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(content),
-        success: Some(true),
-    })
+    Ok(FunctionToolOutput::from_text(content, Some(true)))
 }

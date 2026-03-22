@@ -10,7 +10,6 @@ pub(crate) mod zsh_fork_backend;
 
 use crate::command_canonicalization::canonicalize_command_for_approval;
 use crate::exec::ExecToolCallOutput;
-use crate::features::Feature;
 use crate::powershell::prefix_powershell_script_with_utf8;
 use crate::sandboxing::SandboxPermissions;
 use crate::sandboxing::execute_env;
@@ -31,6 +30,7 @@ use crate::tools::sandboxing::ToolError;
 use crate::tools::sandboxing::ToolRuntime;
 use crate::tools::sandboxing::sandbox_override_for_first_attempt;
 use crate::tools::sandboxing::with_cached_approval;
+use codex_features::Feature;
 use codex_network_proxy::NetworkProxy;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::ReviewDecision;
@@ -155,7 +155,7 @@ impl Approvable<ShellRequest> for ShellRuntime {
                     .request_command_approval(
                         turn,
                         call_id,
-                        None,
+                        /*approval_id*/ None,
                         command,
                         cwd,
                         reason,
@@ -164,7 +164,7 @@ impl Approvable<ShellRequest> for ShellRuntime {
                             .proposed_execpolicy_amendment()
                             .cloned(),
                         req.additional_permissions.clone(),
-                        None,
+                        /*skill_metadata*/ None,
                         available_decisions,
                     )
                     .await

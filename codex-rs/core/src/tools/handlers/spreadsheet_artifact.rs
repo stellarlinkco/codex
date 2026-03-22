@@ -3,7 +3,6 @@ use codex_artifact_spreadsheet::PathAccessKind;
 use codex_artifact_spreadsheet::PathAccessRequirement;
 use codex_artifact_spreadsheet::SpreadsheetArtifactError;
 use codex_artifact_spreadsheet::SpreadsheetArtifactRequest;
-use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::ReviewDecision;
 use serde_json::to_string;
@@ -13,22 +12,23 @@ use std::path::PathBuf;
 
 use crate::codex::Session;
 use crate::codex::TurnContext;
-use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
 use crate::path_utils::normalize_for_path_comparison;
 use crate::path_utils::resolve_symlink_write_paths;
+use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
-use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 use crate::tools::sandboxing::with_cached_approval;
+use codex_features::Feature;
 
 pub struct SpreadsheetArtifactHandler;
 
 #[async_trait]
 impl ToolHandler for SpreadsheetArtifactHandler {
+    type Output = FunctionToolOutput;
     fn kind(&self) -> ToolKind {
         ToolKind::Function
     }
@@ -37,7 +37,10 @@ impl ToolHandler for SpreadsheetArtifactHandler {
         true
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    async fn handle(
+        &self,
+        invocation: ToolInvocation,
+    ) -> Result<FunctionToolOutput, FunctionCallError> {
         let ToolInvocation {
             session,
             turn,
@@ -74,14 +77,14 @@ impl ToolHandler for SpreadsheetArtifactHandler {
             .await
             .map_err(spreadsheet_error)?;
 
-        Ok(ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(to_string(&response).map_err(|error| {
+        Ok(FunctionToolOutput::from_text(
+            to_string(&response).map_err(|error| {
                 FunctionCallError::RespondToModel(format!(
                     "failed to serialize spreadsheet_artifact response: {error}"
                 ))
-            })?),
-            success: Some(true),
-        })
+            })?,
+            Some(true),
+        ))
     }
 }
 
@@ -135,7 +138,7 @@ async fn authorize_path_access(
                     .request_command_approval(
                         turn,
                         call_id.to_string(),
-                        None,
+                        /*approval_id*/ None,
                         vec![
                             "spreadsheet_artifact".to_string(),
                             action,
@@ -147,11 +150,11 @@ async fn authorize_path_access(
                             access_kind_verb(access.kind),
                             path.display()
                         )),
-                        None,
-                        None,
-                        None,
-                        None,
-                        None,
+                        /*network_approval_context*/ None,
+                        /*proposed_execpolicy_amendment*/ None,
+                        /*additional_permissions*/ None,
+                        /*skill_metadata*/ None,
+                        /*available_decisions*/ None,
                     )
                     .await
             }

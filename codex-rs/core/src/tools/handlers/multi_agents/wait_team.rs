@@ -49,7 +49,7 @@ pub async fn handle(
     turn: Arc<TurnContext>,
     call_id: String,
     arguments: String,
-) -> Result<ToolOutput, FunctionCallError> {
+) -> Result<FunctionToolOutput, FunctionCallError> {
     let args: WaitTeamArgs = parse_arguments(&arguments)?;
     let team_id = normalized_team_id(&args.team_id)?;
     let team = get_team_record(session.conversation_id, &team_id)?;
@@ -205,8 +205,5 @@ pub async fn handle(
         FunctionCallError::Fatal(format!("failed to serialize wait_team result: {err}"))
     })?;
 
-    Ok(ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(content),
-        success: Some(true),
-    })
+    Ok(FunctionToolOutput::from_text(content, Some(true)))
 }

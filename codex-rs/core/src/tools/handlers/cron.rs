@@ -7,8 +7,8 @@ use serde_json::json;
 
 use crate::function_tool::FunctionCallError;
 use crate::scheduled_tasks::ScheduledTaskInfo;
+use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
-use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::registry::ToolHandler;
@@ -50,11 +50,15 @@ struct CronDeleteResult {
 
 #[async_trait]
 impl ToolHandler for CronCreateHandler {
+    type Output = FunctionToolOutput;
     fn kind(&self) -> ToolKind {
         ToolKind::Function
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    async fn handle(
+        &self,
+        invocation: ToolInvocation,
+    ) -> Result<FunctionToolOutput, FunctionCallError> {
         let ToolInvocation {
             session, payload, ..
         } = invocation;
@@ -104,11 +108,15 @@ impl ToolHandler for CronCreateHandler {
 
 #[async_trait]
 impl ToolHandler for CronListHandler {
+    type Output = FunctionToolOutput;
     fn kind(&self) -> ToolKind {
         ToolKind::Function
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    async fn handle(
+        &self,
+        invocation: ToolInvocation,
+    ) -> Result<FunctionToolOutput, FunctionCallError> {
         let ToolInvocation {
             session, payload, ..
         } = invocation;
@@ -128,11 +136,15 @@ impl ToolHandler for CronListHandler {
 
 #[async_trait]
 impl ToolHandler for CronDeleteHandler {
+    type Output = FunctionToolOutput;
     fn kind(&self) -> ToolKind {
         ToolKind::Function
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    async fn handle(
+        &self,
+        invocation: ToolInvocation,
+    ) -> Result<FunctionToolOutput, FunctionCallError> {
         let ToolInvocation {
             session, payload, ..
         } = invocation;
@@ -162,8 +174,8 @@ fn parse_rfc3339(value: &str) -> Result<DateTime<Utc>, FunctionCallError> {
         .map_err(|err| FunctionCallError::RespondToModel(format!("invalid `run_at`: {err}")))
 }
 
-fn json_success(value: serde_json::Value) -> ToolOutput {
-    ToolOutput::Function {
+fn json_success(value: serde_json::Value) -> FunctionToolOutput {
+    FunctionToolOutput {
         body: FunctionCallOutputBody::Text(value.to_string()),
         success: Some(true),
     }
@@ -219,7 +231,7 @@ mod tests {
             .await
             .expect("create output");
 
-        let ToolOutput::Function { body, .. } = create_output else {
+        let FunctionToolOutput { body, .. } = create_output else {
             panic!("expected function output");
         };
         let created_json: serde_json::Value =
@@ -240,7 +252,7 @@ mod tests {
             .await
             .expect("list output");
 
-        let ToolOutput::Function { body, .. } = list_output else {
+        let FunctionToolOutput { body, .. } = list_output else {
             panic!("expected function output");
         };
         let list_json: serde_json::Value =
@@ -258,7 +270,7 @@ mod tests {
             .await
             .expect("delete output");
 
-        let ToolOutput::Function { body, .. } = delete_output else {
+        let FunctionToolOutput { body, .. } = delete_output else {
             panic!("expected function output");
         };
         let delete_json: serde_json::Value =

@@ -47,6 +47,13 @@
           "type": "string"
         },
         {
+          "description": "Agent's current turn was interrupted and it may receive more input.",
+          "enum": [
+            "interrupted"
+          ],
+          "type": "string"
+        },
+        {
           "additionalProperties": false,
           "description": "Agent is done. Contains the final assistant message.",
           "properties": {
@@ -93,6 +100,14 @@
         }
       ]
     },
+    "ApprovalsReviewer": {
+      "description": "Configures who approval requests are routed to for review. Examples include sandbox escapes, blocked network access, MCP approval prompts, and ARC escalations. Defaults to `user`. `guardian_subagent` uses a carefully prompted subagent to gather relevant context and apply a risk-based decision framework before approving or denying the request.",
+      "enum": [
+        "user",
+        "guardian_subagent"
+      ],
+      "type": "string"
+    },
     "AskForApproval": {
       "description": "Determines the conditions under which the user is consulted to approve running the command proposed by Codex.",
       "oneOf": [
@@ -116,6 +131,20 @@
             "on-request"
           ],
           "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "description": "Fine-grained approval controls.\n\nWhen a field is `false`, prompts of that category are automatically rejected instead of shown to the user.",
+          "properties": {
+            "granular": {
+              "$ref": "#/definitions/GranularApprovalConfig"
+            }
+          },
+          "required": [
+            "granular"
+          ],
+          "title": "GranularAskForApproval",
+          "type": "object"
         },
         {
           "additionalProperties": false,
@@ -667,10 +696,14 @@
               ],
               "title": "RealtimeConversationStartedEventMsgType",
               "type": "string"
+            },
+            "version": {
+              "$ref": "#/definitions/RealtimeConversationVersion"
             }
           },
           "required": [
-            "type"
+            "type",
+            "version"
           ],
           "title": "RealtimeConversationStartedEventMsg",
           "type": "object"
@@ -892,6 +925,17 @@
         {
           "description": "Agent text output message",
           "properties": {
+            "memory_citation": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/MemoryCitation"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "default": null
+            },
             "message": {
               "type": "string"
             },
@@ -1109,6 +1153,15 @@
                 }
               ],
               "description": "When to escalate for approval for execution"
+            },
+            "approvals_reviewer": {
+              "allOf": [
+                {
+                  "$ref": "#/definitions/ApprovalsReviewer"
+                }
+              ],
+              "default": "user",
+              "description": "Configures who approval requests are routed to for review once they have been escalated."
             },
             "cwd": {
               "description": "Working directory that should be treated as the *root* of the session.",
@@ -1907,7 +1960,7 @@
               "type": "string"
             },
             "permissions": {
-              "$ref": "#/definitions/PermissionProfile"
+              "$ref": "#/definitions/RequestPermissionProfile"
             },
             "reason": {
               "type": [
@@ -2143,6 +2196,67 @@
             "type"
           ],
           "title": "ApplyPatchApprovalRequestEventMsg",
+          "type": "object"
+        },
+        {
+          "description": "Structured lifecycle event for a guardian-reviewed approval request.",
+          "properties": {
+            "action": {
+              "description": "Canonical action payload that was reviewed. Included when available so clients can render pending or resolved review state alongside the reviewed request."
+            },
+            "id": {
+              "description": "Stable identifier for this guardian review lifecycle.",
+              "type": "string"
+            },
+            "rationale": {
+              "description": "Human-readable explanation of the final assessment. Omitted while in progress.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "risk_level": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/GuardianRiskLevel"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Coarse risk label paired with `risk_score`. Omitted while in progress."
+            },
+            "risk_score": {
+              "description": "Numeric risk score from 0-100. Omitted while the assessment is in progress.",
+              "format": "uint8",
+              "minimum": 0.0,
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "status": {
+              "$ref": "#/definitions/GuardianAssessmentStatus"
+            },
+            "turn_id": {
+              "default": "",
+              "description": "Turn ID that this assessment belongs to. Uses `#[serde(default)]` for backwards compatibility.",
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "guardian_assessment"
+              ],
+              "title": "GuardianAssessmentEventMsgType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "id",
+            "status",
+            "type"
+          ],
+          "title": "GuardianAssessmentEventMsg",
           "type": "object"
         },
         {
@@ -2820,6 +2934,58 @@
         },
         {
           "properties": {
+            "run": {
+              "$ref": "#/definitions/HookRunSummary"
+            },
+            "turn_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "hook_started"
+              ],
+              "title": "HookStartedEventMsgType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "run",
+            "type"
+          ],
+          "title": "HookStartedEventMsg",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "run": {
+              "$ref": "#/definitions/HookRunSummary"
+            },
+            "turn_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "hook_completed"
+              ],
+              "title": "HookCompletedEventMsgType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "run",
+            "type"
+          ],
+          "title": "HookCompletedEventMsg",
+          "type": "object"
+        },
+        {
+          "properties": {
             "delta": {
               "type": "string"
             },
@@ -2963,9 +3129,15 @@
               "description": "Identifier for the collab tool call.",
               "type": "string"
             },
+            "model": {
+              "type": "string"
+            },
             "prompt": {
               "description": "Initial prompt sent to the agent. Can be empty to prevent CoT leaking at the beginning.",
               "type": "string"
+            },
+            "reasoning_effort": {
+              "$ref": "#/definitions/ReasoningEffort"
             },
             "sender_thread_id": {
               "allOf": [
@@ -2985,7 +3157,9 @@
           },
           "required": [
             "call_id",
+            "model",
             "prompt",
+            "reasoning_effort",
             "sender_thread_id",
             "type"
           ],
@@ -2997,6 +3171,9 @@
           "properties": {
             "call_id": {
               "description": "Identifier for the collab tool call.",
+              "type": "string"
+            },
+            "model": {
               "type": "string"
             },
             "new_agent_nickname": {
@@ -3028,6 +3205,9 @@
               "description": "Initial prompt sent to the agent. Can be empty to prevent CoT leaking at the beginning.",
               "type": "string"
             },
+            "reasoning_effort": {
+              "$ref": "#/definitions/ReasoningEffort"
+            },
             "sender_thread_id": {
               "allOf": [
                 {
@@ -3054,7 +3234,9 @@
           },
           "required": [
             "call_id",
+            "model",
             "prompt",
+            "reasoning_effort",
             "sender_thread_id",
             "status",
             "type"
@@ -3685,24 +3867,6 @@
         }
       ]
     },
-    "FunctionCallOutputPayload": {
-      "description": "The payload we send back to OpenAI when reporting a tool call result.\n\n`body` serializes directly as the wire value for `function_call_output.output`. `success` remains internal metadata for downstream handling.",
-      "properties": {
-        "body": {
-          "$ref": "#/definitions/FunctionCallOutputBody"
-        },
-        "success": {
-          "type": [
-            "boolean",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "body"
-      ],
-      "type": "object"
-    },
     "GhostCommit": {
       "description": "Details of a ghost commit created from a repository state.",
       "properties": {
@@ -3735,6 +3899,50 @@
       ],
       "type": "object"
     },
+    "GranularApprovalConfig": {
+      "properties": {
+        "mcp_elicitations": {
+          "default": false,
+          "type": "boolean"
+        },
+        "request_permissions": {
+          "default": false,
+          "type": "boolean"
+        },
+        "rules": {
+          "type": "boolean"
+        },
+        "sandbox_approval": {
+          "type": "boolean"
+        },
+        "skill_approval": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "rules",
+        "sandbox_approval"
+      ],
+      "type": "object"
+    },
+    "GuardianAssessmentStatus": {
+      "enum": [
+        "in_progress",
+        "approved",
+        "denied",
+        "aborted"
+      ],
+      "type": "string"
+    },
+    "GuardianRiskLevel": {
+      "enum": [
+        "low",
+        "medium",
+        "high"
+      ],
+      "type": "string"
+    },
     "HistoryEntry": {
       "properties": {
         "conversation_id": {
@@ -3755,6 +3963,158 @@
         "ts"
       ],
       "type": "object"
+    },
+    "HookEventName": {
+      "enum": [
+        "session_start",
+        "user_prompt_submit",
+        "stop"
+      ],
+      "type": "string"
+    },
+    "HookExecutionMode": {
+      "enum": [
+        "sync",
+        "async"
+      ],
+      "type": "string"
+    },
+    "HookHandlerType": {
+      "enum": [
+        "command",
+        "prompt",
+        "agent"
+      ],
+      "type": "string"
+    },
+    "HookOutputEntry": {
+      "properties": {
+        "kind": {
+          "$ref": "#/definitions/HookOutputEntryKind"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "text"
+      ],
+      "type": "object"
+    },
+    "HookOutputEntryKind": {
+      "enum": [
+        "warning",
+        "stop",
+        "feedback",
+        "context",
+        "error"
+      ],
+      "type": "string"
+    },
+    "HookPromptFragment": {
+      "properties": {
+        "hookRunId": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "hookRunId",
+        "text"
+      ],
+      "type": "object"
+    },
+    "HookRunStatus": {
+      "enum": [
+        "running",
+        "completed",
+        "failed",
+        "blocked",
+        "stopped"
+      ],
+      "type": "string"
+    },
+    "HookRunSummary": {
+      "properties": {
+        "completed_at": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "display_order": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "duration_ms": {
+          "format": "int64",
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "entries": {
+          "items": {
+            "$ref": "#/definitions/HookOutputEntry"
+          },
+          "type": "array"
+        },
+        "event_name": {
+          "$ref": "#/definitions/HookEventName"
+        },
+        "execution_mode": {
+          "$ref": "#/definitions/HookExecutionMode"
+        },
+        "handler_type": {
+          "$ref": "#/definitions/HookHandlerType"
+        },
+        "id": {
+          "type": "string"
+        },
+        "scope": {
+          "$ref": "#/definitions/HookScope"
+        },
+        "source_path": {
+          "type": "string"
+        },
+        "started_at": {
+          "format": "int64",
+          "type": "integer"
+        },
+        "status": {
+          "$ref": "#/definitions/HookRunStatus"
+        },
+        "status_message": {
+          "type": [
+            "string",
+            "null"
+          ]
+        }
+      },
+      "required": [
+        "display_order",
+        "entries",
+        "event_name",
+        "execution_mode",
+        "handler_type",
+        "id",
+        "scope",
+        "source_path",
+        "started_at",
+        "status"
+      ],
+      "type": "object"
+    },
+    "HookScope": {
+      "enum": [
+        "thread",
+        "turn"
+      ],
+      "type": "string"
     },
     "ImageDetail": {
       "enum": [
@@ -3856,6 +4216,14 @@
         }
       ]
     },
+    "MacOsContactsPermission": {
+      "enum": [
+        "none",
+        "read_only",
+        "read_write"
+      ],
+      "type": "string"
+    },
     "MacOsPreferencesPermission": {
       "enum": [
         "none",
@@ -3882,6 +4250,18 @@
           "default": false,
           "type": "boolean"
         },
+        "macos_contacts": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MacOsContactsPermission"
+            }
+          ],
+          "default": "none"
+        },
+        "macos_launch_services": {
+          "default": false,
+          "type": "boolean"
+        },
         "macos_preferences": {
           "allOf": [
             {
@@ -3889,6 +4269,10 @@
             }
           ],
           "default": "read_only"
+        },
+        "macos_reminders": {
+          "default": false,
+          "type": "boolean"
         }
       },
       "type": "object"
@@ -4003,6 +4387,54 @@
           "type": "object"
         }
       ]
+    },
+    "MemoryCitation": {
+      "properties": {
+        "entries": {
+          "items": {
+            "$ref": "#/definitions/MemoryCitationEntry"
+          },
+          "type": "array"
+        },
+        "rolloutIds": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array"
+        }
+      },
+      "required": [
+        "entries",
+        "rolloutIds"
+      ],
+      "type": "object"
+    },
+    "MemoryCitationEntry": {
+      "properties": {
+        "lineEnd": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "lineStart": {
+          "format": "uint32",
+          "minimum": 0.0,
+          "type": "integer"
+        },
+        "note": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "lineEnd",
+        "lineStart",
+        "note",
+        "path"
+      ],
+      "type": "object"
     },
     "MessagePhase": {
       "description": "Classifies an assistant message as interim commentary or final answer text.\n\nProviders do not emit this consistently, so callers must treat `None` as \"phase unknown\" and keep compatibility behavior for legacy models.",
@@ -4428,6 +4860,12 @@
         "data": {
           "type": "string"
         },
+        "item_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "num_channels": {
           "format": "uint16",
           "minimum": 0.0,
@@ -4453,6 +4891,13 @@
         "sample_rate"
       ],
       "type": "object"
+    },
+    "RealtimeConversationVersion": {
+      "enum": [
+        "v1",
+        "v2"
+      ],
+      "type": "string"
     },
     "RealtimeEvent": {
       "oneOf": [
@@ -4730,6 +5175,32 @@
       ],
       "description": "ID of a request, which can be either a string or an integer."
     },
+    "RequestPermissionProfile": {
+      "additionalProperties": false,
+      "properties": {
+        "file_system": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/FileSystemPermissions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "network": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/NetworkPermissions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "type": "object"
+    },
     "RequestUserInputQuestion": {
       "properties": {
         "header": {
@@ -4936,10 +5407,6 @@
                 "null"
               ]
             },
-            "id": {
-              "type": "string",
-              "writeOnly": true
-            },
             "summary": {
               "items": {
                 "$ref": "#/definitions/ReasoningItemReasoningSummary"
@@ -4955,7 +5422,6 @@
             }
           },
           "required": [
-            "id",
             "summary",
             "type"
           ],
@@ -5019,6 +5485,12 @@
             "name": {
               "type": "string"
             },
+            "namespace": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "type": {
               "enum": [
                 "function_call"
@@ -5038,11 +5510,52 @@
         },
         {
           "properties": {
+            "arguments": true,
+            "call_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "execution": {
+              "type": "string"
+            },
+            "id": {
+              "type": [
+                "string",
+                "null"
+              ],
+              "writeOnly": true
+            },
+            "status": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "type": {
+              "enum": [
+                "tool_search_call"
+              ],
+              "title": "ToolSearchCallResponseItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "arguments",
+            "execution",
+            "type"
+          ],
+          "title": "ToolSearchCallResponseItem",
+          "type": "object"
+        },
+        {
+          "properties": {
             "call_id": {
               "type": "string"
             },
             "output": {
-              "$ref": "#/definitions/FunctionCallOutputPayload"
+              "$ref": "#/definitions/FunctionCallOutputBody"
             },
             "type": {
               "enum": [
@@ -5106,8 +5619,14 @@
             "call_id": {
               "type": "string"
             },
+            "name": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "output": {
-              "$ref": "#/definitions/FunctionCallOutputPayload"
+              "$ref": "#/definitions/FunctionCallOutputBody"
             },
             "type": {
               "enum": [
@@ -5123,6 +5642,41 @@
             "type"
           ],
           "title": "CustomToolCallOutputResponseItem",
+          "type": "object"
+        },
+        {
+          "properties": {
+            "call_id": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "execution": {
+              "type": "string"
+            },
+            "status": {
+              "type": "string"
+            },
+            "tools": {
+              "items": true,
+              "type": "array"
+            },
+            "type": {
+              "enum": [
+                "tool_search_output"
+              ],
+              "title": "ToolSearchOutputResponseItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "execution",
+            "status",
+            "tools",
+            "type"
+          ],
+          "title": "ToolSearchOutputResponseItem",
           "type": "object"
         },
         {
@@ -6155,6 +6709,33 @@
           "type": "object"
         },
         {
+          "properties": {
+            "fragments": {
+              "items": {
+                "$ref": "#/definitions/HookPromptFragment"
+              },
+              "type": "array"
+            },
+            "id": {
+              "type": "string"
+            },
+            "type": {
+              "enum": [
+                "HookPrompt"
+              ],
+              "title": "HookPromptTurnItemType",
+              "type": "string"
+            }
+          },
+          "required": [
+            "fragments",
+            "id",
+            "type"
+          ],
+          "title": "HookPromptTurnItem",
+          "type": "object"
+        },
+        {
           "description": "Assistant-authored message payload used in turn-item streams.\n\n`phase` is optional because not all providers/models emit it. Consumers should use it when present, but retain legacy completion semantics when it is `None`.",
           "properties": {
             "content": {
@@ -6165,6 +6746,16 @@
             },
             "id": {
               "type": "string"
+            },
+            "memory_citation": {
+              "anyOf": [
+                {
+                  "$ref": "#/definitions/MemoryCitation"
+                },
+                {
+                  "type": "null"
+                }
+              ]
             },
             "phase": {
               "anyOf": [
@@ -6537,10 +7128,14 @@
           ],
           "title": "RealtimeConversationStartedEventMsgType",
           "type": "string"
+        },
+        "version": {
+          "$ref": "#/definitions/RealtimeConversationVersion"
         }
       },
       "required": [
-        "type"
+        "type",
+        "version"
       ],
       "title": "RealtimeConversationStartedEventMsg",
       "type": "object"
@@ -6762,6 +7357,17 @@
     {
       "description": "Agent text output message",
       "properties": {
+        "memory_citation": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MemoryCitation"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
         "message": {
           "type": "string"
         },
@@ -6979,6 +7585,15 @@
             }
           ],
           "description": "When to escalate for approval for execution"
+        },
+        "approvals_reviewer": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/ApprovalsReviewer"
+            }
+          ],
+          "default": "user",
+          "description": "Configures who approval requests are routed to for review once they have been escalated."
         },
         "cwd": {
           "description": "Working directory that should be treated as the *root* of the session.",
@@ -7777,7 +8392,7 @@
           "type": "string"
         },
         "permissions": {
-          "$ref": "#/definitions/PermissionProfile"
+          "$ref": "#/definitions/RequestPermissionProfile"
         },
         "reason": {
           "type": [
@@ -8013,6 +8628,67 @@
         "type"
       ],
       "title": "ApplyPatchApprovalRequestEventMsg",
+      "type": "object"
+    },
+    {
+      "description": "Structured lifecycle event for a guardian-reviewed approval request.",
+      "properties": {
+        "action": {
+          "description": "Canonical action payload that was reviewed. Included when available so clients can render pending or resolved review state alongside the reviewed request."
+        },
+        "id": {
+          "description": "Stable identifier for this guardian review lifecycle.",
+          "type": "string"
+        },
+        "rationale": {
+          "description": "Human-readable explanation of the final assessment. Omitted while in progress.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "risk_level": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/GuardianRiskLevel"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "description": "Coarse risk label paired with `risk_score`. Omitted while in progress."
+        },
+        "risk_score": {
+          "description": "Numeric risk score from 0-100. Omitted while the assessment is in progress.",
+          "format": "uint8",
+          "minimum": 0.0,
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "status": {
+          "$ref": "#/definitions/GuardianAssessmentStatus"
+        },
+        "turn_id": {
+          "default": "",
+          "description": "Turn ID that this assessment belongs to. Uses `#[serde(default)]` for backwards compatibility.",
+          "type": "string"
+        },
+        "type": {
+          "enum": [
+            "guardian_assessment"
+          ],
+          "title": "GuardianAssessmentEventMsgType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "id",
+        "status",
+        "type"
+      ],
+      "title": "GuardianAssessmentEventMsg",
       "type": "object"
     },
     {
@@ -8690,6 +9366,58 @@
     },
     {
       "properties": {
+        "run": {
+          "$ref": "#/definitions/HookRunSummary"
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "enum": [
+            "hook_started"
+          ],
+          "title": "HookStartedEventMsgType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run",
+        "type"
+      ],
+      "title": "HookStartedEventMsg",
+      "type": "object"
+    },
+    {
+      "properties": {
+        "run": {
+          "$ref": "#/definitions/HookRunSummary"
+        },
+        "turn_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "type": {
+          "enum": [
+            "hook_completed"
+          ],
+          "title": "HookCompletedEventMsgType",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run",
+        "type"
+      ],
+      "title": "HookCompletedEventMsg",
+      "type": "object"
+    },
+    {
+      "properties": {
         "delta": {
           "type": "string"
         },
@@ -8833,9 +9561,15 @@
           "description": "Identifier for the collab tool call.",
           "type": "string"
         },
+        "model": {
+          "type": "string"
+        },
         "prompt": {
           "description": "Initial prompt sent to the agent. Can be empty to prevent CoT leaking at the beginning.",
           "type": "string"
+        },
+        "reasoning_effort": {
+          "$ref": "#/definitions/ReasoningEffort"
         },
         "sender_thread_id": {
           "allOf": [
@@ -8855,7 +9589,9 @@
       },
       "required": [
         "call_id",
+        "model",
         "prompt",
+        "reasoning_effort",
         "sender_thread_id",
         "type"
       ],
@@ -8867,6 +9603,9 @@
       "properties": {
         "call_id": {
           "description": "Identifier for the collab tool call.",
+          "type": "string"
+        },
+        "model": {
           "type": "string"
         },
         "new_agent_nickname": {
@@ -8898,6 +9637,9 @@
           "description": "Initial prompt sent to the agent. Can be empty to prevent CoT leaking at the beginning.",
           "type": "string"
         },
+        "reasoning_effort": {
+          "$ref": "#/definitions/ReasoningEffort"
+        },
         "sender_thread_id": {
           "allOf": [
             {
@@ -8924,7 +9666,9 @@
       },
       "required": [
         "call_id",
+        "model",
         "prompt",
+        "reasoning_effort",
         "sender_thread_id",
         "status",
         "type"

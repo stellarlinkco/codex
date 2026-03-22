@@ -10,6 +10,7 @@ use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
 
+use codex_config::ConfigLayerStack;
 use regex::Regex;
 use serde_json::Value;
 use tokio::io::AsyncWriteExt;
@@ -18,6 +19,15 @@ use tokio::sync::Mutex;
 use tokio::sync::mpsc;
 use tokio::task::JoinSet;
 
+use crate::engine::ClaudeHooksEngine;
+use crate::engine::CommandShell;
+use crate::events::session_start::SessionStartOutcome;
+use crate::events::session_start::SessionStartRequest;
+use crate::events::stop::StopOutcome;
+use crate::events::stop::StopRequest;
+use crate::events::user_prompt_submit::UserPromptSubmitOutcome;
+use crate::events::user_prompt_submit::UserPromptSubmitRequest;
+use crate::legacy_notify::dispatch_legacy_notify;
 use crate::types::HookEvent;
 use crate::types::HookPayload;
 use crate::types::HookPermissionDecision;
@@ -97,6 +107,11 @@ pub struct CommandHooksConfig {
 
 #[derive(Default, Clone)]
 pub struct HooksConfig {
+    pub legacy_notify_argv: Option<Vec<String>>,
+    pub feature_enabled: bool,
+    pub config_layer_stack: Option<ConfigLayerStack>,
+    pub shell_program: Option<String>,
+    pub shell_args: Vec<String>,
     pub command_hooks: CommandHooksConfig,
 }
 
@@ -129,6 +144,7 @@ struct Hook {
 
 #[derive(Clone)]
 pub struct Hooks {
+    legacy_notify_argv: Option<Arc<Vec<String>>>,
     session_start: Vec<Hook>,
     session_end: Vec<Hook>,
     user_prompt_submit: Vec<Hook>,
@@ -150,6 +166,7 @@ pub struct Hooks {
     async_results_tx: Option<mpsc::UnboundedSender<HookResponse>>,
     non_command_executor: Option<Arc<dyn NonCommandHookExecutor>>,
     scoped_hooks: Arc<std::sync::Mutex<HashMap<String, ScopedHooks>>>,
+    engine: ClaudeHooksEngine,
 }
 
 #[derive(Clone, Default)]
@@ -176,6 +193,7 @@ struct ScopedHooks {
 impl ScopedHooks {
     fn hooks_for_event(&self, hook_event: &HookEvent) -> &[Hook] {
         match hook_event {
+            HookEvent::AfterAgent { .. } | HookEvent::AfterToolUse { .. } => &[],
             HookEvent::SessionStart { .. } => &self.session_start,
             HookEvent::SessionEnd { .. } => &self.session_end,
             HookEvent::UserPromptSubmit { .. } => &self.user_prompt_submit,
@@ -410,8 +428,26 @@ impl Default for Hooks {
 // executed for specific events in the Codex lifecycle.
 impl Hooks {
     pub fn new(config: HooksConfig) -> Self {
-        let HooksConfig { command_hooks } = config;
+        let HooksConfig {
+            legacy_notify_argv,
+            feature_enabled,
+            config_layer_stack,
+            shell_program,
+            shell_args,
+            command_hooks,
+        } = config;
+        let engine = ClaudeHooksEngine::new(
+            feature_enabled,
+            config_layer_stack.as_ref(),
+            CommandShell {
+                program: shell_program.unwrap_or_default(),
+                args: shell_args,
+            },
+        );
         Self {
+            legacy_notify_argv: legacy_notify_argv
+                .filter(|argv| !argv.is_empty() && !argv[0].trim().is_empty())
+                .map(Arc::new),
             session_start: build_hooks(command_hooks.session_start, HookEventKey::SessionStart),
             session_end: build_hooks(command_hooks.session_end, HookEventKey::SessionEnd),
             user_prompt_submit: build_hooks(
@@ -448,7 +484,52 @@ impl Hooks {
             async_results_tx: None,
             non_command_executor: None,
             scoped_hooks: Arc::new(std::sync::Mutex::new(HashMap::new())),
+            engine,
         }
+    }
+
+    pub fn startup_warnings(&self) -> &[String] {
+        self.engine.warnings()
+    }
+
+    pub fn preview_session_start(
+        &self,
+        request: &SessionStartRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_session_start(request)
+    }
+
+    pub async fn run_session_start(
+        &self,
+        request: SessionStartRequest,
+        turn_id: Option<String>,
+    ) -> SessionStartOutcome {
+        self.engine.run_session_start(request, turn_id).await
+    }
+
+    pub fn preview_user_prompt_submit(
+        &self,
+        request: &UserPromptSubmitRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_user_prompt_submit(request)
+    }
+
+    pub async fn run_user_prompt_submit(
+        &self,
+        request: UserPromptSubmitRequest,
+    ) -> UserPromptSubmitOutcome {
+        self.engine.run_user_prompt_submit(request).await
+    }
+
+    pub fn preview_stop(
+        &self,
+        request: &StopRequest,
+    ) -> Vec<codex_protocol::protocol::HookRunSummary> {
+        self.engine.preview_stop(request)
+    }
+
+    pub async fn run_stop(&self, request: StopRequest) -> StopOutcome {
+        self.engine.run_stop(request).await
     }
 
     pub fn set_async_results_tx(&mut self, tx: mpsc::UnboundedSender<HookResponse>) {
@@ -478,6 +559,9 @@ impl Hooks {
 
     fn hooks_for_event(&self, hook_event: &HookEvent) -> (HookEventKey, &[Hook]) {
         match hook_event {
+            HookEvent::AfterAgent { .. } | HookEvent::AfterToolUse { .. } => {
+                panic!("legacy hook events should be dispatched before generic hook routing")
+            }
             HookEvent::SessionStart { .. } => (HookEventKey::SessionStart, &self.session_start),
             HookEvent::SessionEnd { .. } => (HookEventKey::SessionEnd, &self.session_end),
             HookEvent::UserPromptSubmit { .. } => {
@@ -524,6 +608,19 @@ impl Hooks {
     }
 
     pub async fn dispatch(&self, hook_payload: HookPayload) -> Vec<HookResponse> {
+        match &hook_payload.hook_event {
+            HookEvent::AfterAgent { .. } => {
+                return match self.legacy_notify_argv.as_deref() {
+                    Some(argv) => dispatch_legacy_notify(argv, &hook_payload)
+                        .await
+                        .into_iter()
+                        .collect(),
+                    None => Vec::new(),
+                };
+            }
+            HookEvent::AfterToolUse { .. } => return Vec::new(),
+            _ => {}
+        }
         let (event_key, hooks) = self.hooks_for_event(&hook_payload.hook_event);
         let scoped_hooks = self.scoped_hooks_for_event(&hook_payload.hook_event);
         let mut seen = HashSet::new();
@@ -664,7 +761,9 @@ fn build_hooks(configs: Vec<CommandHookConfig>, event_key: HookEventKey) -> Vec<
     configs
         .into_iter()
         .enumerate()
-        .filter_map(|(index, config)| hook_from_config(config, event_key, index, None))
+        .filter_map(|(index, config)| {
+            hook_from_config(config, event_key, index, /*once_key_prefix*/ None)
+        })
         .collect()
 }
 
@@ -1380,7 +1479,7 @@ fn result_with_error(error: io::Error) -> HookResult {
     }
 }
 
-fn command_from_argv(argv: &[String]) -> Option<Command> {
+pub fn command_from_argv(argv: &[String]) -> Option<Command> {
     let (program, args) = argv.split_first()?;
     if program.is_empty() {
         return None;

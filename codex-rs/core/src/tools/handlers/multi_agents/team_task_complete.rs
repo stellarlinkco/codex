@@ -19,7 +19,7 @@ pub async fn handle(
     turn: Arc<TurnContext>,
     _call_id: String,
     arguments: String,
-) -> Result<ToolOutput, FunctionCallError> {
+) -> Result<FunctionToolOutput, FunctionCallError> {
     let args: TeamTaskCompleteArgs = parse_arguments(&arguments)?;
     let team_id = normalized_team_id(&args.team_id)?;
     let task_id = required_path_segment(&args.task_id, "task_id")?;
@@ -118,8 +118,5 @@ pub async fn handle(
         ))
     })?;
 
-    Ok(ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(content),
-        success: Some(true),
-    })
+    Ok(FunctionToolOutput::from_text(content, Some(true)))
 }

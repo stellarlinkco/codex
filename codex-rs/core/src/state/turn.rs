@@ -92,6 +92,7 @@ pub(crate) struct TurnState {
     pending_dynamic_tools: HashMap<String, oneshot::Sender<DynamicToolResponse>>,
     pending_input: Vec<ResponseInputItem>,
     granted_permissions: Option<PermissionProfile>,
+    pub(crate) tool_calls: u64,
     pub(crate) token_usage_at_turn_start: TokenUsage,
 }
 
@@ -197,6 +198,15 @@ impl TurnState {
 
     pub(crate) fn push_pending_input(&mut self, input: ResponseInputItem) {
         self.pending_input.push(input);
+    }
+
+    pub(crate) fn prepend_pending_input(&mut self, mut input: Vec<ResponseInputItem>) {
+        if input.is_empty() {
+            return;
+        }
+
+        input.append(&mut self.pending_input);
+        self.pending_input = input;
     }
 
     pub(crate) fn take_pending_input(&mut self) -> Vec<ResponseInputItem> {

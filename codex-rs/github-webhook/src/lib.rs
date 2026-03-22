@@ -2285,7 +2285,7 @@ async fn process_work_item(
 }
 
 async fn process_work_item_inner(state: &AppState, item: &WorkItem) -> Result<()> {
-    let _ = run_work_item_inner_with_output(state, item, &[], None).await?;
+    let _ = run_work_item_inner_with_output(state, item, &[], /*log_path*/ None).await?;
     Ok(())
 }
 

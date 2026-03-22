@@ -22,7 +22,6 @@ use toml::Value as TomlValue;
 
 mod legacy;
 pub(crate) use legacy::LegacyFeatureToggles;
-pub(crate) use legacy::legacy_feature_keys;
 
 /// High-level lifecycle stage for a feature.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -295,7 +294,7 @@ impl Features {
             if self.enabled(feature.id) != feature.default_enabled {
                 otel.counter(
                     "codex.feature.state",
-                    1,
+                    /*inc*/ 1,
                     &[
                         ("feature", feature.key),
                         ("value", &self.enabled(feature.id).to_string()),
@@ -798,7 +797,10 @@ pub fn maybe_push_unstable_features_warning(
             let Some(spec) = FEATURES.iter().find(|spec| spec.key == key.as_str()) else {
                 continue;
             };
-            if !config.features.enabled(spec.id) {
+            let Some(feature) = codex_features::canonical_feature_for_key(spec.key) else {
+                continue;
+            };
+            if !config.features.enabled(feature) {
                 continue;
             }
             if matches!(spec.stage, Stage::UnderDevelopment) {

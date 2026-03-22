@@ -19,6 +19,7 @@ use codex_core::AuthManager;
 use codex_core::auth::CodexAuth;
 use codex_core::auth::RefreshTokenError;
 use codex_core::config_loader::CloudRequirementsLoadError;
+use codex_core::config_loader::CloudRequirementsLoadErrorCode;
 use codex_core::config_loader::CloudRequirementsLoader;
 use codex_core::config_loader::ConfigRequirementsToml;
 use codex_core::util::backoff;
@@ -52,6 +53,14 @@ const CLOUD_REQUIREMENTS_CACHE_READ_HMAC_KEYS: &[&[u8]] =
     &[CLOUD_REQUIREMENTS_CACHE_WRITE_HMAC_KEY];
 
 type HmacSha256 = Hmac<Sha256>;
+
+fn load_error(
+    code: CloudRequirementsLoadErrorCode,
+    status_code: Option<u16>,
+    message: impl Into<String>,
+) -> CloudRequirementsLoadError {
+    CloudRequirementsLoadError::new(code, status_code, message)
+}
 
 fn refresher_task_slot() -> &'static Mutex<Option<JoinHandle<()>>> {
     static REFRESHER_TASK: OnceLock<Mutex<Option<JoinHandle<()>>>> = OnceLock::new();
@@ -209,7 +218,9 @@ impl RequirementsFetcher for BackendRequirementsFetcher {
             .inspect_err(|err| tracing::warn!(error = %err, "Failed to fetch cloud requirements"))
             .map_err(|err| {
                 if err.is_unauthorized() {
-                    FetchCloudRequirementsError::Unauthorized(CloudRequirementsLoadError::new(
+                    FetchCloudRequirementsError::Unauthorized(load_error(
+                        CloudRequirementsLoadErrorCode::Auth,
+                        err.status().map(|status| status.as_u16()),
                         err.to_string(),
                     ))
                 } else {
@@ -268,16 +279,20 @@ impl CloudRequirementsService {
                 if let Some(metrics) = codex_otel::metrics::global() {
                     let _ = metrics.counter(
                         "codex.cloud_requirements.load_failure",
-                        1,
+                        /*inc*/ 1,
                         &[("trigger", "startup")],
                     );
                 }
             })
             .map_err(|_| {
-                CloudRequirementsLoadError::new(format!(
-                    "timed out waiting for cloud requirements after {}s",
-                    self.timeout.as_secs()
-                ))
+                load_error(
+                    CloudRequirementsLoadErrorCode::Timeout,
+                    /*status_code*/ None,
+                    format!(
+                        "timed out waiting for cloud requirements after {}s",
+                        self.timeout.as_secs()
+                    ),
+                )
             })??;
 
         match result.as_ref() {
@@ -363,12 +378,14 @@ impl CloudRequirementsService {
                             "Cloud requirements request was unauthorized; attempting auth recovery"
                         );
                         match auth_recovery.next().await {
-                            Ok(()) => {
+                            Ok(_step_result) => {
                                 let Some(refreshed_auth) = self.auth_manager.auth().await else {
                                     tracing::error!(
                                         "Auth recovery succeeded but no auth is available for cloud requirements"
                                     );
-                                    return Err(CloudRequirementsLoadError::new(
+                                    return Err(load_error(
+                                        CloudRequirementsLoadErrorCode::Auth,
+                                        /*status_code*/ None,
                                         CLOUD_REQUIREMENTS_LOAD_FAILED_MESSAGE,
                                     ));
                                 };
@@ -380,7 +397,11 @@ impl CloudRequirementsService {
                                     error = %failed,
                                     "Failed to recover from unauthorized cloud requirements request"
                                 );
-                                return Err(CloudRequirementsLoadError::new(failed.message));
+                                return Err(load_error(
+                                    CloudRequirementsLoadErrorCode::Auth,
+                                    /*status_code*/ None,
+                                    failed.message,
+                                ));
                             }
                             Err(RefreshTokenError::Transient(recovery_err)) => {
                                 if attempt < CLOUD_REQUIREMENTS_MAX_ATTEMPTS {
@@ -402,7 +423,9 @@ impl CloudRequirementsService {
                         error = %err,
                         "Cloud requirements request was unauthorized and no auth recovery is available"
                     );
-                    return Err(CloudRequirementsLoadError::new(
+                    return Err(load_error(
+                        CloudRequirementsLoadErrorCode::Auth,
+                        err.status_code(),
                         CLOUD_REQUIREMENTS_LOAD_FAILED_MESSAGE,
                     ));
                 }
@@ -413,7 +436,9 @@ impl CloudRequirementsService {
                     Ok(requirements) => requirements,
                     Err(err) => {
                         tracing::error!(error = %err, "Failed to parse cloud requirements");
-                        return Err(CloudRequirementsLoadError::new(
+                        return Err(load_error(
+                            CloudRequirementsLoadErrorCode::Parse,
+                            /*status_code*/ None,
                             CLOUD_REQUIREMENTS_LOAD_FAILED_MESSAGE,
                         ));
                     }
@@ -433,7 +458,9 @@ impl CloudRequirementsService {
             path = %self.cache_path.display(),
             "{CLOUD_REQUIREMENTS_LOAD_FAILED_MESSAGE}"
         );
-        Err(CloudRequirementsLoadError::new(
+        Err(load_error(
+            CloudRequirementsLoadErrorCode::RequestFailed,
+            /*status_code*/ None,
             CLOUD_REQUIREMENTS_LOAD_FAILED_MESSAGE,
         ))
     }
@@ -475,7 +502,7 @@ impl CloudRequirementsService {
             if let Some(metrics) = codex_otel::metrics::global() {
                 let _ = metrics.counter(
                     "codex.cloud_requirements.load_failure",
-                    1,
+                    /*inc*/ 1,
                     &[("trigger", "refresh")],
                 );
             }
@@ -624,7 +651,11 @@ pub fn cloud_requirements_loader(
     CloudRequirementsLoader::new(async move {
         task.await.map_err(|err| {
             tracing::error!(error = %err, "Cloud requirements task failed");
-            CloudRequirementsLoadError::new(format!("cloud requirements load failed: {err}"))
+            load_error(
+                CloudRequirementsLoadErrorCode::Internal,
+                /*status_code*/ None,
+                format!("cloud requirements load failed: {err}"),
+            )
         })?
     })
 }
@@ -880,9 +911,11 @@ mod tests {
             ) {
                 Ok(Some(self.contents.clone()))
             } else {
-                Err(FetchCloudRequirementsError::Unauthorized(
-                    CloudRequirementsLoadError::new("GET /config/requirements failed: 401"),
-                ))
+                Err(FetchCloudRequirementsError::Unauthorized(load_error(
+                    CloudRequirementsLoadErrorCode::Auth,
+                    Some(401),
+                    "GET /config/requirements failed: 401",
+                )))
             }
         }
     }
@@ -899,9 +932,11 @@ mod tests {
             _auth: &CodexAuth,
         ) -> Result<Option<String>, FetchCloudRequirementsError> {
             self.request_count.fetch_add(1, Ordering::SeqCst);
-            Err(FetchCloudRequirementsError::Unauthorized(
-                CloudRequirementsLoadError::new(self.message.clone()),
-            ))
+            Err(FetchCloudRequirementsError::Unauthorized(load_error(
+                CloudRequirementsLoadErrorCode::Auth,
+                Some(401),
+                self.message.clone(),
+            )))
         }
     }
 

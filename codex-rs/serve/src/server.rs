@@ -35,6 +35,7 @@ use codex_core::git_info::collect_git_info;
 use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_core::models_manager::manager::RefreshStrategy;
 use codex_core::skills::SkillLoadOutcome;
+use codex_features::Feature;
 use codex_github_webhook::GithubCodexJobOutput;
 use codex_github_webhook::GithubCodexRunOverrides;
 use codex_github_webhook::GithubRepoWorkItem as GithubRepoWorkItemRaw;
@@ -2229,7 +2230,7 @@ pub async fn run(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::
 
     let auth_manager = AuthManager::shared(
         config.codex_home.clone(),
-        false,
+        /*enable_codex_api_key_env*/ false,
         config.cli_auth_credentials_store_mode,
     );
     let thread_manager = Arc::new(ThreadManager::new(
@@ -2240,7 +2241,7 @@ pub async fn run(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::
         CollaborationModesConfig {
             default_mode_request_user_input: config
                 .features
-                .enabled(codex_core::features::Feature::DefaultModeRequestUserInput),
+                .enabled(Feature::DefaultModeRequestUserInput),
         },
     ));
 
@@ -2816,13 +2817,13 @@ async fn handle_get_kanban(State(state): State<AppState>) -> Response {
     let mut session_ids: HashSet<String> = state.sessions.read().await.keys().cloned().collect();
     if let Ok(page) = codex_core::RolloutRecorder::list_threads(
         state.config.as_ref(),
-        2000,
-        None,
+        /*page_size*/ 2000,
+        /*cursor*/ None,
         codex_core::ThreadSortKey::UpdatedAt,
-        codex_core::INTERACTIVE_SESSION_SOURCES,
-        None,
+        &codex_core::INTERACTIVE_SESSION_SOURCES,
+        /*model_providers*/ None,
         &state.config.model_provider_id,
-        None,
+        /*search_term*/ None,
     )
     .await
     {
@@ -3971,13 +3972,13 @@ async fn handle_move_github_kanban_card(
 async fn handle_sessions(State(state): State<AppState>) -> Response {
     let page = match codex_core::RolloutRecorder::list_threads(
         state.config.as_ref(),
-        2000,
-        None,
+        /*page_size*/ 2000,
+        /*cursor*/ None,
         codex_core::ThreadSortKey::UpdatedAt,
-        codex_core::INTERACTIVE_SESSION_SOURCES,
-        None,
+        &codex_core::INTERACTIVE_SESSION_SOURCES,
+        /*model_providers*/ None,
         &state.config.model_provider_id,
-        None,
+        /*search_term*/ None,
     )
     .await
     {
@@ -4220,7 +4221,12 @@ async fn handle_resume_session(State(state): State<AppState>, Path(id): Path<Str
 
     let new_thread = match state
         .thread_manager
-        .resume_thread_with_history(config, initial_history, state.auth_manager.clone(), true)
+        .resume_thread_with_history(
+            config,
+            initial_history,
+            state.auth_manager.clone(),
+            /*persist_extended_history*/ true,
+        )
         .await
     {
         Ok(new_thread) => new_thread,
@@ -4659,7 +4665,7 @@ async fn handle_deny_permission(
         };
         let decision = body.decision.as_deref().unwrap_or("denied").to_string();
 
-        let op = build_permission_op(&pending.arguments, &decision, None);
+        let op = build_permission_op(&pending.arguments, &decision, /*answers*/ None);
 
         let completed = WebAgentCompletedRequest {
             tool: pending.tool.clone(),
@@ -4875,7 +4881,7 @@ async fn handle_machine_spawn(
 
     let new_thread = match state
         .thread_manager
-        .start_thread_with_tools(config, Vec::new(), true)
+        .start_thread_with_tools(config, Vec::new(), /*persist_extended_history*/ true)
         .await
     {
         Ok(new_thread) => new_thread,
@@ -5082,7 +5088,7 @@ async fn handle_search_files(
             limit: std::num::NonZero::new(limit).unwrap_or(std::num::NonZero::<usize>::MIN),
             ..Default::default()
         };
-        codex_file_search::run(&q, vec![cwd], options, None)
+        codex_file_search::run(&q, vec![cwd], options, /*cancel_flag*/ None)
     })
     .await
     .map_err(|err| err.to_string())
@@ -5373,7 +5379,7 @@ async fn handle_skills(State(state): State<AppState>, Path(id): Path<String>) ->
     let outcome = state
         .thread_manager
         .skills_manager()
-        .skills_for_cwd(&cwd, false)
+        .skills_for_cwd(&cwd, state.config.as_ref(), /*force_reload*/ false)
         .await;
     let skills = skills_outcome_to_summaries(outcome);
 
@@ -6579,11 +6585,13 @@ async fn enqueue_github_job_inner(
                     Ok(output) => {
                         job.status = "succeeded".to_string();
                         job.thread_id = output.thread_id.clone();
-                        job.result_summary = Some(truncate_summary(&output.last_message, 280));
+                        job.result_summary =
+                            Some(truncate_summary(&output.last_message, /*max_len*/ 280));
                     }
                     Err(err) => {
                         job.status = "failed".to_string();
-                        job.last_error = Some(truncate_summary(&format!("{err:#}"), 400));
+                        job.last_error =
+                            Some(truncate_summary(&format!("{err:#}"), /*max_len*/ 400));
                     }
                 }
             }

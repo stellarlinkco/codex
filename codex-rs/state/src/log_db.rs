@@ -143,6 +143,7 @@ where
             level: metadata.level().as_str().to_string(),
             target: metadata.target().to_string(),
             message: visitor.message,
+            feedback_log_body: None,
             thread_id,
             process_uuid: Some(self.process_uuid.clone()),
             module_path: metadata.module_path().map(ToString::to_string),

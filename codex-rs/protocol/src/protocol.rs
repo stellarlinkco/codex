@@ -12,8 +12,10 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
 
+use crate::AgentPath;
 use crate::ThreadId;
 use crate::approvals::ElicitationRequestEvent;
+use crate::config_types::ApprovalsReviewer;
 use crate::config_types::CollaborationMode;
 use crate::config_types::ModeKind;
 use crate::config_types::Personality;
@@ -31,6 +33,7 @@ use crate::mcp::RequestId;
 use crate::mcp::Resource as McpResource;
 use crate::mcp::ResourceTemplate as McpResourceTemplate;
 use crate::mcp::Tool as McpTool;
+use crate::memory_citation::MemoryCitation;
 use crate::message_history::HistoryEntry;
 use crate::models::BaseInstructions;
 use crate::models::ContentItem;
@@ -60,6 +63,9 @@ pub use crate::approvals::ElicitationAction;
 pub use crate::approvals::ExecApprovalRequestEvent;
 pub use crate::approvals::ExecApprovalRequestSkillMetadata;
 pub use crate::approvals::ExecPolicyAmendment;
+pub use crate::approvals::GuardianAssessmentEvent;
+pub use crate::approvals::GuardianAssessmentStatus;
+pub use crate::approvals::GuardianRiskLevel;
 pub use crate::approvals::NetworkApprovalContext;
 pub use crate::approvals::NetworkApprovalProtocol;
 pub use crate::approvals::NetworkPolicyAmendment;
@@ -80,6 +86,12 @@ pub const USER_INSTRUCTIONS_OPEN_TAG: &str = "<user_instructions>";
 pub const USER_INSTRUCTIONS_CLOSE_TAG: &str = "</user_instructions>";
 pub const ENVIRONMENT_CONTEXT_OPEN_TAG: &str = "<environment_context>";
 pub const ENVIRONMENT_CONTEXT_CLOSE_TAG: &str = "</environment_context>";
+pub const APPS_INSTRUCTIONS_OPEN_TAG: &str = "<apps_instructions>";
+pub const APPS_INSTRUCTIONS_CLOSE_TAG: &str = "</apps_instructions>";
+pub const SKILLS_INSTRUCTIONS_OPEN_TAG: &str = "<skills_instructions>";
+pub const SKILLS_INSTRUCTIONS_CLOSE_TAG: &str = "</skills_instructions>";
+pub const PLUGINS_INSTRUCTIONS_OPEN_TAG: &str = "<plugins_instructions>";
+pub const PLUGINS_INSTRUCTIONS_CLOSE_TAG: &str = "</plugins_instructions>";
 pub const COLLABORATION_MODE_OPEN_TAG: &str = "<collaboration_mode>";
 pub const COLLABORATION_MODE_CLOSE_TAG: &str = "</collaboration_mode>";
 pub const REALTIME_CONVERSATION_OPEN_TAG: &str = "<realtime_conversation>";
@@ -129,6 +141,8 @@ pub struct RealtimeAudioFrame {
     pub num_channels: u16,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub samples_per_channel: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub item_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
@@ -273,6 +287,10 @@ pub enum Op {
         /// Updated command approval policy.
         #[serde(skip_serializing_if = "Option::is_none")]
         approval_policy: Option<AskForApproval>,
+
+        /// Updated approval reviewer for future approval prompts.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        approvals_reviewer: Option<ApprovalsReviewer>,
 
         /// Updated sandbox policy for tool calls.
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -509,6 +527,13 @@ pub enum AskForApproval {
     #[default]
     OnRequest,
 
+    /// Fine-grained approval controls.
+    ///
+    /// When a field is `false`, prompts of that category are automatically
+    /// rejected instead of shown to the user.
+    #[strum(serialize = "granular")]
+    Granular(GranularApprovalConfig),
+
     /// Fine-grained rejection controls for approval prompts.
     ///
     /// When a field is `true`, prompts of that category are automatically
@@ -518,6 +543,48 @@ pub enum AskForApproval {
     /// Never ask the user to approve commands. Failures are immediately returned
     /// to the model, and never escalated to the user for approval.
     Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
+pub struct GranularApprovalConfig {
+    pub sandbox_approval: bool,
+    pub rules: bool,
+    #[serde(default)]
+    pub mcp_elicitations: bool,
+    #[serde(default)]
+    pub skill_approval: bool,
+    #[serde(default)]
+    pub request_permissions: bool,
+}
+
+impl GranularApprovalConfig {
+    pub const fn allows_sandbox_approval(self) -> bool {
+        self.sandbox_approval
+    }
+
+    pub const fn allows_rules_approval(self) -> bool {
+        self.rules
+    }
+
+    pub const fn allows_mcp_elicitations(self) -> bool {
+        self.mcp_elicitations
+    }
+
+    pub const fn allows_skills(self) -> bool {
+        self.skill_approval
+    }
+
+    pub const fn allows_skill_approval(self) -> bool {
+        self.skill_approval
+    }
+
+    pub const fn allows_request_permissions_tool(self) -> bool {
+        self.request_permissions
+    }
+
+    pub const fn allows_request_permissions(self) -> bool {
+        self.request_permissions
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema, TS)]
@@ -1167,6 +1234,9 @@ pub enum EventMsg {
 
     ApplyPatchApprovalRequest(ApplyPatchApprovalRequestEvent),
 
+    /// Structured lifecycle event for a guardian-reviewed approval request.
+    GuardianAssessment(GuardianAssessmentEvent),
+
     /// Notification advising the user that something they are using has been
     /// deprecated and should be phased out.
     DeprecationNotice(DeprecationNoticeEvent),
@@ -1228,6 +1298,8 @@ pub enum EventMsg {
 
     ItemStarted(ItemStartedEvent),
     ItemCompleted(ItemCompletedEvent),
+    HookStarted(HookStartedEvent),
+    HookCompleted(HookCompletedEvent),
 
     AgentMessageContentDelta(AgentMessageContentDeltaEvent),
     PlanDelta(PlanDeltaEvent),
@@ -1256,9 +1328,110 @@ pub enum EventMsg {
     CollabResumeEnd(CollabResumeEndEvent),
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum HookEventName {
+    SessionStart,
+    UserPromptSubmit,
+    Stop,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum HookHandlerType {
+    Command,
+    Prompt,
+    Agent,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum HookExecutionMode {
+    Sync,
+    Async,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum HookScope {
+    Thread,
+    Turn,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum HookRunStatus {
+    Running,
+    Completed,
+    Failed,
+    Blocked,
+    Stopped,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum HookOutputEntryKind {
+    Warning,
+    Stop,
+    Feedback,
+    Context,
+    Error,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub struct HookOutputEntry {
+    pub kind: HookOutputEntryKind,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub struct HookRunSummary {
+    pub id: String,
+    pub event_name: HookEventName,
+    pub handler_type: HookHandlerType,
+    pub execution_mode: HookExecutionMode,
+    pub scope: HookScope,
+    pub source_path: PathBuf,
+    pub display_order: i64,
+    pub status: HookRunStatus,
+    pub status_message: Option<String>,
+    #[ts(type = "number")]
+    pub started_at: i64,
+    #[ts(type = "number | null")]
+    pub completed_at: Option<i64>,
+    #[ts(type = "number | null")]
+    pub duration_ms: Option<i64>,
+    pub entries: Vec<HookOutputEntry>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub struct HookStartedEvent {
+    pub turn_id: Option<String>,
+    pub run: HookRunSummary,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub struct HookCompletedEvent {
+    pub turn_id: Option<String>,
+    pub run: HookRunSummary,
+}
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum RealtimeConversationVersion {
+    #[default]
+    V1,
+    V2,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
 pub struct RealtimeConversationStartedEvent {
     pub session_id: Option<String>,
+    pub version: RealtimeConversationVersion,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema, TS)]
@@ -1342,6 +1515,8 @@ pub enum AgentStatus {
     PendingInit,
     /// Agent is currently running.
     Running,
+    /// Agent's current turn was interrupted and it may receive more input.
+    Interrupted,
     /// Agent is done. Contains the final assistant message.
     Completed(Option<String>),
     /// Agent encountered an error.
@@ -1812,6 +1987,8 @@ pub struct AgentMessageEvent {
     pub message: String,
     #[serde(default)]
     pub phase: Option<MessagePhase>,
+    #[serde(default)]
+    pub memory_citation: Option<MemoryCitation>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, JsonSchema, TS)]
@@ -2085,6 +2262,7 @@ pub enum SessionSource {
     VSCode,
     Exec,
     Mcp,
+    Custom(String),
     SubAgent(SubAgentSource),
     #[serde(other)]
     Unknown,
@@ -2099,6 +2277,8 @@ pub enum SubAgentSource {
     ThreadSpawn {
         parent_thread_id: ThreadId,
         depth: i32,
+        #[serde(default)]
+        agent_path: Option<AgentPath>,
         #[serde(default)]
         agent_nickname: Option<String>,
         #[serde(default, alias = "agent_type")]
@@ -2115,6 +2295,7 @@ impl fmt::Display for SessionSource {
             SessionSource::VSCode => f.write_str("vscode"),
             SessionSource::Exec => f.write_str("exec"),
             SessionSource::Mcp => f.write_str("mcp"),
+            SessionSource::Custom(source) => f.write_str(source),
             SessionSource::SubAgent(sub_source) => write!(f, "subagent_{sub_source}"),
             SessionSource::Unknown => f.write_str("unknown"),
         }
@@ -2141,6 +2322,15 @@ impl SessionSource {
             }
             SessionSource::SubAgent(SubAgentSource::MemoryConsolidation) => {
                 Some("memory builder".to_string())
+            }
+            _ => None,
+        }
+    }
+
+    pub fn get_agent_path(&self) -> Option<AgentPath> {
+        match self {
+            SessionSource::SubAgent(SubAgentSource::ThreadSpawn { agent_path, .. }) => {
+                agent_path.clone()
             }
             _ => None,
         }
@@ -2767,6 +2957,34 @@ pub struct RemoteSkillDownloadedEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
+#[serde(rename_all = "lowercase")]
+#[ts(rename_all = "lowercase")]
+pub enum Product {
+    #[serde(alias = "CHATGPT")]
+    Chatgpt,
+    #[serde(alias = "CODEX")]
+    Codex,
+    #[serde(alias = "ATLAS")]
+    Atlas,
+}
+
+impl Product {
+    pub fn from_session_source_name(value: &str) -> Option<Self> {
+        let normalized = value.trim().to_ascii_lowercase();
+        match normalized.as_str() {
+            "chatgpt" => Some(Self::Chatgpt),
+            "codex" => Some(Self::Codex),
+            "atlas" => Some(Self::Atlas),
+            _ => None,
+        }
+    }
+
+    pub fn matches_product_restriction(&self, products: &[Product]) -> bool {
+        products.is_empty() || products.contains(self)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 #[serde(rename_all = "snake_case")]
 #[ts(rename_all = "snake_case")]
 pub enum SkillScope {
@@ -2876,6 +3094,11 @@ pub struct SessionConfiguredEvent {
 
     /// When to escalate for approval for execution
     pub approval_policy: AskForApproval,
+
+    /// Configures who approval requests are routed to for review once they
+    /// have been escalated.
+    #[serde(default)]
+    pub approvals_reviewer: ApprovalsReviewer,
 
     /// How to sandbox commands executed in the system
     pub sandbox_policy: SandboxPolicy,
@@ -3018,6 +3241,8 @@ pub struct CollabAgentSpawnBeginEvent {
     /// Initial prompt sent to the agent. Can be empty to prevent CoT leaking at the
     /// beginning.
     pub prompt: String,
+    pub model: String,
+    pub reasoning_effort: ReasoningEffortConfig,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
@@ -3063,6 +3288,8 @@ pub struct CollabAgentSpawnEndEvent {
     /// Initial prompt sent to the agent. Can be empty to prevent CoT leaking at the
     /// beginning.
     pub prompt: String,
+    pub model: String,
+    pub reasoning_effort: ReasoningEffortConfig,
     /// Last known status of the new agent reported to the sender agent.
     pub status: AgentStatus,
 }

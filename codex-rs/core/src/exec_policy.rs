@@ -4,7 +4,9 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use arc_swap::ArcSwap;
+use codex_utils_absolute_path::AbsolutePathBuf;
 
+use crate::config::Config;
 use crate::config_loader::ConfigLayerStack;
 use crate::config_loader::ConfigLayerStackOrdering;
 use crate::is_dangerous_command::command_might_be_dangerous;
@@ -91,6 +93,24 @@ static BANNED_PREFIX_SUGGESTIONS: &[&[&str]] = &[
     &["osascript"],
 ];
 
+pub(crate) fn child_uses_parent_exec_policy(parent_config: &Config, child_config: &Config) -> bool {
+    fn exec_policy_config_folders(config: &Config) -> Vec<AbsolutePathBuf> {
+        config
+            .config_layer_stack
+            .get_layers(
+                ConfigLayerStackOrdering::LowestPrecedenceFirst,
+                /*include_disabled*/ false,
+            )
+            .into_iter()
+            .filter_map(codex_config::ConfigLayerEntry::config_folder)
+            .collect()
+    }
+
+    exec_policy_config_folders(parent_config) == exec_policy_config_folders(child_config)
+        && parent_config.config_layer_stack.requirements().exec_policy
+            == child_config.config_layer_stack.requirements().exec_policy
+}
+
 fn is_policy_match(rule_match: &RuleMatch) -> bool {
     match rule_match {
         RuleMatch::PrefixRuleMatch { .. } => true,
@@ -113,6 +133,7 @@ pub(crate) fn prompt_is_rejected_by_policy(
         AskForApproval::OnFailure => None,
         AskForApproval::OnRequest => None,
         AskForApproval::UnlessTrusted => None,
+        AskForApproval::Granular(_) => None,
         AskForApproval::Reject(reject_config) => {
             if prompt_is_rule {
                 if reject_config.rejects_rules_approval() {
@@ -442,7 +463,10 @@ pub async fn load_exec_policy(config_stack: &ConfigLayerStack) -> Result<Policy,
     // from each layer, so that higher-precedence layers can override
     // rules defined in lower-precedence ones.
     let mut policy_paths = Vec::new();
-    for layer in config_stack.get_layers(ConfigLayerStackOrdering::LowestPrecedenceFirst, false) {
+    for layer in config_stack.get_layers(
+        ConfigLayerStackOrdering::LowestPrecedenceFirst,
+        /*include_disabled*/ false,
+    ) {
         if let Some(config_folder) = layer.config_folder() {
             #[expect(clippy::expect_used)]
             let policy_dir = config_folder.join(RULES_DIR_NAME).expect("safe join");
@@ -513,6 +537,7 @@ pub fn render_decision_for_unmatched_command(
             AskForApproval::OnFailure
             | AskForApproval::OnRequest
             | AskForApproval::UnlessTrusted
+            | AskForApproval::Granular(_)
             | AskForApproval::Reject(_) => Decision::Prompt,
         };
     }
@@ -528,7 +553,7 @@ pub fn render_decision_for_unmatched_command(
             // returned false, so we must prompt.
             Decision::Prompt
         }
-        AskForApproval::OnRequest => {
+        AskForApproval::OnRequest | AskForApproval::Granular(_) => {
             match sandbox_policy {
                 SandboxPolicy::DangerFullAccess | SandboxPolicy::ExternalSandbox { .. } => {
                     // The user has indicated we should "just run" commands

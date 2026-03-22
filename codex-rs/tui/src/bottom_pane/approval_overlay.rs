@@ -16,7 +16,7 @@ use crate::key_hint::KeyBinding;
 use crate::render::highlight::highlight_bash_to_lines;
 use crate::render::renderable::ColumnRenderable;
 use crate::render::renderable::Renderable;
-use codex_core::features::Features;
+use codex_features::Features;
 use codex_protocol::ThreadId;
 use codex_protocol::mcp::RequestId;
 use codex_protocol::models::MacOsAutomationPermission;
@@ -306,7 +306,7 @@ impl ApprovalOverlay {
             op: Op::RequestPermissionsResponse {
                 id: call_id.to_string(),
                 response: codex_protocol::request_permissions::RequestPermissionsResponse {
-                    permissions: granted_permissions,
+                    permissions: granted_permissions.into(),
                     scope,
                 },
             },

@@ -11,21 +11,20 @@ use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::config::Config;
 use crate::error::CodexErr;
-use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
+use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
-use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::registry::ToolHandler;
 use crate::tools::registry::ToolKind;
 use async_trait::async_trait;
+use codex_features::Feature;
 use codex_hooks::HookEvent;
 use codex_hooks::HookPayload;
 use codex_hooks::HookResultControl;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
-use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CollabAgentInteractionBeginEvent;
 use codex_protocol::protocol::CollabAgentInteractionEndEvent;
@@ -66,6 +65,11 @@ use tracing::warn;
 
 /// Function-tool handler for the multi-agent collaboration API.
 pub struct MultiAgentHandler;
+pub struct SpawnAgentHandler;
+pub struct SendInputHandler;
+pub struct ResumeAgentHandler;
+pub struct WaitAgentHandler;
+pub struct CloseAgentHandler;
 
 /// Minimum wait timeout to prevent tight polling loops from burning CPU.
 pub(crate) const MIN_WAIT_TIMEOUT_MS: i64 = 10_000;
@@ -599,6 +603,7 @@ async fn send_input_to_member(
 
 #[async_trait]
 impl ToolHandler for MultiAgentHandler {
+    type Output = FunctionToolOutput;
     fn kind(&self) -> ToolKind {
         ToolKind::Function
     }
@@ -607,7 +612,10 @@ impl ToolHandler for MultiAgentHandler {
         matches!(payload, ToolPayload::Function { .. })
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    async fn handle(
+        &self,
+        invocation: ToolInvocation,
+    ) -> Result<FunctionToolOutput, FunctionCallError> {
         let ToolInvocation {
             session,
             turn,
@@ -630,7 +638,7 @@ impl ToolHandler for MultiAgentHandler {
             "spawn_agent" => spawn::handle(session, turn, call_id, arguments).await,
             "send_input" => send_input::handle(session, turn, call_id, arguments).await,
             "resume_agent" => resume_agent::handle(session, turn, call_id, arguments).await,
-            "wait" => wait::handle(session, turn, call_id, arguments).await,
+            "wait" | "wait_agent" => wait::handle(session, turn, call_id, arguments).await,
             "close_agent" => close_agent::handle(session, turn, call_id, arguments).await,
             "spawn_team" => spawn_team::handle(session, turn, call_id, arguments).await,
             "wait_team" => wait_team::handle(session, turn, call_id, arguments).await,
@@ -655,6 +663,36 @@ impl ToolHandler for MultiAgentHandler {
         }
     }
 }
+
+macro_rules! impl_delegating_multi_agent_handler {
+    ($handler:ident) => {
+        #[async_trait]
+        impl ToolHandler for $handler {
+            type Output = FunctionToolOutput;
+
+            fn kind(&self) -> ToolKind {
+                ToolKind::Function
+            }
+
+            fn matches_kind(&self, payload: &ToolPayload) -> bool {
+                matches!(payload, ToolPayload::Function { .. })
+            }
+
+            async fn handle(
+                &self,
+                invocation: ToolInvocation,
+            ) -> Result<Self::Output, FunctionCallError> {
+                MultiAgentHandler.handle(invocation).await
+            }
+        }
+    };
+}
+
+impl_delegating_multi_agent_handler!(SpawnAgentHandler);
+impl_delegating_multi_agent_handler!(SendInputHandler);
+impl_delegating_multi_agent_handler!(ResumeAgentHandler);
+impl_delegating_multi_agent_handler!(WaitAgentHandler);
+impl_delegating_multi_agent_handler!(CloseAgentHandler);
 
 mod locks;
 
@@ -1055,6 +1093,7 @@ fn approval_policy_for_hooks(policy: AskForApproval) -> &'static str {
         AskForApproval::UnlessTrusted => "untrusted",
         AskForApproval::OnFailure => "on-failure",
         AskForApproval::OnRequest => "on-request",
+        AskForApproval::Granular(_) => "granular",
         AskForApproval::Reject(_) => "reject",
         AskForApproval::Never => "never",
     }
@@ -1085,6 +1124,8 @@ async fn dispatch_subagent_start_hook(
             transcript_path: session.transcript_path().await,
             cwd: turn.cwd.clone(),
             permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
+            client: turn.app_server_client_name.clone(),
+            triggered_at: Some(chrono::Utc::now()),
             hook_event: HookEvent::SubagentStart {
                 agent_id: agent_id.to_string(),
                 agent_type: agent_type.to_string(),
@@ -1131,6 +1172,8 @@ async fn dispatch_teammate_idle_hook(
             transcript_path: session.transcript_path().await,
             cwd: turn.cwd.clone(),
             permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
+            client: turn.app_server_client_name.clone(),
+            triggered_at: Some(chrono::Utc::now()),
             hook_event: HookEvent::TeammateIdle {
                 teammate_name: teammate_name.to_string(),
                 team_name: team_id.to_string(),
@@ -1180,6 +1223,8 @@ async fn dispatch_task_completed_hook(
             transcript_path: session.transcript_path().await,
             cwd: turn.cwd.clone(),
             permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
+            client: turn.app_server_client_name.clone(),
+            triggered_at: Some(chrono::Utc::now()),
             hook_event: HookEvent::TaskCompleted {
                 task_id: task_id.to_string(),
                 task_subject: task_subject.to_string(),
@@ -1230,6 +1275,8 @@ async fn dispatch_worktree_create_hook(
             transcript_path: session.transcript_path().await,
             cwd: turn.cwd.clone(),
             permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
+            client: turn.app_server_client_name.clone(),
+            triggered_at: Some(chrono::Utc::now()),
             hook_event: HookEvent::WorktreeCreate { name },
         })
         .await;
@@ -1296,6 +1343,8 @@ async fn dispatch_worktree_remove_hook(
             transcript_path: session.transcript_path().await,
             cwd: turn.cwd.clone(),
             permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
+            client: turn.app_server_client_name.clone(),
+            triggered_at: Some(chrono::Utc::now()),
             hook_event: HookEvent::WorktreeRemove { worktree_path },
         })
         .await;
@@ -1523,7 +1572,7 @@ async fn reap_finished_agents_for_slots(
             AgentStatus::Shutdown | AgentStatus::NotFound => 0u8,
             AgentStatus::Completed(_) => 1,
             AgentStatus::Errored(_) => 2,
-            AgentStatus::PendingInit | AgentStatus::Running => continue,
+            AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::Interrupted => continue,
         };
         candidates.push((priority, agent_id.to_string(), agent_id));
     }
@@ -1613,7 +1662,7 @@ pub mod close_agent {
         turn: Arc<TurnContext>,
         call_id: String,
         arguments: String,
-    ) -> Result<ToolOutput, FunctionCallError> {
+    ) -> Result<FunctionToolOutput, FunctionCallError> {
         let args: CloseAgentArgs = parse_arguments(&arguments)?;
         let agent_id = agent_id(&args.id)?;
         session
@@ -1677,10 +1726,7 @@ pub mod close_agent {
             FunctionCallError::Fatal(format!("failed to serialize close_agent result: {err}"))
         })?;
 
-        Ok(ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success: Some(true),
-        })
+        Ok(FunctionToolOutput::from_text(content, Some(true)))
     }
 }
 
@@ -1714,7 +1760,7 @@ fn collab_agent_error(agent_id: ThreadId, err: CodexErr) -> FunctionCallError {
 }
 
 fn thread_spawn_source(parent_thread_id: ThreadId, depth: i32) -> SessionSource {
-    thread_spawn_source_with_role(parent_thread_id, depth, None)
+    thread_spawn_source_with_role(parent_thread_id, depth, /*agent_role*/ None)
 }
 
 fn thread_spawn_source_with_role(
@@ -1726,6 +1772,7 @@ fn thread_spawn_source_with_role(
         parent_thread_id,
         depth,
         agent_nickname: None,
+        agent_path: None,
         agent_role,
     })
 }

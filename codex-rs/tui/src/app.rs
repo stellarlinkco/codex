@@ -39,7 +39,21 @@ use crate::tui::TuiEvent;
 use crate::update_action::UpdateAction;
 use crate::version::CODEX_CLI_VERSION;
 use codex_ansi_escape::ansi_escape_line;
+use codex_app_server_protocol::AppSummary;
 use codex_app_server_protocol::ConfigLayerSource;
+use codex_app_server_protocol::MarketplaceInterface as ProtocolMarketplaceInterface;
+use codex_app_server_protocol::PluginAuthPolicy as ProtocolPluginAuthPolicy;
+use codex_app_server_protocol::PluginDetail as ProtocolPluginDetail;
+use codex_app_server_protocol::PluginInstallPolicy as ProtocolPluginInstallPolicy;
+use codex_app_server_protocol::PluginInterface as ProtocolPluginInterface;
+use codex_app_server_protocol::PluginListResponse;
+use codex_app_server_protocol::PluginMarketplaceEntry;
+use codex_app_server_protocol::PluginReadParams;
+use codex_app_server_protocol::PluginReadResponse;
+use codex_app_server_protocol::PluginSource as ProtocolPluginSource;
+use codex_app_server_protocol::PluginSummary;
+use codex_app_server_protocol::SkillSummary;
+use codex_chatgpt::connectors;
 use codex_core::AuthManager;
 use codex_core::CodexAuth;
 use codex_core::ThreadManager;
@@ -50,13 +64,18 @@ use codex_core::config::edit::ConfigEdit;
 use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::types::ModelAvailabilityNuxConfig;
 use codex_core::config_loader::ConfigLayerStackOrdering;
-use codex_core::features::Feature;
 use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_core::models_manager::manager::RefreshStrategy;
 use codex_core::models_manager::model_presets::HIDE_GPT_5_1_CODEX_MAX_MIGRATION_PROMPT_CONFIG;
 use codex_core::models_manager::model_presets::HIDE_GPT5_1_MIGRATION_PROMPT_CONFIG;
+use codex_core::plugins::MarketplaceError;
+use codex_core::plugins::MarketplacePluginAuthPolicy;
+use codex_core::plugins::MarketplacePluginInstallPolicy;
+use codex_core::plugins::MarketplacePluginSource;
+use codex_core::plugins::PluginReadRequest;
 #[cfg(target_os = "windows")]
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
+use codex_features::Feature;
 use codex_otel::SessionTelemetry;
 use codex_otel::TelemetryAuthMode;
 use codex_protocol::ThreadId;
@@ -211,10 +230,10 @@ fn emit_skill_load_warnings(app_event_tx: &AppEventSender, errors: &[SkillErrorI
 fn emit_project_config_warnings(app_event_tx: &AppEventSender, config: &Config) {
     let mut disabled_folders = Vec::new();
 
-    for layer in config
-        .config_layer_stack
-        .get_layers(ConfigLayerStackOrdering::LowestPrecedenceFirst, true)
-    {
+    for layer in config.config_layer_stack.get_layers(
+        ConfigLayerStackOrdering::LowestPrecedenceFirst,
+        /*include_disabled*/ true,
+    ) {
         let ConfigLayerSource::Project { dot_codex_folder } = &layer.name else {
             continue;
         };
@@ -249,6 +268,203 @@ fn emit_project_config_warnings(app_event_tx: &AppEventSender, config: &Config) 
     app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
         history_cell::new_warning_event(message),
     )));
+}
+
+async fn load_plugin_app_summaries_for_tui(
+    config: &Config,
+    plugin_apps: &[codex_core::plugins::AppConnectorId],
+) -> Vec<AppSummary> {
+    if plugin_apps.is_empty() {
+        return Vec::new();
+    }
+
+    let connectors =
+        match connectors::list_all_connectors_with_options(config, /*force_refetch*/ false).await {
+            Ok(connectors) => connectors,
+            Err(err) => {
+                tracing::warn!("failed to load app metadata for plugin/read: {err:#}");
+                connectors::list_cached_all_connectors(config)
+                    .await
+                    .unwrap_or_default()
+            }
+        };
+
+    let plugin_connectors = connectors::connectors_for_plugin_apps(connectors, plugin_apps);
+
+    let accessible_connectors =
+        match connectors::list_accessible_connectors_from_mcp_tools_with_options_and_status(
+            config, /*force_refetch*/ false,
+        )
+        .await
+        {
+            Ok(status) if status.codex_apps_ready => status.connectors,
+            Ok(_) => {
+                return plugin_connectors
+                    .into_iter()
+                    .map(AppSummary::from)
+                    .collect();
+            }
+            Err(err) => {
+                tracing::warn!("failed to load app auth state for plugin/read: {err:#}");
+                return plugin_connectors
+                    .into_iter()
+                    .map(AppSummary::from)
+                    .collect();
+            }
+        };
+
+    let accessible_ids = accessible_connectors
+        .iter()
+        .map(|connector| connector.id.as_str())
+        .collect::<HashSet<_>>();
+
+    plugin_connectors
+        .into_iter()
+        .map(|connector| {
+            let needs_auth = !accessible_ids.contains(connector.id.as_str());
+            AppSummary {
+                id: connector.id,
+                name: connector.name,
+                description: connector.description,
+                install_url: connector.install_url,
+                needs_auth,
+            }
+        })
+        .collect()
+}
+
+fn plugin_marketplace_entry_from_configured(
+    marketplace: codex_core::plugins::ConfiguredMarketplace,
+) -> PluginMarketplaceEntry {
+    PluginMarketplaceEntry {
+        name: marketplace.name,
+        path: marketplace.path,
+        interface: marketplace
+            .interface
+            .map(|interface| ProtocolMarketplaceInterface {
+                display_name: interface.display_name,
+            }),
+        plugins: marketplace
+            .plugins
+            .into_iter()
+            .map(plugin_summary_from_configured)
+            .collect(),
+    }
+}
+
+fn plugin_summary_from_configured(
+    plugin: codex_core::plugins::ConfiguredMarketplacePlugin,
+) -> PluginSummary {
+    PluginSummary {
+        id: plugin.id,
+        name: plugin.name,
+        source: plugin_source_from_core(plugin.source),
+        installed: plugin.installed,
+        enabled: plugin.enabled,
+        install_policy: plugin_install_policy_from_core(plugin.policy.installation),
+        auth_policy: plugin_auth_policy_from_core(plugin.policy.authentication),
+        interface: plugin.interface.map(plugin_interface_from_core),
+    }
+}
+
+fn plugin_read_response_from_outcome(
+    outcome: codex_core::plugins::PluginReadOutcome,
+    apps: Vec<AppSummary>,
+) -> PluginReadResponse {
+    let plugin = outcome.plugin;
+    PluginReadResponse {
+        plugin: ProtocolPluginDetail {
+            marketplace_name: outcome.marketplace_name,
+            marketplace_path: outcome.marketplace_path,
+            summary: PluginSummary {
+                id: plugin.id,
+                name: plugin.name,
+                source: plugin_source_from_core(plugin.source),
+                installed: plugin.installed,
+                enabled: plugin.enabled,
+                install_policy: plugin_install_policy_from_core(plugin.policy.installation),
+                auth_policy: plugin_auth_policy_from_core(plugin.policy.authentication),
+                interface: plugin.interface.clone().map(plugin_interface_from_core),
+            },
+            description: plugin.description,
+            skills: plugin
+                .skills
+                .into_iter()
+                .map(skill_summary_from_core)
+                .collect(),
+            apps,
+            mcp_servers: plugin.mcp_server_names,
+        },
+    }
+}
+
+fn skill_summary_from_core(skill: codex_core::skills::model::SkillMetadata) -> SkillSummary {
+    SkillSummary {
+        name: skill.name,
+        description: skill.description,
+        short_description: skill.short_description,
+        interface: skill.interface.map(skill_interface_from_core),
+        path: skill.path_to_skills_md,
+    }
+}
+
+fn skill_interface_from_core(
+    interface: codex_core::skills::model::SkillInterface,
+) -> codex_app_server_protocol::SkillInterface {
+    codex_app_server_protocol::SkillInterface {
+        display_name: interface.display_name,
+        short_description: interface.short_description,
+        brand_color: interface.brand_color,
+        default_prompt: interface.default_prompt,
+        icon_small: interface.icon_small,
+        icon_large: interface.icon_large,
+    }
+}
+
+fn plugin_interface_from_core(
+    interface: codex_core::plugins::PluginManifestInterface,
+) -> ProtocolPluginInterface {
+    ProtocolPluginInterface {
+        display_name: interface.display_name,
+        short_description: interface.short_description,
+        long_description: interface.long_description,
+        developer_name: interface.developer_name,
+        category: interface.category,
+        capabilities: interface.capabilities,
+        website_url: interface.website_url,
+        privacy_policy_url: interface.privacy_policy_url,
+        terms_of_service_url: interface.terms_of_service_url,
+        default_prompt: interface.default_prompt,
+        brand_color: interface.brand_color,
+        composer_icon: interface.composer_icon,
+        logo: interface.logo,
+        screenshots: interface.screenshots,
+    }
+}
+
+fn plugin_source_from_core(source: MarketplacePluginSource) -> ProtocolPluginSource {
+    match source {
+        MarketplacePluginSource::Local { path } => ProtocolPluginSource::Local { path },
+    }
+}
+
+fn plugin_install_policy_from_core(
+    policy: MarketplacePluginInstallPolicy,
+) -> ProtocolPluginInstallPolicy {
+    match policy {
+        MarketplacePluginInstallPolicy::NotAvailable => ProtocolPluginInstallPolicy::NotAvailable,
+        MarketplacePluginInstallPolicy::Available => ProtocolPluginInstallPolicy::Available,
+        MarketplacePluginInstallPolicy::InstalledByDefault => {
+            ProtocolPluginInstallPolicy::InstalledByDefault
+        }
+    }
+}
+
+fn plugin_auth_policy_from_core(policy: MarketplacePluginAuthPolicy) -> ProtocolPluginAuthPolicy {
+    match policy {
+        MarketplacePluginAuthPolicy::OnInstall => ProtocolPluginAuthPolicy::OnInstall,
+        MarketplacePluginAuthPolicy::OnUse => ProtocolPluginAuthPolicy::OnUse,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -859,9 +1075,9 @@ impl App {
             self.chat_widget
                 .set_feature_enabled(feature, effective_enabled);
             if effective_enabled {
-                builder = builder.set_feature_enabled(feature_key, true);
+                builder = builder.set_feature_enabled(feature_key, /*enabled*/ true);
             } else if feature.default_enabled() {
-                builder = builder.set_feature_enabled(feature_key, false);
+                builder = builder.set_feature_enabled(feature_key, /*enabled*/ false);
             } else {
                 // If the feature already default to `false`, we drop the key
                 // in the config file so that the user does not miss the feature
@@ -880,6 +1096,7 @@ impl App {
                     .send(AppEvent::CodexOp(Op::OverrideTurnContext {
                         cwd: None,
                         approval_policy: None,
+                        approvals_reviewer: None,
                         sandbox_policy: None,
                         windows_sandbox_level: Some(windows_sandbox_level),
                         model: None,
@@ -907,7 +1124,90 @@ impl App {
         }
 
         self.chat_widget
-            .add_info_message(format!("Opened {url} in your browser."), None);
+            .add_info_message(format!("Opened {url} in your browser."), /*hint*/ None);
+    }
+
+    fn fetch_plugins_list(&mut self, cwd: PathBuf) {
+        let plugins_manager = self.server.plugins_manager();
+        let auth_manager = self.auth_manager.clone();
+        let config = self.config.clone();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let auth = auth_manager.auth().await;
+            let roots = match AbsolutePathBuf::try_from(cwd.clone()) {
+                Ok(cwd) => vec![cwd],
+                Err(err) => {
+                    app_event_tx.send(AppEvent::PluginsLoaded {
+                        cwd,
+                        result: Err(format!("plugin list cwd must be absolute: {err}")),
+                    });
+                    return;
+                }
+            };
+
+            let mut remote_sync_error = None;
+            let featured_plugin_ids = match plugins_manager
+                .featured_plugin_ids_for_config(&config, auth.as_ref())
+                .await
+            {
+                Ok(ids) => ids,
+                Err(err) => {
+                    remote_sync_error.get_or_insert_with(|| err.to_string());
+                    Vec::new()
+                }
+            };
+
+            let result = match tokio::task::spawn_blocking(move || {
+                let marketplaces = plugins_manager.list_marketplaces_for_config(&config, &roots)?;
+                Ok::<Vec<PluginMarketplaceEntry>, MarketplaceError>(
+                    marketplaces
+                        .into_iter()
+                        .map(plugin_marketplace_entry_from_configured)
+                        .collect(),
+                )
+            })
+            .await
+            {
+                Ok(Ok(marketplaces)) => Ok(PluginListResponse {
+                    marketplaces,
+                    remote_sync_error,
+                    featured_plugin_ids,
+                }),
+                Ok(Err(err)) => Err(err.to_string()),
+                Err(err) => Err(format!("failed to list marketplace plugins: {err}")),
+            };
+
+            app_event_tx.send(AppEvent::PluginsLoaded { cwd, result });
+        });
+    }
+
+    fn fetch_plugin_detail(&mut self, cwd: PathBuf, params: PluginReadParams) {
+        let plugins_manager = self.server.plugins_manager();
+        let config = self.config.clone();
+        let app_event_tx = self.app_event_tx.clone();
+        tokio::spawn(async move {
+            let request = PluginReadRequest {
+                plugin_name: params.plugin_name,
+                marketplace_path: params.marketplace_path,
+            };
+            let config_for_read = config.clone();
+
+            let result = match tokio::task::spawn_blocking(move || {
+                plugins_manager.read_plugin_for_config(&config_for_read, &request)
+            })
+            .await
+            {
+                Ok(Ok(outcome)) => {
+                    let app_summaries =
+                        load_plugin_app_summaries_for_tui(&config, &outcome.plugin.apps).await;
+                    Ok(plugin_read_response_from_outcome(outcome, app_summaries))
+                }
+                Ok(Err(err)) => Err(err.to_string()),
+                Err(err) => Err(format!("failed to read marketplace plugin: {err}")),
+            };
+
+            app_event_tx.send(AppEvent::PluginDetailLoaded { cwd, result });
+        });
     }
 
     fn clear_ui_header_lines_with_version(
@@ -1021,7 +1321,7 @@ impl App {
         if self.active_thread_id.is_some() {
             return;
         }
-        self.set_thread_active(thread_id, true).await;
+        self.set_thread_active(thread_id, /*active*/ true).await;
         let receiver = if let Some(channel) = self.thread_event_channels.get_mut(&thread_id) {
             channel.receiver.take()
         } else {
@@ -1062,7 +1362,7 @@ impl App {
 
     async fn clear_active_thread(&mut self) {
         if let Some(active_id) = self.active_thread_id.take() {
-            self.set_thread_active(active_id, false).await;
+            self.set_thread_active(active_id, /*active*/ false).await;
         }
         self.active_thread_rx = None;
         self.refresh_pending_thread_approvals().await;
@@ -1177,7 +1477,7 @@ impl App {
                     thread_label,
                     call_id: ev.call_id.clone(),
                     reason: ev.reason.clone(),
-                    permissions: ev.permissions.clone(),
+                    permissions: ev.permissions.clone().into(),
                 },
             )),
             _ => None,
@@ -1344,7 +1644,7 @@ impl App {
                         thread_id,
                         session_source.get_nickname(),
                         session_source.get_agent_role(),
-                        false,
+                        /*is_closed*/ false,
                     );
                 }
                 Err(_) => {
@@ -1364,7 +1664,7 @@ impl App {
 
         if self.agent_picker_threads.is_empty() {
             self.chat_widget
-                .add_info_message("No agents available yet.".to_string(), None);
+                .add_info_message("No agents available yet.".to_string(), /*hint*/ None);
             return;
         }
 
@@ -1437,7 +1737,10 @@ impl App {
         if let Some(entry) = self.agent_picker_threads.get_mut(&thread_id) {
             entry.is_closed = true;
         } else {
-            self.upsert_agent_picker_thread(thread_id, None, None, true);
+            self.upsert_agent_picker_thread(
+                thread_id, /*agent_nickname*/ None, /*agent_role*/ None,
+                /*is_closed*/ true,
+            );
         }
     }
 
@@ -1491,7 +1794,7 @@ impl App {
         if is_replay_only {
             self.chat_widget.add_info_message(
                 format!("Agent thread {thread_id} is closed. Replaying saved transcript."),
-                None,
+                /*hint*/ None,
             );
         }
         self.drain_active_thread_events(tui).await?;
@@ -1635,13 +1938,15 @@ impl App {
         if let Some(event) = snapshot.session_configured {
             self.handle_codex_event_replay(event);
         }
-        self.chat_widget.set_queue_autosend_suppressed(true);
+        self.chat_widget
+            .set_queue_autosend_suppressed(/*suppressed*/ true);
         self.chat_widget
             .restore_thread_input_state(snapshot.input_state);
         for event in snapshot.events {
             self.handle_codex_event_replay(event);
         }
-        self.chat_widget.set_queue_autosend_suppressed(false);
+        self.chat_widget
+            .set_queue_autosend_suppressed(/*suppressed*/ false);
         if resume_restored_queue {
             self.chat_widget.maybe_send_next_queued_input();
         }
@@ -1700,13 +2005,13 @@ impl App {
             CollaborationModesConfig {
                 default_mode_request_user_input: config
                     .features
-                    .enabled(codex_core::features::Feature::DefaultModeRequestUserInput),
+                    .enabled(codex_features::Feature::DefaultModeRequestUserInput),
             },
         ));
         // TODO(xl): Move into PluginManager once this no longer depends on config feature gating.
         thread_manager
             .plugins_manager()
-            .maybe_start_curated_repo_sync_for_config(&config);
+            .maybe_start_plugin_startup_tasks_for_config(&config, auth_manager.clone());
         let mut model = thread_manager
             .get_models_manager()
             .get_default_model(&config.model, RefreshStrategy::Offline)
@@ -1762,7 +2067,7 @@ impl App {
             .as_ref()
             .is_some_and(|cmd| !cmd.is_empty())
         {
-            session_telemetry.counter("codex.status_line", 1, &[]);
+            session_telemetry.counter("codex.status_line", /*inc*/ 1, &[]);
         }
 
         let status_line_invalid_items_warned = Arc::new(AtomicBool::new(false));
@@ -1834,13 +2139,17 @@ impl App {
                 ChatWidget::new_from_existing(init, resumed.thread, resumed.session_configured)
             }
             SessionSelection::Fork(target_session) => {
-                session_telemetry.counter("codex.thread.fork", 1, &[("source", "cli_subcommand")]);
+                session_telemetry.counter(
+                    "codex.thread.fork",
+                    /*inc*/ 1,
+                    &[("source", "cli_subcommand")],
+                );
                 let forked = thread_manager
                     .fork_thread(
                         usize::MAX,
                         config.clone(),
                         target_session.path.clone(),
-                        false,
+                        /*persist_extended_history*/ false,
                     )
                     .await
                     .wrap_err_with(|| {
@@ -2102,13 +2411,19 @@ impl App {
                 self.start_fresh_session_with_summary_hint(tui).await;
             }
             AppEvent::ClearUi => {
-                self.clear_terminal_ui(tui, false)?;
+                self.clear_terminal_ui(tui, /*redraw_header*/ false)?;
                 self.reset_app_ui_state_after_clear();
 
                 self.start_fresh_session_with_summary_hint(tui).await;
             }
             AppEvent::OpenResumePicker => {
-                match crate::resume_picker::run_resume_picker(tui, &self.config, false).await? {
+                match crate::resume_picker::run_resume_picker(
+                    tui,
+                    &self.config,
+                    /*show_all*/ false,
+                )
+                .await?
+                {
                     SessionSelection::Resume(target_session) => {
                         let current_cwd = self.config.cwd.clone();
                         let resume_cwd = match crate::resolve_cwd_for_resume_or_fork(
@@ -2118,7 +2433,7 @@ impl App {
                             target_session.thread_id,
                             &target_session.path,
                             CwdPromptAction::Resume,
-                            true,
+                            /*allow_prompt*/ true,
                         )
                         .await?
                         {
@@ -2202,7 +2517,7 @@ impl App {
             AppEvent::ForkCurrentSession => {
                 self.session_telemetry.counter(
                     "codex.thread.fork",
-                    1,
+                    /*inc*/ 1,
                     &[("source", "slash_command")],
                 );
                 let summary = session_summary(
@@ -2220,7 +2535,12 @@ impl App {
                     if path.exists() {
                         match self
                             .server
-                            .fork_thread(usize::MAX, self.config.clone(), path.clone(), false)
+                            .fork_thread(
+                                usize::MAX,
+                                self.config.clone(),
+                                path.clone(),
+                                /*persist_extended_history*/ false,
+                            )
                             .await
                         {
                             Ok(forked) => {
@@ -2381,6 +2701,9 @@ impl App {
                         url,
                         is_installed,
                         is_enabled,
+                        suggest_reason: None,
+                        suggestion_type: None,
+                        elicitation_target: None,
                     });
             }
             AppEvent::OpenUrlInBrowser { url } => {
@@ -2388,6 +2711,24 @@ impl App {
             }
             AppEvent::RefreshConnectors { force_refetch } => {
                 self.chat_widget.refresh_connectors(force_refetch);
+            }
+            AppEvent::FetchPluginsList { cwd } => {
+                self.fetch_plugins_list(cwd);
+            }
+            AppEvent::OpenPluginDetailLoading {
+                plugin_display_name,
+            } => {
+                self.chat_widget
+                    .open_plugin_detail_loading_popup(&plugin_display_name);
+            }
+            AppEvent::PluginsLoaded { cwd, result } => {
+                self.chat_widget.on_plugins_loaded(cwd, result);
+            }
+            AppEvent::FetchPluginDetail { cwd, params } => {
+                self.fetch_plugin_detail(cwd, params);
+            }
+            AppEvent::PluginDetailLoaded { cwd, result } => {
+                self.chat_widget.on_plugin_detail_loaded(cwd, result);
             }
             AppEvent::StartFileSearch(query) => {
                 self.file_search.on_user_query(query);
@@ -2469,7 +2810,7 @@ impl App {
             AppEvent::OpenWindowsSandboxFallbackPrompt { preset } => {
                 self.session_telemetry.counter(
                     "codex.windows_sandbox.fallback_prompt_shown",
-                    1,
+                    /*inc*/ 1,
                     &[],
                 );
                 self.chat_widget.clear_windows_sandbox_setup_status();
@@ -2616,7 +2957,7 @@ impl App {
                     self.chat_widget
                         .add_to_history(history_cell::new_info_event(
                             format!("Granting sandbox read access to {path} ..."),
-                            None,
+                            /*hint*/ None,
                         ));
 
                     let policy = self.config.permissions.sandbox_policy.get().clone();
@@ -2663,7 +3004,7 @@ impl App {
                     self.chat_widget
                         .add_to_history(history_cell::new_info_event(
                             format!("Sandbox read access granted for {}", path.display()),
-                            None,
+                            /*hint*/ None,
                         ));
                 }
             },
@@ -2709,6 +3050,7 @@ impl App {
                                     Op::OverrideTurnContext {
                                         cwd: None,
                                         approval_policy: None,
+                                        approvals_reviewer: None,
                                         sandbox_policy: None,
                                         windows_sandbox_level: Some(windows_sandbox_level),
                                         model: None,
@@ -2732,6 +3074,7 @@ impl App {
                                     Op::OverrideTurnContext {
                                         cwd: None,
                                         approval_policy: Some(preset.approval),
+                                        approvals_reviewer: None,
                                         sandbox_policy: Some(preset.sandbox.clone()),
                                         windows_sandbox_level: Some(windows_sandbox_level),
                                         model: None,
@@ -2796,7 +3139,7 @@ impl App {
                             message.push_str(profile);
                             message.push_str(" profile");
                         }
-                        self.chat_widget.add_info_message(message, None);
+                        self.chat_widget.add_info_message(message, /*hint*/ None);
                     }
                     Err(err) => {
                         tracing::error!(
@@ -2830,7 +3173,7 @@ impl App {
                             message.push_str(profile);
                             message.push_str(" profile");
                         }
-                        self.chat_widget.add_info_message(message, None);
+                        self.chat_widget.add_info_message(message, /*hint*/ None);
                     }
                     Err(err) => {
                         tracing::error!(
@@ -2866,7 +3209,7 @@ impl App {
                             message.push_str(profile);
                             message.push_str(" profile");
                         }
-                        self.chat_widget.add_info_message(message, None);
+                        self.chat_widget.add_info_message(message, /*hint*/ None);
                     }
                     Err(err) => {
                         tracing::error!(error = %err, "failed to persist fast mode selection");
@@ -2913,7 +3256,7 @@ impl App {
                             let selection = name.unwrap_or_else(|| "System default".to_string());
                             self.chat_widget.add_info_message(
                                 format!("Realtime {} set to {selection}", kind.noun()),
-                                None,
+                                /*hint*/ None,
                             );
                         }
                     }
@@ -2996,6 +3339,33 @@ impl App {
                     }
                 }
             }
+            AppEvent::UpdateApprovalsReviewer(policy) => {
+                self.config.approvals_reviewer = policy;
+                self.chat_widget.set_approvals_reviewer(policy);
+                let profile = self.active_profile.as_deref();
+                let segments = if let Some(profile) = profile {
+                    vec![
+                        "profiles".to_string(),
+                        profile.to_string(),
+                        "approvals_reviewer".to_string(),
+                    ]
+                } else {
+                    vec!["approvals_reviewer".to_string()]
+                };
+                if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
+                    .with_profile(profile)
+                    .with_edits([ConfigEdit::SetPath {
+                        segments,
+                        value: policy.to_string().into(),
+                    }])
+                    .apply()
+                    .await
+                {
+                    tracing::error!(error = %err, "failed to persist approvals reviewer update");
+                    self.chat_widget
+                        .add_error_message(format!("Failed to save approvals reviewer: {err}"));
+                }
+            }
             AppEvent::UpdateFeatureFlags { updates } => {
                 self.update_feature_flags(updates).await;
             }
@@ -3019,7 +3389,7 @@ impl App {
             }
             AppEvent::PersistFullAccessWarningAcknowledged => {
                 if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
-                    .set_hide_full_access_warning(true)
+                    .set_hide_full_access_warning(/*acknowledged*/ true)
                     .apply()
                     .await
                 {
@@ -3034,7 +3404,7 @@ impl App {
             }
             AppEvent::PersistWorldWritableWarningAcknowledged => {
                 if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
-                    .set_hide_world_writable_warning(true)
+                    .set_hide_world_writable_warning(/*acknowledged*/ true)
                     .apply()
                     .await
                 {
@@ -3049,7 +3419,7 @@ impl App {
             }
             AppEvent::PersistRateLimitSwitchPromptHidden => {
                 if let Err(err) = ConfigEditsBuilder::new(&self.config.codex_home)
-                    .set_hide_rate_limit_model_nudge(true)
+                    .set_hide_rate_limit_model_nudge(/*acknowledged*/ true)
                     .apply()
                     .await
                 {
@@ -3334,6 +3704,36 @@ impl App {
             AppEvent::StatusLineSetupCancelled => {
                 self.chat_widget.cancel_status_line_setup();
             }
+            AppEvent::TerminalTitleSetup { items } => {
+                let ids = items.iter().map(ToString::to_string).collect::<Vec<_>>();
+                let edit = codex_core::config::edit::terminal_title_items_edit(&ids);
+                let apply_result = ConfigEditsBuilder::new(&self.config.codex_home)
+                    .with_edits([edit])
+                    .apply()
+                    .await;
+                match apply_result {
+                    Ok(()) => {
+                        self.config.tui_terminal_title = Some(ids);
+                        self.chat_widget.setup_terminal_title(items);
+                    }
+                    Err(err) => {
+                        tracing::error!(
+                            error = %err,
+                            "failed to persist terminal title items; keeping previous selection"
+                        );
+                        self.chat_widget.add_error_message(format!(
+                            "Failed to save terminal title items: {err}"
+                        ));
+                    }
+                }
+            }
+            AppEvent::TerminalTitleSetupPreview { items } => {
+                self.chat_widget.preview_terminal_title(items);
+            }
+            AppEvent::TerminalTitleSetupCancelled => {
+                self.chat_widget
+                    .restore_terminal_title(self.config.tui_terminal_title.clone());
+            }
             AppEvent::SyntaxThemeSelected { name } => {
                 let edit = codex_core::config::edit::syntax_theme_edit(&name);
                 let apply_result = ConfigEditsBuilder::new(&self.config.codex_home)
@@ -3445,7 +3845,7 @@ impl App {
                     format!(
                         "Agent thread {closed_thread_id} closed. Switched back to main thread."
                     ),
-                    None,
+                    /*hint*/ None,
                 );
             } else {
                 self.clear_active_thread().await;
@@ -3484,7 +3884,7 @@ impl App {
             thread_id,
             config_snapshot.session_source.get_nickname(),
             config_snapshot.session_source.get_agent_role(),
-            false,
+            /*is_closed*/ false,
         );
         let event = Event {
             id: String::new(),
@@ -3496,6 +3896,7 @@ impl App {
                 model_provider_id: config_snapshot.model_provider_id,
                 service_tier: config_snapshot.service_tier,
                 approval_policy: config_snapshot.approval_policy,
+                approvals_reviewer: config_snapshot.approvals_reviewer,
                 sandbox_policy: config_snapshot.sandbox_policy,
                 cwd: config_snapshot.cwd,
                 reasoning_effort: config_snapshot.reasoning_effort,
@@ -3651,7 +4052,7 @@ impl App {
     fn reset_external_editor_state(&mut self, tui: &mut tui::Tui) {
         self.chat_widget
             .set_external_editor_state(ExternalEditorState::Closed);
-        self.chat_widget.set_footer_hint_override(None);
+        self.chat_widget.set_footer_hint_override(/*items*/ None);
         tui.frame_requester().schedule_frame();
     }
 
@@ -3677,7 +4078,7 @@ impl App {
                 if !self.chat_widget.can_run_ctrl_l_clear_now() {
                     return;
                 }
-                if let Err(err) = self.clear_terminal_ui(tui, false) {
+                if let Err(err) = self.clear_terminal_ui(tui, /*redraw_header*/ false) {
                     tracing::warn!(error = %err, "failed to clear terminal UI");
                     self.chat_widget
                         .add_error_message(format!("Failed to clear terminal UI: {err}"));

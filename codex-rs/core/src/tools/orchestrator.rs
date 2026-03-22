@@ -9,7 +9,8 @@ caching).
 use crate::error::CodexErr;
 use crate::error::SandboxErr;
 use crate::exec::ExecToolCallOutput;
-use crate::features::Feature;
+use crate::guardian::GUARDIAN_REJECTION_MESSAGE;
+use crate::guardian::routes_approval_to_guardian;
 use crate::network_policy_decision::network_approval_context_from_payload;
 use crate::sandboxing::SandboxManager;
 use crate::tools::network_approval::DeferredNetworkApproval;
@@ -112,6 +113,7 @@ impl ToolOrchestrator {
         let otel_tn = &tool_ctx.tool_name;
         let otel_ci = &tool_ctx.call_id;
         let otel_user = ToolDecisionSource::User;
+        let otel_automated_reviewer = ToolDecisionSource::AutomatedReviewer;
         let otel_cfg = ToolDecisionSource::Config;
 
         // 1) Approval
@@ -136,12 +138,22 @@ impl ToolOrchestrator {
                     network_approval_context: None,
                 };
                 let decision = tool.start_approval_async(req, approval_ctx).await;
+                let otel_source = if routes_approval_to_guardian(turn_ctx) {
+                    otel_automated_reviewer.clone()
+                } else {
+                    otel_user.clone()
+                };
 
-                otel.tool_decision(otel_tn, otel_ci, &decision, otel_user.clone());
+                otel.tool_decision(otel_tn, otel_ci, &decision, otel_source);
 
                 match decision {
                     ReviewDecision::Denied | ReviewDecision::Abort => {
-                        return Err(ToolError::Rejected("rejected by user".to_string()));
+                        let reason = if routes_approval_to_guardian(turn_ctx) {
+                            GUARDIAN_REJECTION_MESSAGE.to_string()
+                        } else {
+                            "rejected by user".to_string()
+                        };
+                        return Err(ToolError::Rejected(reason));
                     }
                     ReviewDecision::Approved
                     | ReviewDecision::ApprovedExecpolicyAmendment { .. }
@@ -179,7 +191,6 @@ impl ToolOrchestrator {
 
         // Platform-specific flag gating is handled by SandboxManager::select_initial
         // via crate::safety::get_platform_sandbox(..).
-        let use_linux_sandbox_bwrap = turn_ctx.features.enabled(Feature::UseLinuxSandboxBwrap);
         let initial_attempt = SandboxAttempt {
             sandbox: initial_sandbox,
             policy: &turn_ctx.sandbox_policy,
@@ -189,7 +200,7 @@ impl ToolOrchestrator {
             manager: &self.sandbox,
             sandbox_cwd: &turn_ctx.cwd,
             codex_linux_sandbox_exe: turn_ctx.codex_linux_sandbox_exe.as_ref(),
-            use_linux_sandbox_bwrap,
+            use_legacy_landlock: turn_ctx.features.use_legacy_landlock(),
             windows_sandbox_level: turn_ctx.windows_sandbox_level,
         };
 
@@ -232,8 +243,9 @@ impl ToolOrchestrator {
                         network_policy_decision,
                     })));
                 }
-                // Under `Never` or `OnRequest`, do not retry without sandbox; surface a concise
-                // sandbox denial that preserves the original output.
+                // Under `Never` or `OnRequest`, do not retry without sandbox;
+                // surface a concise sandbox denial that preserves the
+                // original output.
                 if !tool.wants_no_sandbox_approval(approval_policy) {
                     let allow_on_request_network_prompt =
                         matches!(approval_policy, AskForApproval::OnRequest)
@@ -276,11 +288,21 @@ impl ToolOrchestrator {
                     };
 
                     let decision = tool.start_approval_async(req, approval_ctx).await;
-                    otel.tool_decision(otel_tn, otel_ci, &decision, otel_user);
+                    let otel_source = if routes_approval_to_guardian(turn_ctx) {
+                        otel_automated_reviewer
+                    } else {
+                        otel_user
+                    };
+                    otel.tool_decision(otel_tn, otel_ci, &decision, otel_source);
 
                     match decision {
                         ReviewDecision::Denied | ReviewDecision::Abort => {
-                            return Err(ToolError::Rejected("rejected by user".to_string()));
+                            let reason = if routes_approval_to_guardian(turn_ctx) {
+                                GUARDIAN_REJECTION_MESSAGE.to_string()
+                            } else {
+                                "rejected by user".to_string()
+                            };
+                            return Err(ToolError::Rejected(reason));
                         }
                         ReviewDecision::Approved
                         | ReviewDecision::ApprovedExecpolicyAmendment { .. }
@@ -305,7 +327,7 @@ impl ToolOrchestrator {
                     manager: &self.sandbox,
                     sandbox_cwd: &turn_ctx.cwd,
                     codex_linux_sandbox_exe: None,
-                    use_linux_sandbox_bwrap,
+                    use_legacy_landlock: turn_ctx.features.use_legacy_landlock(),
                     windows_sandbox_level: turn_ctx.windows_sandbox_level,
                 };
 

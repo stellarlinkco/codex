@@ -104,7 +104,7 @@ impl SpreadsheetConditionalFormatCollection {
         let sheet = artifact.sheet_lookup(
             "conditional_format_collection",
             Some(&self.sheet_name),
-            None,
+            /*index*/ None,
         )?;
         Ok(sheet.list_conditional_formats(Some(&self.range()?)))
     }
@@ -133,7 +133,7 @@ impl SpreadsheetArtifact {
         action: &str,
         sheet_name: &str,
     ) -> Result<(), SpreadsheetArtifactError> {
-        let sheet = self.sheet_lookup(action, Some(sheet_name), None)?;
+        let sheet = self.sheet_lookup(action, Some(sheet_name), /*index*/ None)?;
         for format in &sheet.conditional_formats {
             validate_conditional_format(self, format, action)?;
         }
@@ -147,7 +147,7 @@ impl SpreadsheetArtifact {
         mut format: SpreadsheetConditionalFormat,
     ) -> Result<u32, SpreadsheetArtifactError> {
         validate_conditional_format(self, &format, action)?;
-        let sheet = self.sheet_lookup_mut(action, Some(sheet_name), None)?;
+        let sheet = self.sheet_lookup_mut(action, Some(sheet_name), /*index*/ None)?;
         let next_id = sheet
             .conditional_formats
             .iter()
@@ -171,7 +171,7 @@ impl SpreadsheetArtifact {
         sheet_name: &str,
         id: u32,
     ) -> Result<(), SpreadsheetArtifactError> {
-        let sheet = self.sheet_lookup_mut(action, Some(sheet_name), None)?;
+        let sheet = self.sheet_lookup_mut(action, Some(sheet_name), /*index*/ None)?;
         let previous_len = sheet.conditional_formats.len();
         sheet.conditional_formats.retain(|entry| entry.id != id);
         if sheet.conditional_formats.len() == previous_len {

@@ -97,7 +97,7 @@ impl SpreadsheetArtifact {
             .iter()
             .zip(output_paths)
             .map(|(sheet, path)| {
-                let html = sheet.render_html(None, options)?;
+                let html = sheet.render_html(/*range*/ None, options)?;
                 write_rendered_output(&path, &html)?;
                 Ok(SpreadsheetRenderedOutput { path, html })
             })
@@ -116,7 +116,7 @@ impl SpreadsheetArtifact {
             options.output_path.as_deref(),
             &format!("render_{}", sanitize_file_component(&sheet.name)),
         );
-        let html = sheet.render_html(None, options)?;
+        let html = sheet.render_html(/*range*/ None, options)?;
         write_rendered_output(&path, &html)?;
         Ok(SpreadsheetRenderedOutput { path, html })
     }
@@ -164,11 +164,11 @@ fn render_viewport(
     };
     let visible_columns = options
         .width
-        .map(|width| estimated_visible_count(width, 96.0, options.scale))
+        .map(|width| estimated_visible_count(width, /*cell_size*/ 96.0, options.scale))
         .unwrap_or(base.width() as u32);
     let visible_rows = options
         .height
-        .map(|height| estimated_visible_count(height, 28.0, options.scale))
+        .map(|height| estimated_visible_count(height, /*cell_size*/ 28.0, options.scale))
         .unwrap_or(base.height() as u32);
 
     let half_columns = visible_columns / 2;

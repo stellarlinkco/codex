@@ -8,6 +8,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use codex_features::Feature;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
@@ -34,9 +35,9 @@ use uuid::Uuid;
 use crate::client_common::tools::ToolSpec;
 use crate::codex::Session;
 use crate::codex::TurnContext;
+use crate::exec::ExecCapturePolicy;
 use crate::exec::ExecExpiration;
 use crate::exec_env::create_env;
-use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
 use crate::sandboxing::CommandSpec;
 use crate::sandboxing::SandboxManager;
@@ -596,6 +597,26 @@ impl JsReplManager {
     fn summarize_tool_call_response(response: &ResponseInputItem) -> JsReplToolCallResponseSummary {
         match response {
             ResponseInputItem::Message { content, .. } => Self::summarize_message_payload(content),
+            ResponseInputItem::ToolSearchOutput { tools, .. } => {
+                let payload_text = serde_json::to_string(tools).ok();
+                JsReplToolCallResponseSummary {
+                    response_type: Some("tool_search_output".to_string()),
+                    payload_kind: Some(JsReplToolCallPayloadKind::FunctionText),
+                    payload_text_preview: payload_text.as_deref().and_then(|text| {
+                        (!text.is_empty()).then(|| {
+                            truncate_text(
+                                text,
+                                TruncationPolicy::Bytes(
+                                    JS_REPL_TOOL_RESPONSE_TEXT_PREVIEW_MAX_BYTES,
+                                ),
+                            )
+                        })
+                    }),
+                    payload_text_length: payload_text.as_ref().map(String::len),
+                    payload_item_count: Some(tools.len()),
+                    ..Default::default()
+                }
+            }
             ResponseInputItem::FunctionCallOutput { output, .. } => {
                 let payload_kind = if output.content_items().is_some() {
                     JsReplToolCallPayloadKind::FunctionContentItems
@@ -620,34 +641,31 @@ impl JsReplManager {
                     output,
                 )
             }
-            ResponseInputItem::McpToolCallOutput { result, .. } => match result {
-                Ok(result) => {
-                    let output = FunctionCallOutputPayload::from(result);
-                    let mut summary = Self::summarize_function_output_payload(
-                        "mcp_tool_call_output",
-                        JsReplToolCallPayloadKind::McpResult,
-                        &output,
-                    );
-                    summary.payload_item_count = Some(result.content.len());
-                    summary.structured_content_present = Some(result.structured_content.is_some());
-                    summary.result_is_error = Some(result.is_error.unwrap_or(false));
-                    summary
-                }
-                Err(error) => {
-                    let mut summary = Self::summarize_text_payload(
-                        Some("mcp_tool_call_output"),
-                        JsReplToolCallPayloadKind::McpErrorResult,
-                        error,
-                    );
-                    summary.result_is_error = Some(true);
-                    summary
-                }
-            },
+            ResponseInputItem::McpToolCallOutput { output, .. } => {
+                let payload = output.as_function_call_output_payload();
+                let mut summary = Self::summarize_function_output_payload(
+                    "mcp_tool_call_output",
+                    if output.is_error == Some(true) {
+                        JsReplToolCallPayloadKind::McpErrorResult
+                    } else {
+                        JsReplToolCallPayloadKind::McpResult
+                    },
+                    &payload,
+                );
+                summary.payload_item_count = Some(output.content.len());
+                summary.structured_content_present = Some(output.structured_content.is_some());
+                summary.result_is_error = Some(output.is_error.unwrap_or(false));
+                summary
+            }
         }
     }
 
     fn summarize_tool_call_error(error: &str) -> JsReplToolCallResponseSummary {
-        Self::summarize_text_payload(None, JsReplToolCallPayloadKind::Error, error)
+        Self::summarize_text_payload(
+            /*response_type*/ None,
+            JsReplToolCallPayloadKind::Error,
+            error,
+        )
     }
 
     pub async fn reset(&self) -> Result<(), FunctionCallError> {
@@ -773,7 +791,7 @@ impl JsReplManager {
                     with_model_kernel_failure_message(
                         "js_repl kernel closed unexpectedly",
                         "response_channel_closed",
-                        None,
+                        /*stream_error*/ None,
                         &snapshot,
                     )
                 } else {
@@ -839,6 +857,7 @@ impl JsReplManager {
             cwd: turn.cwd.clone(),
             env,
             expiration: ExecExpiration::DefaultTimeout,
+            capture_policy: ExecCapturePolicy::ShellTool,
             sandbox_permissions: SandboxPermissions::UseDefault,
             additional_permissions: None,
             justification: None,
@@ -871,10 +890,9 @@ impl JsReplManager {
                 #[cfg(target_os = "macos")]
                 macos_seatbelt_profile_extensions: None,
                 codex_linux_sandbox_exe: turn.codex_linux_sandbox_exe.as_ref(),
-                use_linux_sandbox_bwrap: turn
-                    .features
-                    .enabled(crate::features::Feature::UseLinuxSandboxBwrap),
+                use_legacy_landlock: turn.features.use_legacy_landlock(),
                 windows_sandbox_level: turn.windows_sandbox_level,
+                windows_sandbox_private_desktop: false,
             })
             .map_err(|err| format!("failed to configure sandbox for js_repl: {err}"))?;
 
@@ -1318,7 +1336,13 @@ impl JsReplManager {
         if is_js_repl_internal_tool(&req.tool_name) {
             let error = "js_repl cannot invoke itself".to_string();
             let summary = Self::summarize_tool_call_error(&error);
-            Self::log_tool_call_response(&req, false, &summary, None, Some(&error));
+            Self::log_tool_call_response(
+                &req,
+                /*ok*/ false,
+                &summary,
+                /*response*/ None,
+                Some(&error),
+            );
             return RunToolResult {
                 id: req.id,
                 ok: false,
@@ -1338,36 +1362,43 @@ impl JsReplManager {
 
         let router = ToolRouter::from_config(
             &exec.turn.tools_config,
-            Some(
-                mcp_tools
-                    .into_iter()
-                    .map(|(name, tool)| (name, tool.tool))
-                    .collect(),
-            ),
-            None,
-            exec.turn.dynamic_tools.as_slice(),
+            crate::tools::router::ToolRouterParams {
+                mcp_tools: Some(
+                    mcp_tools
+                        .into_iter()
+                        .map(|(name, tool)| (name, tool.tool))
+                        .collect(),
+                ),
+                app_tools: None,
+                discoverable_tools: None,
+                dynamic_tools: exec.turn.dynamic_tools.as_slice(),
+            },
         );
 
-        let payload =
-            if let Some((server, tool)) = exec.session.parse_mcp_tool_name(&req.tool_name).await {
-                crate::tools::context::ToolPayload::Mcp {
-                    server,
-                    tool,
-                    raw_arguments: req.arguments.clone(),
-                }
-            } else if is_freeform_tool(&router.specs(), &req.tool_name) {
-                crate::tools::context::ToolPayload::Custom {
-                    input: req.arguments.clone(),
-                }
-            } else {
-                crate::tools::context::ToolPayload::Function {
-                    arguments: req.arguments.clone(),
-                }
-            };
+        let payload = if let Some((server, tool)) = exec
+            .session
+            .parse_mcp_tool_name(&req.tool_name, &None)
+            .await
+        {
+            crate::tools::context::ToolPayload::Mcp {
+                server,
+                tool,
+                raw_arguments: req.arguments.clone(),
+            }
+        } else if is_freeform_tool(&router.specs(), &req.tool_name) {
+            crate::tools::context::ToolPayload::Custom {
+                input: req.arguments.clone(),
+            }
+        } else {
+            crate::tools::context::ToolPayload::Function {
+                arguments: req.arguments.clone(),
+            }
+        };
 
         let tool_name = req.tool_name.clone();
         let call = crate::tools::router::ToolCall {
             tool_name: tool_name.clone(),
+            tool_namespace: None,
             call_id: req.id.clone(),
             payload,
         };
@@ -1377,7 +1408,7 @@ impl JsReplManager {
         let tracker = Arc::clone(&exec.tracker);
 
         match router
-            .dispatch_tool_call(
+            .dispatch_tool_call_with_code_mode_result(
                 session.clone(),
                 turn,
                 tracker,
@@ -1387,34 +1418,35 @@ impl JsReplManager {
             .await
         {
             Ok(response) => {
-                let summary = Self::summarize_tool_call_response(&response);
-                match serde_json::to_value(response) {
-                    Ok(value) => {
-                        Self::log_tool_call_response(&req, true, &summary, Some(&value), None);
-                        RunToolResult {
-                            id: req.id,
-                            ok: true,
-                            response: Some(value),
-                            error: None,
-                        }
-                    }
-                    Err(err) => {
-                        let error = format!("failed to serialize tool output: {err}");
-                        let summary = Self::summarize_tool_call_error(&error);
-                        Self::log_tool_call_response(&req, false, &summary, None, Some(&error));
-                        RunToolResult {
-                            id: req.id,
-                            ok: false,
-                            response: None,
-                            error: Some(error),
-                        }
-                    }
+                let response_item = response
+                    .result
+                    .to_response_item(&response.call_id, &response.payload);
+                let summary = Self::summarize_tool_call_response(&response_item);
+                let value = response.result.code_mode_result(&response.payload);
+                Self::log_tool_call_response(
+                    &req,
+                    /*ok*/ true,
+                    &summary,
+                    Some(&value),
+                    /*error*/ None,
+                );
+                RunToolResult {
+                    id: req.id,
+                    ok: true,
+                    response: Some(value),
+                    error: None,
                 }
             }
             Err(err) => {
                 let error = err.to_string();
                 let summary = Self::summarize_tool_call_error(&error);
-                Self::log_tool_call_response(&req, false, &summary, None, Some(&error));
+                Self::log_tool_call_response(
+                    &req,
+                    /*ok*/ false,
+                    &summary,
+                    /*response*/ None,
+                    Some(&error),
+                );
                 RunToolResult {
                     id: req.id,
                     ok: false,

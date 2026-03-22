@@ -513,7 +513,7 @@ impl SpreadsheetArtifact {
 
     pub fn resolve_cell_format(&self, style_index: u32) -> Option<SpreadsheetCellFormat> {
         let format = self.cell_formats.get(&style_index)?.clone();
-        resolve_cell_format_recursive(&self.cell_formats, &format, 0)
+        resolve_cell_format_recursive(&self.cell_formats, &format, /*depth*/ 0)
     }
 
     pub fn cell_format_summary(&self, style_index: u32) -> Option<SpreadsheetCellFormatSummary> {

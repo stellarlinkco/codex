@@ -19,7 +19,7 @@ pub async fn handle(
     turn: Arc<TurnContext>,
     call_id: String,
     arguments: String,
-) -> Result<ToolOutput, FunctionCallError> {
+) -> Result<FunctionToolOutput, FunctionCallError> {
     let args: WaitArgs = parse_arguments(&arguments)?;
     if args.ids.is_empty() {
         return Err(FunctionCallError::RespondToModel(
@@ -149,8 +149,7 @@ pub async fn handle(
         FunctionCallError::Fatal(format!("failed to serialize wait result: {err}"))
     })?;
 
-    Ok(ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(content),
-        success: None,
-    })
+    Ok(FunctionToolOutput::from_text(
+        content, /*success*/ None,
+    ))
 }

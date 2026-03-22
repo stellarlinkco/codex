@@ -183,7 +183,7 @@ impl UnifiedExecProcessManager {
             context.session.as_ref(),
             context.turn.as_ref(),
             &context.call_id,
-            None,
+            /*turn_diff_tracker*/ None,
         );
         let emitter = ToolEmitter::unified_exec(
             &request.command,
@@ -573,8 +573,10 @@ impl UnifiedExecProcessManager {
             Some(context.session.conversation_id),
         ));
         let mut orchestrator = ToolOrchestrator::new();
-        let mut runtime =
-            UnifiedExecRuntime::new(self, context.turn.tools_config.unified_exec_backend);
+        let mut runtime = UnifiedExecRuntime::new(
+            self,
+            context.turn.tools_config.unified_exec_shell_mode.clone(),
+        );
         let exec_approval_requirement = context
             .session
             .services
@@ -600,6 +602,7 @@ impl UnifiedExecProcessManager {
             tty: request.tty,
             sandbox_permissions: request.sandbox_permissions,
             additional_permissions: request.additional_permissions.clone(),
+            additional_permissions_preapproved: request.additional_permissions_preapproved,
             justification: request.justification.clone(),
             exec_approval_requirement,
         };

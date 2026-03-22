@@ -41,7 +41,7 @@ pub async fn handle(
     turn: Arc<TurnContext>,
     call_id: String,
     arguments: String,
-) -> Result<ToolOutput, FunctionCallError> {
+) -> Result<FunctionToolOutput, FunctionCallError> {
     let SpawnTeamArgs {
         team_id: provided_team_id,
         members: requested_members,
@@ -178,7 +178,10 @@ pub async fn handle(
         let spawn_result = match spawn_result {
             Ok(result) => Ok(result),
             Err(err @ CodexErr::AgentLimitReached { .. }) => {
-                if reap_finished_agents_for_slots(session.as_ref(), turn.as_ref(), 1).await == 0 {
+                if reap_finished_agents_for_slots(session.as_ref(), turn.as_ref(), /*slots*/ 1)
+                    .await
+                    == 0
+                {
                     Err(err)
                 } else {
                     session
@@ -372,8 +375,5 @@ pub async fn handle(
         FunctionCallError::Fatal(format!("failed to serialize spawn_team result: {err}"))
     })?;
 
-    Ok(ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(content),
-        success: Some(true),
-    })
+    Ok(FunctionToolOutput::from_text(content, Some(true)))
 }

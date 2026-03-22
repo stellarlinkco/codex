@@ -179,6 +179,12 @@ impl Default for NetworkApprovalService {
 }
 
 impl NetworkApprovalService {
+    pub(crate) async fn sync_session_approved_hosts_to(&self, target: &NetworkApprovalService) {
+        let approved_hosts = self.session_approved_hosts.lock().await.clone();
+        let mut target_approved_hosts = target.session_approved_hosts.lock().await;
+        *target_approved_hosts = approved_hosts;
+    }
+
     async fn register_call(&self, registration_id: String) {
         let mut active_calls = self.active_calls.lock().await;
         let key = registration_id.clone();
@@ -336,14 +342,14 @@ impl NetworkApprovalService {
             .request_command_approval(
                 turn_context.as_ref(),
                 approval_id,
-                None,
+                /*approval_id*/ None,
                 prompt_command,
                 turn_context.cwd.clone(),
                 Some(prompt_reason),
                 Some(network_approval_context.clone()),
-                None,
-                None,
-                None,
+                /*proposed_execpolicy_amendment*/ None,
+                /*additional_permissions*/ None,
+                /*skill_metadata*/ None,
                 available_decisions,
             )
             .await;

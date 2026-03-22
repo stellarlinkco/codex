@@ -27,9 +27,9 @@ use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableItem;
 use crate::tui::FrameRequester;
 use bottom_pane_view::BottomPaneView;
-use codex_core::features::Features;
 use codex_core::plugins::PluginCapabilitySummary;
 use codex_core::skills::model::SkillMetadata;
+use codex_features::Features;
 use codex_file_search::FileMatch;
 use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::user_input::TextElement;
@@ -47,6 +47,7 @@ mod mcp_server_elicitation;
 mod multi_select_picker;
 mod request_user_input;
 mod status_line_setup;
+mod title_setup;
 pub(crate) use app_link_view::AppLinkView;
 pub(crate) use app_link_view::AppLinkViewParams;
 pub(crate) use approval_overlay::ApprovalOverlay;
@@ -98,6 +99,8 @@ pub(crate) use skills_toggle_view::SkillsToggleView;
 pub(crate) use status_line_setup::StatusLineItem;
 pub(crate) use status_line_setup::StatusLinePreviewData;
 pub(crate) use status_line_setup::StatusLineSetupView;
+pub(crate) use title_setup::TerminalTitleItem;
+pub(crate) use title_setup::TerminalTitleSetupView;
 mod paste_burst;
 mod pending_input_preview;
 mod pending_thread_approvals;
@@ -703,14 +706,14 @@ impl BottomPane {
 
     pub(crate) fn show_esc_backtrack_hint(&mut self) {
         self.esc_backtrack_hint = true;
-        self.composer.set_esc_backtrack_hint(true);
+        self.composer.set_esc_backtrack_hint(/*show*/ true);
         self.request_redraw();
     }
 
     pub(crate) fn clear_esc_backtrack_hint(&mut self) {
         if self.esc_backtrack_hint {
             self.esc_backtrack_hint = false;
-            self.composer.set_esc_backtrack_hint(false);
+            self.composer.set_esc_backtrack_hint(/*show*/ false);
             self.request_redraw();
         }
     }
@@ -732,7 +735,7 @@ impl BottomPane {
                     ));
                 }
                 if let Some(status) = self.status.as_mut() {
-                    status.set_interrupt_hint_visible(true);
+                    status.set_interrupt_hint_visible(/*visible*/ true);
                 }
                 self.sync_status_inline_message();
                 self.request_redraw();
@@ -939,7 +942,7 @@ impl BottomPane {
         );
         self.pause_status_timer_for_modal();
         self.set_composer_input_enabled(
-            false,
+            /*enabled*/ false,
             Some("Answer the questions to continue.".to_string()),
         );
         self.push_view(Box::new(modal));
@@ -970,7 +973,7 @@ impl BottomPane {
         );
         self.pause_status_timer_for_modal();
         self.set_composer_input_enabled(
-            false,
+            /*enabled*/ false,
             Some("Respond to the MCP server request to continue.".to_string()),
         );
         self.push_view(Box::new(modal));
@@ -978,7 +981,7 @@ impl BottomPane {
 
     fn on_active_view_complete(&mut self) {
         self.resume_status_timer_after_modal();
-        self.set_composer_input_enabled(true, None);
+        self.set_composer_input_enabled(/*enabled*/ true, /*placeholder*/ None);
     }
 
     fn pause_status_timer_for_modal(&mut self) {
@@ -1081,12 +1084,15 @@ impl BottomPane {
         } else {
             let mut flex = FlexRenderable::new();
             if let Some(status) = &self.status {
-                flex.push(0, RenderableItem::Borrowed(status));
+                flex.push(/*flex*/ 0, RenderableItem::Borrowed(status));
             }
             // Avoid double-surfacing the same summary and avoid adding an extra
             // row while the status line is already visible.
             if self.status.is_none() && !self.unified_exec_footer.is_empty() {
-                flex.push(0, RenderableItem::Borrowed(&self.unified_exec_footer));
+                flex.push(
+                    /*flex*/ 0,
+                    RenderableItem::Borrowed(&self.unified_exec_footer),
+                );
             }
             let has_pending_thread_approvals = !self.pending_thread_approvals.is_empty();
             let has_pending_input = !self.pending_input_preview.queued_messages.is_empty()
@@ -1095,19 +1101,25 @@ impl BottomPane {
                 self.status.is_some() || !self.unified_exec_footer.is_empty();
             let has_inline_previews = has_pending_thread_approvals || has_pending_input;
             if has_inline_previews && has_status_or_footer {
-                flex.push(0, RenderableItem::Owned("".into()));
+                flex.push(/*flex*/ 0, RenderableItem::Owned("".into()));
             }
-            flex.push(1, RenderableItem::Borrowed(&self.pending_thread_approvals));
+            flex.push(
+                /*flex*/ 1,
+                RenderableItem::Borrowed(&self.pending_thread_approvals),
+            );
             if has_pending_thread_approvals && has_pending_input {
-                flex.push(0, RenderableItem::Owned("".into()));
+                flex.push(/*flex*/ 0, RenderableItem::Owned("".into()));
             }
-            flex.push(1, RenderableItem::Borrowed(&self.pending_input_preview));
+            flex.push(
+                /*flex*/ 1,
+                RenderableItem::Borrowed(&self.pending_input_preview),
+            );
             if !has_inline_previews && has_status_or_footer {
-                flex.push(0, RenderableItem::Owned("".into()));
+                flex.push(/*flex*/ 0, RenderableItem::Owned("".into()));
             }
             let mut flex2 = FlexRenderable::new();
-            flex2.push(1, RenderableItem::Owned(flex.into()));
-            flex2.push(0, RenderableItem::Borrowed(&self.composer));
+            flex2.push(/*flex*/ 1, RenderableItem::Owned(flex.into()));
+            flex2.push(/*flex*/ 0, RenderableItem::Borrowed(&self.composer));
             RenderableItem::Owned(Box::new(flex2))
         }
     }

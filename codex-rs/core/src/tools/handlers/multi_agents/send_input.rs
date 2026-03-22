@@ -20,7 +20,7 @@ pub async fn handle(
     turn: Arc<TurnContext>,
     call_id: String,
     arguments: String,
-) -> Result<ToolOutput, FunctionCallError> {
+) -> Result<FunctionToolOutput, FunctionCallError> {
     let args: SendInputArgs = parse_arguments(&arguments)?;
     let receiver_thread_id = agent_id(&args.id)?;
     let input_items = parse_collab_input(args.message, args.items)?;
@@ -40,8 +40,5 @@ pub async fn handle(
         FunctionCallError::Fatal(format!("failed to serialize send_input result: {err}"))
     })?;
 
-    Ok(ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(content),
-        success: Some(true),
-    })
+    Ok(FunctionToolOutput::from_text(content, Some(true)))
 }

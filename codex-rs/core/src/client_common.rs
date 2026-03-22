@@ -90,7 +90,9 @@ fn reserialize_shell_outputs(items: &mut [ResponseItem]) {
             shell_call_ids.insert(call_id.clone());
         }
         ResponseItem::FunctionCallOutput { call_id, output }
-        | ResponseItem::CustomToolCallOutput { call_id, output } => {
+        | ResponseItem::CustomToolCallOutput {
+            call_id, output, ..
+        } => {
             if shell_call_ids.remove(call_id)
                 && let Some(structured) = output
                     .text_content()
@@ -160,6 +162,7 @@ pub(crate) mod tools {
     use codex_protocol::config_types::WebSearchUserLocationType;
     use serde::Deserialize;
     use serde::Serialize;
+    use serde_json::Value;
 
     /// When serialized as JSON, this produces a valid "Tool" in the OpenAI
     /// Responses API.
@@ -168,6 +171,12 @@ pub(crate) mod tools {
     pub(crate) enum ToolSpec {
         #[serde(rename = "function")]
         Function(ResponsesApiTool),
+        #[serde(rename = "tool_search")]
+        ToolSearch {
+            execution: String,
+            description: String,
+            parameters: JsonSchema,
+        },
         #[serde(rename = "local_shell")]
         LocalShell {},
         #[serde(rename = "image_generation")]
@@ -197,6 +206,7 @@ pub(crate) mod tools {
         pub(crate) fn name(&self) -> &str {
             match self {
                 ToolSpec::Function(tool) => tool.name.as_str(),
+                ToolSpec::ToolSearch { .. } => "tool_search",
                 ToolSpec::LocalShell {} => "local_shell",
                 ToolSpec::ImageGeneration { .. } => "image_generation",
                 ToolSpec::WebSearch { .. } => "web_search",
@@ -263,11 +273,39 @@ pub(crate) mod tools {
     pub struct ResponsesApiTool {
         pub(crate) name: String,
         pub(crate) description: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) defer_loading: Option<bool>,
         /// TODO: Validation. When strict is set to true, the JSON schema,
         /// `required` and `additional_properties` must be present. All fields in
         /// `properties` must be present in `required`.
         pub(crate) strict: bool,
         pub(crate) parameters: JsonSchema,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        pub(crate) output_schema: Option<Value>,
+    }
+
+    #[derive(Debug, Clone, Serialize, PartialEq)]
+    #[serde(tag = "type")]
+    pub(crate) enum ToolSearchOutputTool {
+        #[allow(dead_code)]
+        #[serde(rename = "function")]
+        Function(ResponsesApiTool),
+        #[serde(rename = "namespace")]
+        Namespace(ResponsesApiNamespace),
+    }
+
+    #[derive(Debug, Clone, Serialize, PartialEq)]
+    pub(crate) struct ResponsesApiNamespace {
+        pub(crate) name: String,
+        pub(crate) description: String,
+        pub(crate) tools: Vec<ResponsesApiNamespaceTool>,
+    }
+
+    #[derive(Debug, Clone, Serialize, PartialEq)]
+    #[serde(tag = "type")]
+    pub(crate) enum ResponsesApiNamespaceTool {
+        #[serde(rename = "function")]
+        Function(ResponsesApiTool),
     }
 }
 

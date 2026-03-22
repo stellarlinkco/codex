@@ -85,6 +85,7 @@ impl ApplyPatchRuntime {
             ],
             cwd: req.action.cwd.clone(),
             expiration: req.timeout_ms.into(),
+            capture_policy: crate::exec::ExecCapturePolicy::ShellTool,
             // Pin a writable temp dir inside cwd so sandboxed self-invocation
             // does not depend on host TMPDIR access.
             env,
@@ -179,7 +180,13 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
 
             if let Some(reason) = retry_reason {
                 let rx_approve = session
-                    .request_patch_approval(turn, call_id, changes.clone(), Some(reason), None)
+                    .request_patch_approval(
+                        turn,
+                        call_id,
+                        changes.clone(),
+                        Some(reason),
+                        /*grant_root*/ None,
+                    )
                     .await;
                 return rx_approve.await.unwrap_or_default();
             }
@@ -190,7 +197,9 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
                 approval_keys.clone(),
                 || async move {
                     let rx_approve = session
-                        .request_patch_approval(turn, call_id, changes, None, None)
+                        .request_patch_approval(
+                            turn, call_id, changes, /*reason*/ None, /*grant_root*/ None,
+                        )
                         .await;
                     rx_approve.await.unwrap_or_default()
                 },
@@ -212,6 +221,7 @@ impl Approvable<ApplyPatchRequest> for ApplyPatchRuntime {
             AskForApproval::Reject(reject_config) => !reject_config.rejects_sandbox_approval(),
             AskForApproval::OnFailure => true,
             AskForApproval::OnRequest => true,
+            AskForApproval::Granular(_) => true,
             AskForApproval::UnlessTrusted => true,
         }
     }
@@ -240,7 +250,7 @@ impl ToolRuntime<ApplyPatchRequest, ExecToolCallOutput> for ApplyPatchRuntime {
         let spec =
             Self::build_command_spec(req, additional_permissions, &ctx.turn.config.codex_home)?;
         let env = attempt
-            .env_for(spec, None)
+            .env_for(spec, /*network*/ None)
             .map_err(|err| ToolError::Codex(err.into()))?;
         let out = execute_env(env, Self::stdout_stream(ctx))
             .await

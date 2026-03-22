@@ -27,6 +27,7 @@ use codex_app_server_protocol::CommandExecutionOutputDeltaNotification;
 use codex_app_server_protocol::CommandExecutionRequestApprovalParams;
 use codex_app_server_protocol::CommandExecutionRequestApprovalResponse;
 use codex_app_server_protocol::CommandExecutionRequestApprovalSkillMetadata;
+use codex_app_server_protocol::CommandExecutionSource;
 use codex_app_server_protocol::CommandExecutionStatus;
 use codex_app_server_protocol::ContextCompactedNotification;
 use codex_app_server_protocol::DeprecationNoticeNotification;
@@ -261,6 +262,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 let notification = ThreadRealtimeStartedNotification {
                     thread_id: conversation_id.to_string(),
                     session_id: event.session_id,
+                    version: event.version,
                 };
                 outgoing
                     .send_server_notification(ServerNotification::ThreadRealtimeStarted(
@@ -703,7 +705,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 tokio::spawn(async move {
                     on_request_permissions_response(
                         request.call_id,
-                        requested_permissions,
+                        requested_permissions.into(),
                         pending_request_id,
                         rx,
                         conversation,
@@ -858,6 +860,8 @@ pub(crate) async fn apply_bespoke_event_handling(
                 sender_thread_id: begin_event.sender_thread_id.to_string(),
                 receiver_thread_ids: Vec::new(),
                 prompt: Some(begin_event.prompt),
+                model: Some(begin_event.model),
+                reasoning_effort: Some(begin_event.reasoning_effort),
                 agents_states: HashMap::new(),
             };
             let notification = ItemStartedNotification {
@@ -895,6 +899,8 @@ pub(crate) async fn apply_bespoke_event_handling(
                 sender_thread_id: end_event.sender_thread_id.to_string(),
                 receiver_thread_ids,
                 prompt: Some(end_event.prompt),
+                model: Some(end_event.model),
+                reasoning_effort: Some(end_event.reasoning_effort),
                 agents_states,
             };
             let notification = ItemCompletedNotification {
@@ -915,6 +921,8 @@ pub(crate) async fn apply_bespoke_event_handling(
                 sender_thread_id: begin_event.sender_thread_id.to_string(),
                 receiver_thread_ids,
                 prompt: Some(begin_event.prompt),
+                model: None,
+                reasoning_effort: None,
                 agents_states: HashMap::new(),
             };
             let notification = ItemStartedNotification {
@@ -941,6 +949,8 @@ pub(crate) async fn apply_bespoke_event_handling(
                 sender_thread_id: end_event.sender_thread_id.to_string(),
                 receiver_thread_ids: vec![receiver_id.clone()],
                 prompt: Some(end_event.prompt),
+                model: None,
+                reasoning_effort: None,
                 agents_states: [(receiver_id, received_status)].into_iter().collect(),
             };
             let notification = ItemCompletedNotification {
@@ -965,6 +975,8 @@ pub(crate) async fn apply_bespoke_event_handling(
                 sender_thread_id: begin_event.sender_thread_id.to_string(),
                 receiver_thread_ids,
                 prompt: None,
+                model: None,
+                reasoning_effort: None,
                 agents_states: HashMap::new(),
             };
             let notification = ItemStartedNotification {
@@ -1001,6 +1013,8 @@ pub(crate) async fn apply_bespoke_event_handling(
                 sender_thread_id: end_event.sender_thread_id.to_string(),
                 receiver_thread_ids,
                 prompt: None,
+                model: None,
+                reasoning_effort: None,
                 agents_states,
             };
             let notification = ItemCompletedNotification {
@@ -1020,6 +1034,8 @@ pub(crate) async fn apply_bespoke_event_handling(
                 sender_thread_id: begin_event.sender_thread_id.to_string(),
                 receiver_thread_ids: vec![begin_event.receiver_thread_id.to_string()],
                 prompt: None,
+                model: None,
+                reasoning_effort: None,
                 agents_states: HashMap::new(),
             };
             let notification = ItemStartedNotification {
@@ -1060,6 +1076,8 @@ pub(crate) async fn apply_bespoke_event_handling(
                 sender_thread_id: end_event.sender_thread_id.to_string(),
                 receiver_thread_ids: vec![receiver_id],
                 prompt: None,
+                model: None,
+                reasoning_effort: None,
                 agents_states,
             };
             let notification = ItemCompletedNotification {
@@ -1415,6 +1433,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 command,
                 cwd,
                 process_id,
+                source: exec_command_begin_event.source.into(),
                 status: CommandExecutionStatus::InProgress,
                 command_actions,
                 aggregated_output: None,
@@ -1494,6 +1513,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 exit_code,
                 duration,
                 status,
+                source,
                 ..
             } = exec_command_end_event;
 
@@ -1524,6 +1544,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                 command: shlex_join(&command),
                 cwd,
                 process_id,
+                source: source.into(),
                 status,
                 command_actions,
                 aggregated_output,
@@ -1796,6 +1817,7 @@ async fn complete_command_execution_item(
         command,
         cwd,
         process_id,
+        source: CommandExecutionSource::default(),
         status,
         command_actions,
         aggregated_output: None,
@@ -1869,7 +1891,7 @@ async fn handle_turn_interrupted(
         conversation_id,
         event_turn_id,
         TurnStatus::Interrupted,
-        None,
+        /*error*/ None,
         outgoing,
     )
     .await;
@@ -2245,7 +2267,8 @@ fn request_permissions_response_from_client_result(
         permissions: intersect_permission_profiles(
             requested_permissions,
             response.permissions.into(),
-        ),
+        )
+        .into(),
         scope: response.scope.to_core(),
     })
 }
@@ -2259,7 +2282,7 @@ fn render_review_output_text(output: &ReviewOutputEvent) -> String {
         sections.push(explanation.to_string());
     }
     if !output.findings.is_empty() {
-        let findings = format_review_findings_block(&output.findings, None);
+        let findings = format_review_findings_block(&output.findings, /*selection*/ None);
         let trimmed = findings.trim();
         if !trimmed.is_empty() {
             sections.push(trimmed.to_string());
@@ -2457,7 +2480,7 @@ async fn on_command_execution_request_approval_response(
             item_id.clone(),
             completion_item.command,
             completion_item.cwd,
-            None,
+            /*process_id*/ None,
             completion_item.command_actions,
             status,
             &outgoing,
@@ -2487,6 +2510,8 @@ fn collab_resume_begin_item(
         sender_thread_id: begin_event.sender_thread_id.to_string(),
         receiver_thread_ids: vec![begin_event.receiver_thread_id.to_string()],
         prompt: None,
+        model: None,
+        reasoning_effort: None,
         agents_states: HashMap::new(),
     }
 }
@@ -2511,6 +2536,8 @@ fn collab_resume_end_item(end_event: codex_protocol::protocol::CollabResumeEndEv
         sender_thread_id: end_event.sender_thread_id.to_string(),
         receiver_thread_ids: vec![receiver_id],
         prompt: None,
+        model: None,
+        reasoning_effort: None,
         agents_states,
     }
 }

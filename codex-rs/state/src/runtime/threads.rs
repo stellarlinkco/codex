@@ -10,9 +10,12 @@ SELECT
     created_at,
     updated_at,
     source,
+    agent_path,
     agent_nickname,
     agent_role,
     model_provider,
+    model,
+    reasoning_effort,
     cwd,
     cli_version,
     title,
@@ -50,7 +53,7 @@ WHERE id = ?
     ) -> anyhow::Result<Option<Vec<DynamicToolSpec>>> {
         let rows = sqlx::query(
             r#"
-SELECT name, description, input_schema
+SELECT name, description, input_schema, defer_loading
 FROM thread_dynamic_tools
 WHERE thread_id = ?
 ORDER BY position ASC
@@ -70,9 +73,74 @@ ORDER BY position ASC
                 name: row.try_get("name")?,
                 description: row.try_get("description")?,
                 input_schema,
+                defer_loading: row.try_get("defer_loading")?,
             });
         }
         Ok(Some(tools))
+    }
+
+    pub async fn upsert_thread_spawn_edge(
+        &self,
+        parent_thread_id: ThreadId,
+        child_thread_id: ThreadId,
+        status: crate::DirectionalThreadSpawnEdgeStatus,
+    ) -> anyhow::Result<()> {
+        sqlx::query(
+            r#"
+INSERT INTO thread_spawn_edges (
+    parent_thread_id,
+    child_thread_id,
+    status
+) VALUES (?, ?, ?)
+ON CONFLICT(child_thread_id) DO UPDATE SET
+    parent_thread_id = excluded.parent_thread_id,
+    status = excluded.status
+            "#,
+        )
+        .bind(parent_thread_id.to_string())
+        .bind(child_thread_id.to_string())
+        .bind(status.as_ref())
+        .execute(self.pool.as_ref())
+        .await?;
+        Ok(())
+    }
+
+    pub async fn set_thread_spawn_edge_status(
+        &self,
+        child_thread_id: ThreadId,
+        status: crate::DirectionalThreadSpawnEdgeStatus,
+    ) -> anyhow::Result<()> {
+        sqlx::query("UPDATE thread_spawn_edges SET status = ? WHERE child_thread_id = ?")
+            .bind(status.as_ref())
+            .bind(child_thread_id.to_string())
+            .execute(self.pool.as_ref())
+            .await?;
+        Ok(())
+    }
+
+    pub async fn list_thread_spawn_children_with_status(
+        &self,
+        parent_thread_id: ThreadId,
+        status: crate::DirectionalThreadSpawnEdgeStatus,
+    ) -> anyhow::Result<Vec<ThreadId>> {
+        let rows = sqlx::query(
+            r#"
+SELECT child_thread_id
+FROM thread_spawn_edges
+WHERE parent_thread_id = ?
+  AND status = ?
+ORDER BY child_thread_id
+            "#,
+        )
+        .bind(parent_thread_id.to_string())
+        .bind(status.as_ref())
+        .fetch_all(self.pool.as_ref())
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                ThreadId::try_from(row.try_get::<String, _>("child_thread_id")?).map_err(Into::into)
+            })
+            .collect()
     }
 
     /// Find a rollout path by thread id using the underlying database.
@@ -121,9 +189,12 @@ SELECT
     created_at,
     updated_at,
     source,
+    agent_path,
     agent_nickname,
     agent_role,
     model_provider,
+    model,
+    reasoning_effort,
     cwd,
     cli_version,
     title,
@@ -188,7 +259,7 @@ FROM threads
             model_providers,
             anchor,
             sort_key,
-            None,
+            /*search_term*/ None,
         );
         push_thread_order_and_limit(&mut builder, sort_key, limit);
 
@@ -203,7 +274,7 @@ FROM threads
 
     /// Insert or replace thread metadata directly.
     pub async fn upsert_thread(&self, metadata: &crate::ThreadMetadata) -> anyhow::Result<()> {
-        self.upsert_thread_with_creation_memory_mode(metadata, None)
+        self.upsert_thread_with_creation_memory_mode(metadata, /*creation_memory_mode*/ None)
             .await
     }
 
@@ -219,9 +290,12 @@ INSERT INTO threads (
     created_at,
     updated_at,
     source,
+    agent_path,
     agent_nickname,
     agent_role,
     model_provider,
+    model,
+    reasoning_effort,
     cwd,
     cli_version,
     title,
@@ -235,7 +309,7 @@ INSERT INTO threads (
     git_branch,
     git_origin_url,
     memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO NOTHING
             "#,
         )
@@ -244,9 +318,17 @@ ON CONFLICT(id) DO NOTHING
         .bind(datetime_to_epoch_seconds(metadata.created_at))
         .bind(datetime_to_epoch_seconds(metadata.updated_at))
         .bind(metadata.source.as_str())
+        .bind(metadata.agent_path.as_deref())
         .bind(metadata.agent_nickname.as_deref())
         .bind(metadata.agent_role.as_deref())
         .bind(metadata.model_provider.as_str())
+        .bind(metadata.model.as_deref())
+        .bind(
+            metadata
+                .reasoning_effort
+                .as_ref()
+                .map(crate::extract::enum_to_string),
+        )
         .bind(metadata.cwd.display().to_string())
         .bind(metadata.cli_version.as_str())
         .bind(metadata.title.as_str())
@@ -320,9 +402,12 @@ INSERT INTO threads (
     created_at,
     updated_at,
     source,
+    agent_path,
     agent_nickname,
     agent_role,
     model_provider,
+    model,
+    reasoning_effort,
     cwd,
     cli_version,
     title,
@@ -336,15 +421,18 @@ INSERT INTO threads (
     git_branch,
     git_origin_url,
     memory_mode
-) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(id) DO UPDATE SET
     rollout_path = excluded.rollout_path,
     created_at = excluded.created_at,
     updated_at = excluded.updated_at,
     source = excluded.source,
+    agent_path = excluded.agent_path,
     agent_nickname = excluded.agent_nickname,
     agent_role = excluded.agent_role,
     model_provider = excluded.model_provider,
+    model = excluded.model,
+    reasoning_effort = excluded.reasoning_effort,
     cwd = excluded.cwd,
     cli_version = excluded.cli_version,
     title = excluded.title,
@@ -364,9 +452,17 @@ ON CONFLICT(id) DO UPDATE SET
         .bind(datetime_to_epoch_seconds(metadata.created_at))
         .bind(datetime_to_epoch_seconds(metadata.updated_at))
         .bind(metadata.source.as_str())
+        .bind(metadata.agent_path.as_deref())
         .bind(metadata.agent_nickname.as_deref())
         .bind(metadata.agent_role.as_deref())
         .bind(metadata.model_provider.as_str())
+        .bind(metadata.model.as_deref())
+        .bind(
+            metadata
+                .reasoning_effort
+                .as_ref()
+                .map(crate::extract::enum_to_string),
+        )
         .bind(metadata.cwd.display().to_string())
         .bind(metadata.cli_version.as_str())
         .bind(metadata.title.as_str())
@@ -412,8 +508,9 @@ INSERT INTO thread_dynamic_tools (
     position,
     name,
     description,
-    input_schema
-) VALUES (?, ?, ?, ?, ?)
+    input_schema,
+    defer_loading
+) VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT(thread_id, position) DO NOTHING
                 "#,
             )
@@ -422,6 +519,7 @@ ON CONFLICT(thread_id, position) DO NOTHING
             .bind(tool.name.as_str())
             .bind(tool.description.as_str())
             .bind(input_schema)
+            .bind(tool.defer_loading)
             .execute(&mut *tx)
             .await?;
         }

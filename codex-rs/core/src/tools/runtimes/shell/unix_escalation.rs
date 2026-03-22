@@ -6,7 +6,6 @@ use crate::exec::ExecToolCallOutput;
 use crate::exec::SandboxType;
 use crate::exec::is_likely_sandbox_denied;
 use crate::exec_policy::prompt_is_rejected_by_policy;
-use crate::features::Feature;
 use crate::sandboxing::ExecRequest;
 use crate::sandboxing::SandboxPermissions;
 use crate::shell::ShellType;
@@ -23,6 +22,7 @@ use codex_execpolicy::Evaluation;
 use codex_execpolicy::MatchOptions;
 use codex_execpolicy::Policy;
 use codex_execpolicy::RuleMatch;
+use codex_features::Feature;
 use codex_protocol::approvals::ExecApprovalRequestSkillMetadata;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::MacOsSeatbeltProfileExtensions;
@@ -137,7 +137,7 @@ pub(super) async fn try_run_zsh_fork(
             .macos_seatbelt_profile_extensions
             .clone(),
         codex_linux_sandbox_exe: ctx.turn.codex_linux_sandbox_exe.clone(),
-        use_linux_sandbox_bwrap: ctx.turn.features.enabled(Feature::UseLinuxSandboxBwrap),
+        use_legacy_landlock: ctx.turn.features.use_legacy_landlock(),
     };
     let main_execve_wrapper_exe = ctx
         .session
@@ -246,7 +246,7 @@ pub(crate) async fn prepare_unified_exec_zsh_fork(
             .macos_seatbelt_profile_extensions
             .clone(),
         codex_linux_sandbox_exe: ctx.turn.codex_linux_sandbox_exe.clone(),
-        use_linux_sandbox_bwrap: ctx.turn.features.enabled(Feature::UseLinuxSandboxBwrap),
+        use_legacy_landlock: ctx.turn.features.use_legacy_landlock(),
     };
     let main_execve_wrapper_exe = ctx
         .session
@@ -412,9 +412,9 @@ impl CoreShellActionProvider {
                         approval_id,
                         command,
                         workdir,
-                        None,
-                        None,
-                        None,
+                        /*reason*/ None,
+                        /*network_approval_context*/ None,
+                        /*proposed_execpolicy_amendment*/ None,
                         additional_permissions,
                         skill_metadata,
                         Some(available_decisions),
@@ -433,7 +433,7 @@ impl CoreShellActionProvider {
             .session
             .services
             .skills_manager
-            .skills_for_cwd(&self.turn.cwd, force_reload)
+            .skills_for_cwd(&self.turn.cwd, &self.turn.config, force_reload)
             .await;
 
         let program_path = program.as_path();
@@ -793,7 +793,7 @@ struct CoreShellCommandExecutor {
     #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     macos_seatbelt_profile_extensions: Option<MacOsSeatbeltProfileExtensions>,
     codex_linux_sandbox_exe: Option<PathBuf>,
-    use_linux_sandbox_bwrap: bool,
+    use_legacy_landlock: bool,
 }
 
 struct PrepareSandboxedExecParams<'a> {
@@ -834,8 +834,10 @@ impl ShellCommandExecutor for CoreShellCommandExecutor {
                 env: exec_env,
                 network: self.network.clone(),
                 expiration: ExecExpiration::Cancellation(cancel_rx),
+                capture_policy: crate::exec::ExecCapturePolicy::ShellTool,
                 sandbox: self.sandbox,
                 windows_sandbox_level: self.windows_sandbox_level,
+                windows_sandbox_private_desktop: false,
                 sandbox_permissions: self.sandbox_permissions,
                 sandbox_policy: self.sandbox_policy.clone(),
                 file_system_sandbox_policy: self.file_system_sandbox_policy.clone(),
@@ -843,7 +845,7 @@ impl ShellCommandExecutor for CoreShellCommandExecutor {
                 justification: self.justification.clone(),
                 arg0: self.arg0.clone(),
             },
-            None,
+            /*stdout_stream*/ None,
             after_spawn,
         )
         .await?;
@@ -971,6 +973,7 @@ impl CoreShellCommandExecutor {
                     cwd: workdir.to_path_buf(),
                     env,
                     expiration: ExecExpiration::DefaultTimeout,
+                    capture_policy: crate::exec::ExecCapturePolicy::ShellTool,
                     sandbox_permissions: if additional_permissions.is_some() {
                         SandboxPermissions::WithAdditionalPermissions
                     } else {
@@ -989,8 +992,9 @@ impl CoreShellCommandExecutor {
                 #[cfg(target_os = "macos")]
                 macos_seatbelt_profile_extensions,
                 codex_linux_sandbox_exe: self.codex_linux_sandbox_exe.as_ref(),
-                use_linux_sandbox_bwrap: self.use_linux_sandbox_bwrap,
+                use_legacy_landlock: self.use_legacy_landlock,
                 windows_sandbox_level: self.windows_sandbox_level,
+                windows_sandbox_private_desktop: false,
             })?;
         if let Some(network) = exec_request.network.as_ref() {
             network.apply_to_env(&mut exec_request.env);

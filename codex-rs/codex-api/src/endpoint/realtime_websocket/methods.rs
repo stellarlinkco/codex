@@ -1,14 +1,13 @@
-use crate::endpoint::realtime_websocket::protocol::ConversationItem;
-use crate::endpoint::realtime_websocket::protocol::ConversationItemContent;
+use crate::endpoint::realtime_websocket::methods_common::conversation_handoff_append_message;
+use crate::endpoint::realtime_websocket::methods_common::conversation_item_create_message;
+use crate::endpoint::realtime_websocket::methods_common::session_update_session;
+use crate::endpoint::realtime_websocket::methods_common::websocket_intent;
 use crate::endpoint::realtime_websocket::protocol::RealtimeAudioFrame;
 use crate::endpoint::realtime_websocket::protocol::RealtimeEvent;
+use crate::endpoint::realtime_websocket::protocol::RealtimeEventParser;
 use crate::endpoint::realtime_websocket::protocol::RealtimeOutboundMessage;
 use crate::endpoint::realtime_websocket::protocol::RealtimeSessionConfig;
-use crate::endpoint::realtime_websocket::protocol::SessionAudio;
-use crate::endpoint::realtime_websocket::protocol::SessionAudioFormat;
-use crate::endpoint::realtime_websocket::protocol::SessionAudioInput;
-use crate::endpoint::realtime_websocket::protocol::SessionAudioOutput;
-use crate::endpoint::realtime_websocket::protocol::SessionUpdateSession;
+use crate::endpoint::realtime_websocket::protocol::RealtimeSessionMode;
 use crate::endpoint::realtime_websocket::protocol::parse_realtime_event;
 use crate::error::ApiError;
 use crate::provider::Provider;
@@ -193,11 +192,14 @@ pub struct RealtimeWebsocketConnection {
 pub struct RealtimeWebsocketWriter {
     stream: Arc<WsStream>,
     is_closed: Arc<AtomicBool>,
+    event_parser: RealtimeEventParser,
+    session_mode: RealtimeSessionMode,
 }
 
 #[derive(Clone)]
 pub struct RealtimeWebsocketEvents {
     rx_message: Arc<Mutex<mpsc::UnboundedReceiver<Result<Message, WsError>>>>,
+    event_parser: RealtimeEventParser,
     is_closed: Arc<AtomicBool>,
 }
 
@@ -239,6 +241,8 @@ impl RealtimeWebsocketConnection {
     fn new(
         stream: WsStream,
         rx_message: mpsc::UnboundedReceiver<Result<Message, WsError>>,
+        event_parser: RealtimeEventParser,
+        session_mode: RealtimeSessionMode,
     ) -> Self {
         let stream = Arc::new(stream);
         let is_closed = Arc::new(AtomicBool::new(false));
@@ -246,9 +250,12 @@ impl RealtimeWebsocketConnection {
             writer: RealtimeWebsocketWriter {
                 stream: Arc::clone(&stream),
                 is_closed: Arc::clone(&is_closed),
+                event_parser,
+                session_mode,
             },
             events: RealtimeWebsocketEvents {
                 rx_message: Arc::new(Mutex::new(rx_message)),
+                event_parser,
                 is_closed,
             },
         }
@@ -262,17 +269,8 @@ impl RealtimeWebsocketWriter {
     }
 
     pub async fn send_conversation_item_create(&self, text: String) -> Result<(), ApiError> {
-        self.send_json(RealtimeOutboundMessage::ConversationItemCreate {
-            item: ConversationItem {
-                kind: "message".to_string(),
-                role: "user".to_string(),
-                content: vec![ConversationItemContent {
-                    kind: "text".to_string(),
-                    text,
-                }],
-            },
-        })
-        .await
+        self.send_json(conversation_item_create_message(self.event_parser, text))
+            .await
     }
 
     pub async fn send_conversation_handoff_append(
@@ -280,30 +278,17 @@ impl RealtimeWebsocketWriter {
         handoff_id: String,
         output_text: String,
     ) -> Result<(), ApiError> {
-        self.send_json(RealtimeOutboundMessage::ConversationHandoffAppend {
+        self.send_json(conversation_handoff_append_message(
+            self.event_parser,
             handoff_id,
             output_text,
-        })
+        ))
         .await
     }
 
     pub async fn send_session_update(&self, instructions: String) -> Result<(), ApiError> {
         self.send_json(RealtimeOutboundMessage::SessionUpdate {
-            session: SessionUpdateSession {
-                kind: "quicksilver".to_string(),
-                instructions,
-                audio: SessionAudio {
-                    input: SessionAudioInput {
-                        format: SessionAudioFormat {
-                            kind: "audio/pcm".to_string(),
-                            rate: 24_000,
-                        },
-                    },
-                    output: SessionAudioOutput {
-                        voice: "mundo".to_string(),
-                    },
-                },
-            },
+            session: session_update_session(self.event_parser, instructions, self.session_mode),
         })
         .await
     }
@@ -366,7 +351,7 @@ impl RealtimeWebsocketEvents {
 
             match msg {
                 Message::Text(text) => {
-                    if let Some(event) = parse_realtime_event(&text) {
+                    if let Some(event) = parse_realtime_event(&text, self.event_parser) {
                         debug!(?event, "realtime websocket parsed event");
                         return Ok(Some(event));
                     }
@@ -412,6 +397,7 @@ impl RealtimeWebsocketClient {
             self.provider.base_url.as_str(),
             self.provider.query_params.as_ref(),
             config.model.as_deref(),
+            config.event_parser,
         )?;
 
         let mut request = ws_url
@@ -439,7 +425,12 @@ impl RealtimeWebsocketClient {
         );
 
         let (stream, rx_message) = WsStream::new(stream);
-        let connection = RealtimeWebsocketConnection::new(stream, rx_message);
+        let connection = RealtimeWebsocketConnection::new(
+            stream,
+            rx_message,
+            config.event_parser,
+            config.session_mode,
+        );
         debug!(
             session_id = config.session_id.as_deref().unwrap_or("<none>"),
             "realtime websocket sending session.update"
@@ -491,6 +482,7 @@ fn websocket_url_from_api_url(
     api_url: &str,
     query_params: Option<&HashMap<String, String>>,
     model: Option<&str>,
+    event_parser: RealtimeEventParser,
 ) -> Result<Url, ApiError> {
     let mut url = Url::parse(api_url)
         .map_err(|err| ApiError::Stream(format!("failed to parse realtime api_url: {err}")))?;
@@ -512,7 +504,9 @@ fn websocket_url_from_api_url(
 
     {
         let mut query = url.query_pairs_mut();
-        query.append_pair("intent", "quicksilver");
+        if let Some(intent) = websocket_intent(event_parser) {
+            query.append_pair("intent", intent);
+        }
         if let Some(model) = model {
             query.append_pair("model", model);
         }
@@ -579,7 +573,7 @@ mod tests {
         .to_string();
 
         assert_eq!(
-            parse_realtime_event(payload.as_str()),
+            parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
             Some(RealtimeEvent::SessionUpdated {
                 session_id: "sess_123".to_string(),
                 instructions: Some("backend prompt".to_string()),
@@ -598,7 +592,7 @@ mod tests {
         })
         .to_string();
         assert_eq!(
-            parse_realtime_event(payload.as_str()),
+            parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
             Some(RealtimeEvent::AudioOut(RealtimeAudioFrame {
                 data: "AAA=".to_string(),
                 sample_rate: 48000,
@@ -616,7 +610,7 @@ mod tests {
         })
         .to_string();
         assert_eq!(
-            parse_realtime_event(payload.as_str()),
+            parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
             Some(RealtimeEvent::ConversationItemAdded(
                 json!({"type": "message", "seq": 7})
             ))
@@ -631,7 +625,7 @@ mod tests {
         })
         .to_string();
         assert_eq!(
-            parse_realtime_event(payload.as_str()),
+            parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
             Some(RealtimeEvent::ConversationItemDone {
                 item_id: "item_123".to_string(),
             })
@@ -652,7 +646,7 @@ mod tests {
         .to_string();
 
         assert_eq!(
-            parse_realtime_event(payload.as_str()),
+            parse_realtime_event(payload.as_str(), RealtimeEventParser::V1),
             Some(RealtimeEvent::HandoffRequested(RealtimeHandoffRequested {
                 handoff_id: "handoff_123".to_string(),
                 item_id: "item_123".to_string(),
@@ -700,8 +694,13 @@ mod tests {
 
     #[test]
     fn websocket_url_from_http_base_defaults_to_ws_path() {
-        let url =
-            websocket_url_from_api_url("http://127.0.0.1:8011", None, None).expect("build ws url");
+        let url = websocket_url_from_api_url(
+            "http://127.0.0.1:8011",
+            None,
+            None,
+            RealtimeEventParser::V1,
+        )
+        .expect("build ws url");
         assert_eq!(
             url.as_str(),
             "ws://127.0.0.1:8011/v1/realtime?intent=quicksilver"
@@ -710,9 +709,13 @@ mod tests {
 
     #[test]
     fn websocket_url_from_ws_base_defaults_to_ws_path() {
-        let url =
-            websocket_url_from_api_url("wss://example.com", None, Some("realtime-test-model"))
-                .expect("build ws url");
+        let url = websocket_url_from_api_url(
+            "wss://example.com",
+            None,
+            Some("realtime-test-model"),
+            RealtimeEventParser::V1,
+        )
+        .expect("build ws url");
         assert_eq!(
             url.as_str(),
             "wss://example.com/v1/realtime?intent=quicksilver&model=realtime-test-model"
@@ -721,8 +724,13 @@ mod tests {
 
     #[test]
     fn websocket_url_from_v1_base_appends_realtime_path() {
-        let url = websocket_url_from_api_url("https://api.openai.com/v1", None, Some("snapshot"))
-            .expect("build ws url");
+        let url = websocket_url_from_api_url(
+            "https://api.openai.com/v1",
+            None,
+            Some("snapshot"),
+            RealtimeEventParser::V1,
+        )
+        .expect("build ws url");
         assert_eq!(
             url.as_str(),
             "wss://api.openai.com/v1/realtime?intent=quicksilver&model=snapshot"
@@ -731,9 +739,13 @@ mod tests {
 
     #[test]
     fn websocket_url_from_nested_v1_base_appends_realtime_path() {
-        let url =
-            websocket_url_from_api_url("https://example.com/openai/v1", None, Some("snapshot"))
-                .expect("build ws url");
+        let url = websocket_url_from_api_url(
+            "https://example.com/openai/v1",
+            None,
+            Some("snapshot"),
+            RealtimeEventParser::V1,
+        )
+        .expect("build ws url");
         assert_eq!(
             url.as_str(),
             "wss://example.com/openai/v1/realtime?intent=quicksilver&model=snapshot"
@@ -749,6 +761,7 @@ mod tests {
                 ("intent".to_string(), "ignored".to_string()),
             ])),
             Some("snapshot"),
+            RealtimeEventParser::V1,
         )
         .expect("build ws url");
         assert_eq!(
@@ -889,6 +902,8 @@ mod tests {
                     instructions: "backend prompt".to_string(),
                     model: Some("realtime-test-model".to_string()),
                     session_id: Some("conv_1".to_string()),
+                    event_parser: RealtimeEventParser::V1,
+                    session_mode: RealtimeSessionMode::Conversational,
                 },
                 HeaderMap::new(),
                 HeaderMap::new(),
@@ -1029,6 +1044,8 @@ mod tests {
                     instructions: "backend prompt".to_string(),
                     model: Some("realtime-test-model".to_string()),
                     session_id: Some("conv_1".to_string()),
+                    event_parser: RealtimeEventParser::V1,
+                    session_mode: RealtimeSessionMode::Conversational,
                 },
                 HeaderMap::new(),
                 HeaderMap::new(),

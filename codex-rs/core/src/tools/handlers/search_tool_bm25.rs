@@ -13,8 +13,8 @@ use crate::connectors;
 use crate::function_tool::FunctionCallError;
 use crate::mcp::CODEX_APPS_MCP_SERVER_NAME;
 use crate::mcp_connection_manager::ToolInfo;
+use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
-use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::handlers::parse_arguments;
 use crate::tools::registry::ToolHandler;
@@ -74,11 +74,15 @@ impl ToolEntry {
 
 #[async_trait]
 impl ToolHandler for SearchToolBm25Handler {
+    type Output = FunctionToolOutput;
     fn kind(&self) -> ToolKind {
         ToolKind::Function
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    async fn handle(
+        &self,
+        invocation: ToolInvocation,
+    ) -> Result<FunctionToolOutput, FunctionCallError> {
         let ToolInvocation {
             payload,
             session,
@@ -124,7 +128,10 @@ impl ToolHandler for SearchToolBm25Handler {
             &turn.config,
         );
         let mcp_tools = filter_codex_apps_mcp_tools(mcp_tools, &connectors);
-        let mcp_tools = connectors::filter_codex_apps_tools_by_policy(mcp_tools, &turn.config);
+        let mcp_tools: HashMap<String, ToolInfo> = mcp_tools
+            .into_iter()
+            .filter(|(_, tool_info)| connectors::codex_app_tool_is_enabled(&turn.config, tool_info))
+            .collect();
 
         let mut entries: Vec<ToolEntry> = mcp_tools
             .into_iter()
@@ -141,7 +148,7 @@ impl ToolHandler for SearchToolBm25Handler {
                 "tools": [],
             })
             .to_string();
-            return Ok(ToolOutput::Function {
+            return Ok(FunctionToolOutput {
                 body: FunctionCallOutputBody::Text(content),
                 success: Some(true),
             });
@@ -184,7 +191,7 @@ impl ToolHandler for SearchToolBm25Handler {
         })
         .to_string();
 
-        Ok(ToolOutput::Function {
+        Ok(FunctionToolOutput {
             body: FunctionCallOutputBody::Text(content),
             success: Some(true),
         })

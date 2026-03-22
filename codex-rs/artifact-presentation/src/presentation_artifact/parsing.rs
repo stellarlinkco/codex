@@ -61,7 +61,7 @@ fn normalize_color(
     action: &str,
     field: &str,
 ) -> Result<String, PresentationArtifactError> {
-    normalize_color_with_palette(None, color, action, field)
+    normalize_color_with_palette(/*theme*/ None, color, action, field)
 }
 
 fn normalize_color_with_document(

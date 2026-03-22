@@ -217,7 +217,7 @@ impl SpreadsheetArtifactManager {
     ) -> Result<SpreadsheetArtifactResponse, SpreadsheetArtifactError> {
         let args: PathArgs = parse_args(&request.action, &request.args)?;
         let path = resolve_path(cwd, &args.path);
-        let artifact = SpreadsheetArtifact::from_source_file(&path, None)?;
+        let artifact = SpreadsheetArtifact::from_source_file(&path, /*artifact_id*/ None)?;
         let artifact_id = artifact.artifact_id.clone();
         let snapshot = snapshot_for_artifact(&artifact);
         let summary = format!(
@@ -353,7 +353,7 @@ impl SpreadsheetArtifactManager {
         response.sheet_ref = Some(sheet_reference(sheet));
         response.exported_paths.push(rendered.path);
         response.rendered_html = Some(rendered.html);
-        response.rendered_text = Some(sheet.to_rendered_text(None));
+        response.rendered_text = Some(sheet.to_rendered_text(/*range*/ None));
         Ok(response)
     }
 
@@ -575,7 +575,11 @@ impl SpreadsheetArtifactManager {
         let artifact_id = required_artifact_id(&request)?;
         let artifact = self.get_artifact_mut(&artifact_id, &request.action)?;
         if let Some(source_sheet_name) = args.source_sheet_name.as_deref() {
-            artifact.sheet_lookup(&request.action, Some(source_sheet_name), None)?;
+            artifact.sheet_lookup(
+                &request.action,
+                Some(source_sheet_name),
+                /*index*/ None,
+            )?;
         }
         let source_range = CellRange::parse(&args.source_range)?;
         let chart = {
@@ -715,7 +719,7 @@ impl SpreadsheetArtifactManager {
         );
         response.sheet_list = Some(vec![
             artifact
-                .sheet_lookup(&action, Some(&sheet_name), None)?
+                .sheet_lookup(&action, Some(&sheet_name), /*index*/ None)?
                 .summary(),
         ]);
         Ok(response)
@@ -977,7 +981,7 @@ impl SpreadsheetArtifactManager {
         );
         response.sheet_list = Some(vec![
             artifact
-                .sheet_lookup(&action, Some(&sheet_name), None)?
+                .sheet_lookup(&action, Some(&sheet_name), /*index*/ None)?
                 .summary(),
         ]);
         Ok(response)
@@ -1033,7 +1037,7 @@ impl SpreadsheetArtifactManager {
         let format_id =
             artifact.add_conditional_format(&request.action, &sheet_name, args.format)?;
         let format = artifact
-            .sheet_lookup(&request.action, Some(&sheet_name), None)?
+            .sheet_lookup(&request.action, Some(&sheet_name), /*index*/ None)?
             .conditional_formats
             .iter()
             .find(|entry| entry.id == format_id)
@@ -1076,7 +1080,7 @@ impl SpreadsheetArtifactManager {
         );
         response.sheet_list = Some(vec![
             artifact
-                .sheet_lookup(&action, Some(&sheet_name), None)?
+                .sheet_lookup(&action, Some(&sheet_name), /*index*/ None)?
                 .summary(),
         ]);
         Ok(response)

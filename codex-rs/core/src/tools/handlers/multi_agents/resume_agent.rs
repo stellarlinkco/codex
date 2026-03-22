@@ -17,7 +17,7 @@ pub async fn handle(
     turn: Arc<TurnContext>,
     call_id: String,
     arguments: String,
-) -> Result<ToolOutput, FunctionCallError> {
+) -> Result<FunctionToolOutput, FunctionCallError> {
     let args: ResumeAgentArgs = parse_arguments(&arguments)?;
     let receiver_thread_id = agent_id(&args.id)?;
     let child_depth = next_thread_spawn_depth(&turn.session_source);
@@ -101,10 +101,7 @@ pub async fn handle(
         FunctionCallError::Fatal(format!("failed to serialize resume_agent result: {err}"))
     })?;
 
-    Ok(ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(content),
-        success: Some(true),
-    })
+    Ok(FunctionToolOutput::from_text(content, Some(true)))
 }
 
 async fn try_resume_closed_agent(
@@ -125,7 +122,9 @@ async fn try_resume_closed_agent(
     let resumed_thread_id = match resume_result {
         Ok(thread_id) => Ok(thread_id),
         Err(err @ CodexErr::AgentLimitReached { .. }) => {
-            if reap_finished_agents_for_slots(session.as_ref(), turn.as_ref(), 1).await == 0 {
+            if reap_finished_agents_for_slots(session.as_ref(), turn.as_ref(), /*slots*/ 1).await
+                == 0
+            {
                 Err(err)
             } else {
                 session

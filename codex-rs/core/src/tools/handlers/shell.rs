@@ -1,22 +1,22 @@
 use async_trait::async_trait;
+use codex_features::Feature;
 use codex_protocol::ThreadId;
-use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ShellCommandToolCallParams;
 use codex_protocol::models::ShellToolCallParams;
 use std::sync::Arc;
 
 use crate::codex::TurnContext;
+use crate::exec::ExecCapturePolicy;
 use crate::exec::ExecParams;
 use crate::exec_env::create_env;
 use crate::exec_policy::ExecApprovalRequest;
-use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
 use crate::is_safe_command::is_known_safe_command;
 use crate::protocol::ExecCommandSource;
 use crate::shell::Shell;
 use crate::skills::maybe_emit_implicit_skill_invocation;
+use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
-use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::events::ToolEmitter;
 use crate::tools::events::ToolEventCtx;
@@ -70,10 +70,15 @@ impl ShellHandler {
             command: params.command.clone(),
             cwd: turn_context.resolve_path(params.workdir.clone()),
             expiration: params.timeout_ms.into(),
+            capture_policy: ExecCapturePolicy::ShellTool,
             env: create_env(&turn_context.shell_environment_policy, Some(thread_id)),
             network: turn_context.network.clone(),
             sandbox_permissions: params.sandbox_permissions.unwrap_or_default(),
             windows_sandbox_level: turn_context.windows_sandbox_level,
+            windows_sandbox_private_desktop: turn_context
+                .config
+                .permissions
+                .windows_sandbox_private_desktop,
             justification: params.justification.clone(),
             arg0: None,
         }
@@ -120,10 +125,15 @@ impl ShellCommandHandler {
             command,
             cwd: turn_context.resolve_path(params.workdir.clone()),
             expiration: params.timeout_ms.into(),
+            capture_policy: ExecCapturePolicy::ShellTool,
             env: create_env(&turn_context.shell_environment_policy, Some(thread_id)),
             network: turn_context.network.clone(),
             sandbox_permissions: params.sandbox_permissions.unwrap_or_default(),
             windows_sandbox_level: turn_context.windows_sandbox_level,
+            windows_sandbox_private_desktop: turn_context
+                .config
+                .permissions
+                .windows_sandbox_private_desktop,
             justification: params.justification.clone(),
             arg0: None,
         })
@@ -142,6 +152,7 @@ impl From<ShellCommandBackendConfig> for ShellCommandHandler {
 
 #[async_trait]
 impl ToolHandler for ShellHandler {
+    type Output = FunctionToolOutput;
     fn kind(&self) -> ToolKind {
         ToolKind::Function
     }
@@ -165,7 +176,10 @@ impl ToolHandler for ShellHandler {
         }
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    async fn handle(
+        &self,
+        invocation: ToolInvocation,
+    ) -> Result<FunctionToolOutput, FunctionCallError> {
         let ToolInvocation {
             session,
             turn,
@@ -224,6 +238,7 @@ impl ToolHandler for ShellHandler {
 
 #[async_trait]
 impl ToolHandler for ShellCommandHandler {
+    type Output = FunctionToolOutput;
     fn kind(&self) -> ToolKind {
         ToolKind::Function
     }
@@ -253,7 +268,10 @@ impl ToolHandler for ShellCommandHandler {
             .unwrap_or(true)
     }
 
-    async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
+    async fn handle(
+        &self,
+        invocation: ToolInvocation,
+    ) -> Result<FunctionToolOutput, FunctionCallError> {
         let ToolInvocation {
             session,
             turn,
@@ -305,7 +323,7 @@ impl ToolHandler for ShellCommandHandler {
 }
 
 impl ShellHandler {
-    async fn run_exec_like(args: RunExecLikeArgs) -> Result<ToolOutput, FunctionCallError> {
+    async fn run_exec_like(args: RunExecLikeArgs) -> Result<FunctionToolOutput, FunctionCallError> {
         let RunExecLikeArgs {
             tool_name,
             exec_params,
@@ -332,7 +350,8 @@ impl ShellHandler {
             }
         }
 
-        let request_permission_enabled = session.features().enabled(Feature::RequestPermissions);
+        let request_permission_enabled =
+            session.features().enabled(Feature::RequestPermissionsTool);
         let effective_additional_permissions = apply_granted_turn_permissions(
             session.as_ref(),
             exec_params.sandbox_permissions,
@@ -390,7 +409,12 @@ impl ShellHandler {
             source,
             freeform,
         );
-        let event_ctx = ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, None);
+        let event_ctx = ToolEventCtx::new(
+            session.as_ref(),
+            turn.as_ref(),
+            &call_id,
+            /*turn_diff_tracker*/ None,
+        );
         emitter.begin(event_ctx).await;
 
         let exec_approval_requirement = session
@@ -447,12 +471,14 @@ impl ShellHandler {
             )
             .await
             .map(|result| result.output);
-        let event_ctx = ToolEventCtx::new(session.as_ref(), turn.as_ref(), &call_id, None);
+        let event_ctx = ToolEventCtx::new(
+            session.as_ref(),
+            turn.as_ref(),
+            &call_id,
+            /*turn_diff_tracker*/ None,
+        );
         let content = emitter.finish(event_ctx, out).await?;
-        Ok(ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            success: Some(true),
-        })
+        Ok(FunctionToolOutput::from_text(content, Some(true)))
     }
 }
 

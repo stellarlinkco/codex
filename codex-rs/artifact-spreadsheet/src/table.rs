@@ -216,7 +216,13 @@ impl SpreadsheetSheet {
                 message: "table display_name cannot be empty".to_string(),
             });
         }
-        ensure_unique_table_name(&self.tables, action, &name, &display_name, None)?;
+        ensure_unique_table_name(
+            &self.tables,
+            action,
+            &name,
+            &display_name,
+            /*exclude_id*/ None,
+        )?;
 
         let columns = build_table_columns(self, range, options.header_row_count);
         self.tables.push(SpreadsheetTable {
