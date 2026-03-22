@@ -9,10 +9,18 @@ pub fn bazel_target() -> &'static str {
 /// Returns the embedded V8 version.
 #[must_use]
 pub fn embedded_v8_version() -> &'static str {
-    v8::V8::get_version()
+    #[cfg(target_env = "musl")]
+    {
+        "unavailable-on-musl"
+    }
+
+    #[cfg(not(target_env = "musl"))]
+    {
+        v8::V8::get_version()
+    }
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(target_env = "musl")))]
 mod tests {
     use pretty_assertions::assert_eq;
     use std::sync::Once;

@@ -12,6 +12,8 @@ path = "src/lib.rs"
 workspace = true
 
 [dependencies]
+
+[target.'cfg(not(target_env = "musl"))'.dependencies]
 v8 = { workspace = true }
 
 [dev-dependencies]
