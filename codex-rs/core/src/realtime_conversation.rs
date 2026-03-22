@@ -67,6 +67,14 @@ struct HandoffOutput {
     output_text: String,
 }
 
+pub(crate) struct RealtimeConversationStartRequest {
+    prompt: String,
+    model: Option<String>,
+    session_id: Option<String>,
+    event_parser: RealtimeEventParser,
+    session_mode: RealtimeSessionMode,
+}
+
 impl RealtimeHandoffState {
     fn new(output_tx: Sender<HandoffOutput>) -> Self {
         Self {
@@ -121,11 +129,7 @@ impl RealtimeConversationManager {
         &self,
         api_provider: ApiProvider,
         extra_headers: Option<HeaderMap>,
-        prompt: String,
-        model: Option<String>,
-        session_id: Option<String>,
-        event_parser: RealtimeEventParser,
-        session_mode: RealtimeSessionMode,
+        request: RealtimeConversationStartRequest,
     ) -> CodexResult<(Receiver<RealtimeEvent>, Arc<AtomicBool>)> {
         let previous_state = {
             let mut guard = self.state.lock().await;
@@ -138,11 +142,11 @@ impl RealtimeConversationManager {
         }
 
         let session_config = RealtimeSessionConfig {
-            instructions: prompt,
-            model,
-            session_id,
-            event_parser,
-            session_mode,
+            instructions: request.prompt,
+            model: request.model,
+            session_id: request.session_id,
+            event_parser: request.event_parser,
+            session_mode: request.session_mode,
         };
         let client = RealtimeWebsocketClient::new(api_provider);
         let connection = client
@@ -355,11 +359,13 @@ pub(crate) async fn handle_start(
         .start(
             api_provider,
             extra_headers,
-            prompt,
-            model,
-            requested_session_id.clone(),
-            event_parser,
-            session_mode,
+            RealtimeConversationStartRequest {
+                prompt,
+                model,
+                session_id: requested_session_id.clone(),
+                event_parser,
+                session_mode,
+            },
         )
         .await
     {

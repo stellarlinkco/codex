@@ -287,7 +287,7 @@ fn replace_plugin_root_atomically(
     fs::create_dir_all(parent)
         .map_err(|err| PluginStoreError::io("failed to create plugin cache directory", err))?;
 
-    let staging_root = parent.join(format!(".{}.__staging__", plugin_version));
+    let staging_root = parent.join(format!(".{plugin_version}.__staging__"));
     remove_existing_target(&staging_root)?;
     copy_dir_recursive(source, &staging_root)?;
 

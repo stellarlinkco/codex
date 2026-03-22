@@ -151,12 +151,12 @@ where
             line: metadata.line().map(|line| line as i64),
         };
 
-        let _ = self.sender.try_send(LogDbCommand::Entry(entry));
+        let _ = self.sender.try_send(LogDbCommand::Entry(Box::new(entry)));
     }
 }
 
 enum LogDbCommand {
-    Entry(LogEntry),
+    Entry(Box<LogEntry>),
     Flush(oneshot::Sender<()>),
 }
 
@@ -249,7 +249,7 @@ async fn run_inserter(
             maybe_command = receiver.recv() => {
                 match maybe_command {
                     Some(LogDbCommand::Entry(entry)) => {
-                        buffer.push(entry);
+                        buffer.push(*entry);
                         if buffer.len() >= LOG_BATCH_SIZE {
                             flush(&state_db, &mut buffer).await;
                         }

@@ -55,6 +55,14 @@ static FORCE_TEST_THREAD_MANAGER_BEHAVIOR: AtomicBool = AtomicBool::new(false);
 type CapturedOps = Vec<(ThreadId, Op)>;
 type SharedCapturedOps = Arc<std::sync::Mutex<CapturedOps>>;
 
+#[derive(Default)]
+pub(crate) struct SpawnThreadSourceOptions {
+    pub(crate) persist_extended_history: bool,
+    pub(crate) metrics_service_name: Option<String>,
+    pub(crate) inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
+    pub(crate) inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
+}
+
 pub(crate) fn set_thread_manager_test_mode_for_tests(enabled: bool) {
     FORCE_TEST_THREAD_MANAGER_BEHAVIOR.store(enabled, Ordering::Relaxed);
 }
@@ -539,10 +547,7 @@ impl ThreadManagerState {
             config,
             agent_control,
             self.session_source.clone(),
-            /*persist_extended_history*/ false,
-            /*metrics_service_name*/ None,
-            /*inherited_shell_snapshot*/ None,
-            /*inherited_exec_policy*/ None,
+            SpawnThreadSourceOptions::default(),
         )
         .await
     }
@@ -552,10 +557,7 @@ impl ThreadManagerState {
         config: Config,
         agent_control: AgentControl,
         session_source: SessionSource,
-        persist_extended_history: bool,
-        metrics_service_name: Option<String>,
-        inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
-        inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
+        options: SpawnThreadSourceOptions,
     ) -> CodexResult<NewThread> {
         self.spawn_thread_with_source(
             config,
@@ -564,10 +566,10 @@ impl ThreadManagerState {
             agent_control,
             session_source,
             Vec::new(),
-            persist_extended_history,
-            metrics_service_name,
-            inherited_shell_snapshot,
-            inherited_exec_policy,
+            options.persist_extended_history,
+            options.metrics_service_name,
+            options.inherited_shell_snapshot,
+            options.inherited_exec_policy,
             /*parent_trace*/ None,
             /*user_shell_override*/ None,
         )
@@ -607,9 +609,7 @@ impl ThreadManagerState {
         initial_history: InitialHistory,
         agent_control: AgentControl,
         session_source: SessionSource,
-        persist_extended_history: bool,
-        inherited_shell_snapshot: Option<Arc<ShellSnapshot>>,
-        inherited_exec_policy: Option<Arc<crate::exec_policy::ExecPolicyManager>>,
+        options: SpawnThreadSourceOptions,
     ) -> CodexResult<NewThread> {
         self.spawn_thread_with_source(
             config,
@@ -618,10 +618,10 @@ impl ThreadManagerState {
             agent_control,
             session_source,
             Vec::new(),
-            persist_extended_history,
-            /*metrics_service_name*/ None,
-            inherited_shell_snapshot,
-            inherited_exec_policy,
+            options.persist_extended_history,
+            options.metrics_service_name,
+            options.inherited_shell_snapshot,
+            options.inherited_exec_policy,
             /*parent_trace*/ None,
             /*user_shell_override*/ None,
         )

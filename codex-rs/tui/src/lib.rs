@@ -63,6 +63,7 @@ use uuid::Uuid;
 mod additional_dirs;
 mod app;
 mod app_backtrack;
+#[allow(dead_code)]
 mod app_event;
 mod app_event_sender;
 mod app_server_tui_dispatch;
@@ -82,6 +83,7 @@ mod audio_device {
         ))
     }
 }
+#[allow(dead_code)]
 mod bottom_pane;
 mod chatwidget;
 mod cli;
@@ -109,6 +111,7 @@ mod markdown_render;
 mod markdown_stream;
 mod mention_codec;
 mod model_migration;
+#[allow(dead_code)]
 mod multi_agents;
 mod notifications;
 pub mod onboarding;
@@ -127,6 +130,7 @@ mod status_indicator_widget;
 mod streaming;
 mod style;
 mod terminal_palette;
+#[allow(dead_code)]
 mod terminal_title;
 mod text_formatting;
 mod theme_picker;

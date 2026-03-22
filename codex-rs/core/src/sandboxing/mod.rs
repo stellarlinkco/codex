@@ -94,6 +94,7 @@ pub(crate) struct SandboxTransformRequest<'a> {
     // TODO(viyatb): Evaluate switching this to Option<Arc<NetworkProxy>>
     // to make shared ownership explicit across runtime/sandbox plumbing.
     pub network: Option<&'a NetworkProxy>,
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub sandbox_policy_cwd: &'a Path,
     #[cfg(target_os = "macos")]
     pub macos_seatbelt_profile_extensions: Option<&'a MacOsSeatbeltProfileExtensions>,
@@ -592,7 +593,10 @@ impl SandboxManager {
             sandbox,
             enforce_managed_network,
             network,
+            #[cfg(target_os = "macos")]
             sandbox_policy_cwd,
+            #[cfg(not(target_os = "macos"))]
+                sandbox_policy_cwd: _,
             #[cfg(target_os = "macos")]
             macos_seatbelt_profile_extensions,
             codex_linux_sandbox_exe,

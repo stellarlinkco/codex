@@ -96,18 +96,23 @@ pub const DEFAULT_IN_PROCESS_CHANNEL_CAPACITY: usize = CHANNEL_CAPACITY;
 
 type PendingClientRequestResponse = std::result::Result<Result, JSONRPCErrorError>;
 
-fn jsonrpc_request_from_client_request(request: ClientRequest) -> JSONRPCRequest {
-    serde_json::from_value(serde_json::to_value(request).expect("serialize client request"))
-        .expect("client request should convert to JSON-RPC")
+fn jsonrpc_request_from_client_request(request: ClientRequest) -> IoResult<JSONRPCRequest> {
+    let value = serde_json::to_value(request)
+        .map_err(|err| IoError::other(format!("serialize client request failed: {err}")))?;
+    serde_json::from_value(value)
+        .map_err(|err| IoError::other(format!("convert client request to JSON-RPC failed: {err}")))
 }
 
 fn jsonrpc_notification_from_client_notification(
     notification: ClientNotification,
-) -> JSONRPCNotification {
-    serde_json::from_value(
-        serde_json::to_value(notification).expect("serialize client notification"),
-    )
-    .expect("client notification should convert to JSON-RPC")
+) -> IoResult<JSONRPCNotification> {
+    let value = serde_json::to_value(notification)
+        .map_err(|err| IoError::other(format!("serialize client notification failed: {err}")))?;
+    serde_json::from_value(value).map_err(|err| {
+        IoError::other(format!(
+            "convert client notification to JSON-RPC failed: {err}"
+        ))
+    })
 }
 
 fn server_notification_requires_delivery(notification: &ServerNotification) -> bool {
@@ -206,8 +211,8 @@ enum InProcessClientMessage {
 }
 
 enum ProcessorCommand {
-    Request(Box<ClientRequest>),
-    Notification(ClientNotification),
+    Request(JSONRPCRequest),
+    Notification(JSONRPCNotification),
 }
 
 #[derive(Clone)]
@@ -446,7 +451,7 @@ fn start_uninitialized(args: InProcessStartArgs) -> InProcessClientHandle {
                                 processor
                                     .process_request(
                                         IN_PROCESS_CONNECTION_ID,
-                                        jsonrpc_request_from_client_request(*request),
+                                        request,
                                         AppServerTransport::Stdio,
                                         &mut session,
                                     )
@@ -475,9 +480,7 @@ fn start_uninitialized(args: InProcessStartArgs) -> InProcessClientHandle {
                             }
                             Some(ProcessorCommand::Notification(notification)) => {
                                 processor
-                                    .process_notification(
-                                        jsonrpc_notification_from_client_notification(notification),
-                                    )
+                                    .process_notification(notification)
                                     .await;
                             }
                             None => {
@@ -535,7 +538,23 @@ fn start_uninitialized(args: InProcessStartArgs) -> InProcessClientHandle {
                                 }
                             }
 
-                            match processor_tx.try_send(ProcessorCommand::Request(Box::new(request))) {
+                            let jsonrpc_request = match jsonrpc_request_from_client_request(request) {
+                                Ok(request) => request,
+                                Err(err) => {
+                                    if let Some(response_tx) =
+                                        pending_request_responses.remove(&request_id)
+                                    {
+                                        let _ = response_tx.send(Err(JSONRPCErrorError {
+                                            code: INTERNAL_ERROR_CODE,
+                                            message: err.to_string(),
+                                            data: None,
+                                        }));
+                                    }
+                                    continue;
+                                }
+                            };
+
+                            match processor_tx.try_send(ProcessorCommand::Request(jsonrpc_request)) {
                                 Ok(()) => {}
                                 Err(mpsc::error::TrySendError::Full(_)) => {
                                     if let Some(response_tx) =
@@ -566,7 +585,20 @@ fn start_uninitialized(args: InProcessStartArgs) -> InProcessClientHandle {
                             }
                         }
                         Some(InProcessClientMessage::Notification { notification }) => {
-                            match processor_tx.try_send(ProcessorCommand::Notification(notification)) {
+                            let jsonrpc_notification =
+                                match jsonrpc_notification_from_client_notification(notification) {
+                                    Ok(notification) => notification,
+                                    Err(err) => {
+                                        warn!(
+                                            "dropping in-process client notification (invalid payload): {err}"
+                                        );
+                                        continue;
+                                    }
+                                };
+
+                            match processor_tx
+                                .try_send(ProcessorCommand::Notification(jsonrpc_notification))
+                            {
                                 Ok(()) => {}
                                 Err(mpsc::error::TrySendError::Full(_)) => {
                                     warn!("dropping in-process client notification (queue full)");

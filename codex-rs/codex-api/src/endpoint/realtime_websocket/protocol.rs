@@ -37,8 +37,6 @@ pub(super) enum RealtimeOutboundMessage {
         handoff_id: String,
         output_text: String,
     },
-    #[serde(rename = "response.create")]
-    ResponseCreate,
     #[serde(rename = "session.update")]
     SessionUpdate { session: SessionUpdateSession },
     #[serde(rename = "conversation.item.create")]

@@ -59,6 +59,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 
 mod app_server_tracing;
 mod bespoke_event_handling;
+#[allow(dead_code)]
 mod codex_message_processor;
 mod command_exec;
 mod config_api;
@@ -70,8 +71,10 @@ mod fuzzy_file_search;
 pub mod in_process;
 mod message_processor;
 mod models;
+#[allow(dead_code)]
 mod outgoing_message;
 mod server_request_error;
+#[allow(dead_code)]
 mod thread_state;
 mod thread_status;
 mod transport;

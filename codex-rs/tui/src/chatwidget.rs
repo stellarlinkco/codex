@@ -5315,7 +5315,7 @@ impl ChatWidget {
             EventMsg::CollabAgentSpawnEnd(ev) => {
                 let spawn_request = multi_agents::SpawnRequestSummary {
                     model: ev.model.clone(),
-                    reasoning_effort: ev.reasoning_effort.clone(),
+                    reasoning_effort: ev.reasoning_effort,
                 };
                 self.on_collab_event(multi_agents::spawn_end(ev, Some(&spawn_request)));
             }

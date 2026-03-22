@@ -13,8 +13,10 @@ mod arc_monitor;
 pub use codex_login as auth;
 mod auth_env_telemetry;
 mod client;
+#[allow(dead_code)]
 mod client_anthropic;
 mod client_common;
+#[allow(dead_code)]
 pub mod codex;
 mod realtime_context;
 mod realtime_conversation;
@@ -23,6 +25,7 @@ mod codex_thread;
 mod compact_remote;
 pub use codex_thread::CodexThread;
 pub use codex_thread::ThreadConfigSnapshot;
+#[allow(dead_code)]
 mod agent;
 mod codex_delegate;
 mod command_canonicalization;
@@ -30,6 +33,7 @@ mod commit_attribution;
 pub mod config;
 pub mod config_loader;
 pub mod connectors;
+#[allow(dead_code)]
 mod context_manager;
 mod contextual_user_message;
 pub mod custom_prompts;
@@ -40,10 +44,12 @@ pub mod exec;
 pub mod exec_env;
 mod exec_policy;
 pub mod external_agent_config;
+#[allow(dead_code)]
 pub mod features;
 mod file_watcher;
 mod flags;
 pub mod git_info;
+#[allow(dead_code)]
 mod guardian;
 mod hook_runtime;
 mod hooks_executor;
@@ -55,11 +61,13 @@ mod mcp_tool_approval_templates;
 pub mod models_manager;
 mod network_policy_decision;
 pub mod network_proxy_loader;
+#[allow(dead_code)]
 mod original_image_detail;
 pub use mcp_connection_manager::MCP_SANDBOX_STATE_CAPABILITY;
 pub use mcp_connection_manager::MCP_SANDBOX_STATE_METHOD;
 pub use mcp_connection_manager::SandboxState;
 pub use text_encoding::bytes_to_string_smart;
+#[allow(dead_code)]
 mod mcp_tool_call;
 mod memories;
 pub mod mention_syntax;
@@ -72,6 +80,7 @@ pub mod personality_migration;
 pub mod plugins;
 mod sandbox_tags;
 pub mod sandboxing;
+#[allow(dead_code)]
 mod scheduled_tasks;
 mod session_prefix;
 mod session_startup_prewarm;
@@ -81,6 +90,7 @@ pub mod test_support;
 mod text_encoding;
 pub use codex_login::token_data;
 mod truncate;
+#[allow(dead_code)]
 mod unified_exec;
 pub mod windows_sandbox;
 pub use client::X_RESPONSESAPI_INCLUDE_TIMING_METRICS_HEADER;
@@ -126,6 +136,7 @@ pub mod skills;
 pub mod spawn;
 pub mod state_db;
 pub mod terminal;
+#[allow(dead_code)]
 mod tools;
 pub mod turn_diff_tracker;
 mod turn_metadata;
@@ -154,6 +165,7 @@ pub use rollout::policy::EventPersistenceMode;
 pub use rollout::rollout_date_parts;
 pub use rollout::session_index::find_thread_names_by_ids;
 mod function_tool;
+#[allow(dead_code)]
 mod state;
 mod tasks;
 mod user_shell_command;

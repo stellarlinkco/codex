@@ -2,6 +2,7 @@ pub mod methods;
 mod methods_common;
 mod methods_v1;
 mod methods_v2;
+#[allow(dead_code)]
 pub mod protocol;
 mod protocol_common;
 mod protocol_v1;

@@ -14,6 +14,7 @@ use crate::session_prefix::format_subagent_context_line;
 use crate::session_prefix::format_subagent_notification_message;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::state_db;
+use crate::thread_manager::SpawnThreadSourceOptions;
 use crate::thread_manager::ThreadManagerState;
 use codex_features::Feature;
 use codex_protocol::AgentPath;
@@ -247,9 +248,11 @@ impl AgentControl {
                             initial_history,
                             self.clone(),
                             session_source,
-                            /*persist_extended_history*/ false,
-                            inherited_shell_snapshot,
-                            inherited_exec_policy,
+                            SpawnThreadSourceOptions {
+                                inherited_shell_snapshot,
+                                inherited_exec_policy,
+                                ..SpawnThreadSourceOptions::default()
+                            },
                         )
                         .await?
                 } else {
@@ -258,10 +261,11 @@ impl AgentControl {
                             config,
                             self.clone(),
                             session_source,
-                            /*persist_extended_history*/ false,
-                            /*metrics_service_name*/ None,
-                            inherited_shell_snapshot,
-                            inherited_exec_policy,
+                            SpawnThreadSourceOptions {
+                                inherited_shell_snapshot,
+                                inherited_exec_policy,
+                                ..SpawnThreadSourceOptions::default()
+                            },
                         )
                         .await?
                 }
