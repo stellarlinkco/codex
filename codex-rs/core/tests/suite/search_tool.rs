@@ -101,7 +101,6 @@ fn configure_apps(config: &mut Config, apps_base_url: &str) {
         .iter_mut()
         .find(|model| model.slug == "gpt-5-codex")
         .expect("gpt-5-codex exists in bundled models.json");
-    model.supports_search_tool = true;
     config.model_catalog = Some(model_catalog);
 }
 

@@ -355,30 +355,9 @@ async fn thread_start_emits_mcp_server_status_updated_notifications() -> Result<
 
     let starting = timeout(
         DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_matching_notification(
-            "mcpServer/startupStatus/updated starting",
-            |notification| {
-                notification.method == "mcpServer/startupStatus/updated"
-                    && notification
-                        .params
-                        .as_ref()
-                        .and_then(|params| params.get("name"))
-                        .and_then(Value::as_str)
-                        == Some("optional_broken")
-                    && notification
-                        .params
-                        .as_ref()
-                        .and_then(|params| params.get("status"))
-                        .and_then(Value::as_str)
-                        == Some("starting")
-            },
-        ),
+        read_mcp_server_status_updated_notification(&mut mcp, "optional_broken", "starting"),
     )
     .await??;
-    let starting: ServerNotification = starting.try_into()?;
-    let ServerNotification::McpServerStatusUpdated(starting) = starting else {
-        anyhow::bail!("unexpected notification variant");
-    };
     assert_eq!(
         starting,
         McpServerStatusUpdatedNotification {
@@ -390,30 +369,9 @@ async fn thread_start_emits_mcp_server_status_updated_notifications() -> Result<
 
     let failed = timeout(
         DEFAULT_READ_TIMEOUT,
-        mcp.read_stream_until_matching_notification(
-            "mcpServer/startupStatus/updated failed",
-            |notification| {
-                notification.method == "mcpServer/startupStatus/updated"
-                    && notification
-                        .params
-                        .as_ref()
-                        .and_then(|params| params.get("name"))
-                        .and_then(Value::as_str)
-                        == Some("optional_broken")
-                    && notification
-                        .params
-                        .as_ref()
-                        .and_then(|params| params.get("status"))
-                        .and_then(Value::as_str)
-                        == Some("failed")
-            },
-        ),
+        read_mcp_server_status_updated_notification(&mut mcp, "optional_broken", "failed"),
     )
     .await??;
-    let failed: ServerNotification = failed.try_into()?;
-    let ServerNotification::McpServerStatusUpdated(failed) = failed else {
-        anyhow::bail!("unexpected notification variant");
-    };
     assert_eq!(failed.name, "optional_broken");
     assert_eq!(failed.status, McpServerStartupState::Failed);
     assert!(
@@ -426,6 +384,35 @@ async fn thread_start_emits_mcp_server_status_updated_notifications() -> Result<
     );
 
     Ok(())
+}
+
+async fn read_mcp_server_status_updated_notification(
+    mcp: &mut McpProcess,
+    server_name: &str,
+    status: &str,
+) -> Result<McpServerStatusUpdatedNotification> {
+    loop {
+        let message = mcp.read_next_message().await?;
+        let JSONRPCMessage::Notification(notification) = message else {
+            continue;
+        };
+        if notification.method != "mcpServer/startupStatus/updated" {
+            continue;
+        }
+        let notification: ServerNotification = notification.try_into()?;
+        let ServerNotification::McpServerStatusUpdated(notification) = notification else {
+            anyhow::bail!("unexpected notification variant");
+        };
+        let status_matches = match notification.status {
+            McpServerStartupState::Starting => status == "starting",
+            McpServerStartupState::Failed => status == "failed",
+            McpServerStartupState::Ready => status == "ready",
+            McpServerStartupState::Cancelled => status == "cancelled",
+        };
+        if notification.name == server_name && status_matches {
+            return Ok(notification);
+        }
+    }
 }
 
 #[tokio::test]

@@ -1,4 +1,5 @@
 use super::*;
+use codex_protocol::models::function_call_output_content_items_to_text;
 use core_test_support::assert_regex_match;
 use pretty_assertions::assert_eq;
 use serde_json::json;
@@ -195,10 +196,13 @@ fn log_preview_uses_content_items_when_plain_text_is_missing() {
         }],
         Some(true),
     );
+    let FunctionCallOutputBody::ContentItems(items) = &output.body else {
+        panic!("expected content items");
+    };
 
     assert_eq!(output.log_preview(), "preview");
     assert_eq!(
-        function_call_output_content_items_to_text(&output.body),
+        function_call_output_content_items_to_text(items),
         Some("preview".to_string())
     );
 }

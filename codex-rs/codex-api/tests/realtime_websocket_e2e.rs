@@ -451,7 +451,10 @@ async fn realtime_ws_e2e_realtime_v2_parser_emits_handoff_requested() {
             handoff_id: "call_123".to_string(),
             item_id: "item_123".to_string(),
             input_transcript: "delegate now".to_string(),
-            active_transcript: Vec::new(),
+            messages: vec![codex_protocol::protocol::RealtimeHandoffMessage {
+                role: "user".to_string(),
+                text: "delegate now".to_string(),
+            }],
         })
     );
 

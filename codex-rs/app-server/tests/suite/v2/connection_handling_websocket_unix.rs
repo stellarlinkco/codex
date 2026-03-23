@@ -3,6 +3,7 @@ use super::connection_handling_websocket::WsClient;
 use super::connection_handling_websocket::connect_websocket;
 use super::connection_handling_websocket::create_config_toml;
 use super::connection_handling_websocket::read_response_for_id;
+use super::connection_handling_websocket::reserve_local_addr;
 use super::connection_handling_websocket::send_initialize_request;
 use super::connection_handling_websocket::send_request;
 use super::connection_handling_websocket::spawn_websocket_server;
@@ -153,7 +154,8 @@ async fn start_ctrl_c_restart_fixture(turn_delay: Duration) -> Result<GracefulCt
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri(), "never")?;
 
-    let (process, bind_addr) = spawn_websocket_server(codex_home.path()).await?;
+    let bind_addr = reserve_local_addr()?;
+    let process = spawn_websocket_server(codex_home.path(), bind_addr).await?;
     let mut ws = connect_websocket(bind_addr).await?;
 
     send_initialize_request(&mut ws, 1, "ws_graceful_shutdown").await?;

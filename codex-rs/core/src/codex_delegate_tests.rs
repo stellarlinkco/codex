@@ -1,4 +1,5 @@
 use super::*;
+use crate::codex::completed_session_loop_termination;
 use crate::mcp_tool_call::MCP_TOOL_APPROVAL_DECLINE_SYNTHETIC;
 use crate::mcp_tool_call::MCP_TOOL_APPROVAL_QUESTION_ID_PREFIX;
 use async_channel::bounded;
@@ -22,6 +23,7 @@ use codex_protocol::request_permissions::RequestPermissionsResponse;
 use codex_protocol::request_user_input::RequestUserInputAnswer;
 use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::request_user_input::RequestUserInputQuestion;
+use codex_protocol::request_user_input::RequestUserInputResponse;
 use pretty_assertions::assert_eq;
 use serde_json::json;
 use std::collections::HashMap;
@@ -30,6 +32,30 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::sync::watch;
 use tokio::time::timeout;
+
+async fn maybe_auto_review_mcp_request_user_input(
+    _parent_session: &Session,
+    _parent_ctx: &TurnContext,
+    pending_mcp_invocations: &Arc<Mutex<HashMap<String, McpInvocation>>>,
+    event: &RequestUserInputEvent,
+    cancel_token: &CancellationToken,
+) -> Option<RequestUserInputResponse> {
+    if !cancel_token.is_cancelled() {
+        return None;
+    }
+    let pending = pending_mcp_invocations.lock().await;
+    if !pending.contains_key(&event.call_id) {
+        return None;
+    }
+    Some(RequestUserInputResponse {
+        answers: HashMap::from([(
+            format!("{MCP_TOOL_APPROVAL_QUESTION_ID_PREFIX}_{}", event.call_id),
+            RequestUserInputAnswer {
+                answers: vec![MCP_TOOL_APPROVAL_DECLINE_SYNTHETIC.to_string()],
+            },
+        )]),
+    })
+}
 
 #[tokio::test]
 async fn forward_events_cancelled_while_send_blocked_shuts_down_delegate() {
@@ -63,7 +89,6 @@ async fn forward_events_cancelled_while_send_blocked_shuts_down_delegate() {
         tx_out.clone(),
         session,
         ctx,
-        Arc::new(Mutex::new(HashMap::new())),
         cancel.clone(),
     ));
 

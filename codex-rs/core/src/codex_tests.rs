@@ -38,9 +38,11 @@ use crate::rollout::recorder::RolloutRecorderParams;
 use crate::state::TaskKind;
 use crate::tasks::SessionTask;
 use crate::tasks::SessionTaskContext;
+
+const SEARCH_TOOL_BM25_TOOL_NAME: &str = "search_tool_bm25";
 use crate::tools::ToolRouter;
+use crate::tools::context::FunctionToolOutput;
 use crate::tools::context::ToolInvocation;
-use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
 use crate::tools::handlers::ShellHandler;
 use crate::tools::handlers::UnifiedExecHandler;
@@ -74,6 +76,7 @@ use rmcp::model::JsonObject;
 use rmcp::model::Tool;
 use serde::Deserialize;
 use serde_json::json;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Once;
@@ -226,6 +229,7 @@ fn make_mcp_tool(
     ToolInfo {
         server_name: server_name.to_string(),
         tool_name: tool_name.to_string(),
+        tool_namespace: server_name.to_string(),
         tool: Tool {
             name: tool_name.to_string().into(),
             title: None,
@@ -240,6 +244,7 @@ fn make_mcp_tool(
         connector_id: connector_id.map(str::to_string),
         connector_name: connector_name.map(str::to_string),
         plugin_display_names: Vec::new(),
+        connector_description: None,
     }
 }
 
@@ -247,9 +252,41 @@ fn function_call_rollout_item(name: &str, call_id: &str) -> RolloutItem {
     RolloutItem::ResponseItem(ResponseItem::FunctionCall {
         id: None,
         name: name.to_string(),
+        namespace: None,
         arguments: "{}".to_string(),
         call_id: call_id.to_string(),
     })
+}
+
+fn filter_mcp_tools_by_name(
+    mcp_tools: &HashMap<String, ToolInfo>,
+    selected_tool_names: &[String],
+) -> HashMap<String, ToolInfo> {
+    selected_tool_names
+        .iter()
+        .filter_map(|name| mcp_tools.get(name).map(|tool| (name.clone(), tool.clone())))
+        .collect()
+}
+
+fn filter_codex_apps_mcp_tools_only(
+    mcp_tools: &HashMap<String, ToolInfo>,
+    connectors: &[AppInfo],
+) -> HashMap<String, ToolInfo> {
+    let enabled_connectors = connectors
+        .iter()
+        .map(|connector| connector.id.as_str())
+        .collect::<HashSet<_>>();
+
+    mcp_tools
+        .iter()
+        .filter(|(_, tool)| tool.server_name == CODEX_APPS_MCP_SERVER_NAME)
+        .filter(|(_, tool)| {
+            tool.connector_id
+                .as_deref()
+                .is_some_and(|connector_id| enabled_connectors.contains(connector_id))
+        })
+        .map(|(name, tool)| (name.clone(), tool.clone()))
+        .collect()
 }
 
 fn function_call_output_rollout_item(call_id: &str, output: &str) -> RolloutItem {
@@ -257,6 +294,46 @@ fn function_call_output_rollout_item(call_id: &str, output: &str) -> RolloutItem
         call_id: call_id.to_string(),
         output: FunctionCallOutputPayload::from_text(output.to_string()),
     })
+}
+
+fn extract_mcp_tool_selection_from_rollout(rollout_items: &[RolloutItem]) -> Option<Vec<String>> {
+    let mut search_call_ids = HashSet::new();
+    let mut selected = None;
+
+    for item in rollout_items {
+        match item {
+            RolloutItem::ResponseItem(ResponseItem::FunctionCall { name, call_id, .. })
+                if name == SEARCH_TOOL_BM25_TOOL_NAME =>
+            {
+                search_call_ids.insert(call_id.clone());
+            }
+            RolloutItem::ResponseItem(ResponseItem::FunctionCallOutput { call_id, output })
+                if search_call_ids.contains(call_id) =>
+            {
+                let Some(text) = output.text_content() else {
+                    continue;
+                };
+                let Ok(value) = serde_json::from_str::<serde_json::Value>(text) else {
+                    continue;
+                };
+                let Some(items) = value
+                    .get("active_selected_tools")
+                    .and_then(serde_json::Value::as_array)
+                else {
+                    continue;
+                };
+                let parsed = items
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(std::string::ToString::to_string)
+                    .collect::<Vec<_>>();
+                selected = Some(parsed);
+            }
+            _ => {}
+        }
+    }
+
+    selected
 }
 
 #[test]
@@ -622,7 +699,7 @@ fn extract_mcp_tool_selection_from_rollout_reads_search_tool_output() {
         ),
     ];
 
-    let selected = Session::extract_mcp_tool_selection_from_rollout(&rollout_items);
+    let selected = extract_mcp_tool_selection_from_rollout(&rollout_items);
     assert_eq!(
         selected,
         Some(vec![
@@ -653,7 +730,7 @@ fn extract_mcp_tool_selection_from_rollout_latest_valid_payload_wins() {
         ),
     ];
 
-    let selected = Session::extract_mcp_tool_selection_from_rollout(&rollout_items);
+    let selected = extract_mcp_tool_selection_from_rollout(&rollout_items);
     assert_eq!(
         selected,
         Some(vec!["mcp__codex_apps__calendar_delete_event".to_string(),])
@@ -689,7 +766,7 @@ fn extract_mcp_tool_selection_from_rollout_ignores_non_search_and_malformed_payl
         ),
     ];
 
-    let selected = Session::extract_mcp_tool_selection_from_rollout(&rollout_items);
+    let selected = extract_mcp_tool_selection_from_rollout(&rollout_items);
     assert_eq!(
         selected,
         Some(vec!["mcp__codex_apps__calendar_list_events".to_string(),])
@@ -702,7 +779,7 @@ fn extract_mcp_tool_selection_from_rollout_returns_none_without_valid_search_out
         SEARCH_TOOL_BM25_TOOL_NAME,
         "search-1",
     )];
-    let selected = Session::extract_mcp_tool_selection_from_rollout(&rollout_items);
+    let selected = extract_mcp_tool_selection_from_rollout(&rollout_items);
     assert_eq!(selected, None);
 }
 
@@ -1416,6 +1493,7 @@ async fn set_rate_limits_retains_previous_credits() {
             .unwrap_or_else(|| model_info.get_model_instructions(config.personality)),
         compact_prompt: config.compact_prompt.clone(),
         approval_policy: config.permissions.approval_policy.clone(),
+        approvals_reviewer: config.approvals_reviewer,
         sandbox_policy: config.permissions.sandbox_policy.clone(),
         file_system_sandbox_policy: config.permissions.file_system_sandbox_policy.clone(),
         network_sandbox_policy: config.permissions.network_sandbox_policy,
@@ -1430,6 +1508,7 @@ async fn set_rate_limits_retains_previous_credits() {
         dynamic_tools: Vec::new(),
         persist_extended_history: false,
         inherited_shell_snapshot: None,
+        user_shell_override: None,
     };
 
     let mut state = SessionState::new(session_configuration);
@@ -1512,6 +1591,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
             .unwrap_or_else(|| model_info.get_model_instructions(config.personality)),
         compact_prompt: config.compact_prompt.clone(),
         approval_policy: config.permissions.approval_policy.clone(),
+        approvals_reviewer: config.approvals_reviewer,
         sandbox_policy: config.permissions.sandbox_policy.clone(),
         file_system_sandbox_policy: config.permissions.file_system_sandbox_policy.clone(),
         network_sandbox_policy: config.permissions.network_sandbox_policy,
@@ -1526,6 +1606,7 @@ async fn set_rate_limits_updates_plan_type_when_present() {
         dynamic_tools: Vec::new(),
         persist_extended_history: false,
         inherited_shell_snapshot: None,
+        user_shell_override: None,
     };
 
     let mut state = SessionState::new(session_configuration);
@@ -1591,7 +1672,7 @@ fn prefers_structured_content_when_present() {
         meta: None,
     };
 
-    let got = FunctionCallOutputPayload::from(&ctr);
+    let got = ctr.as_function_call_output_payload();
     let expected = FunctionCallOutputPayload {
         body: FunctionCallOutputBody::Text(
             serde_json::to_string(&json!({
@@ -1673,7 +1754,7 @@ fn falls_back_to_content_when_structured_is_null() {
         meta: None,
     };
 
-    let got = FunctionCallOutputPayload::from(&ctr);
+    let got = ctr.as_function_call_output_payload();
     let expected = FunctionCallOutputPayload {
         body: FunctionCallOutputBody::Text(
             serde_json::to_string(&vec![text_block("hello"), text_block("world")]).unwrap(),
@@ -1693,7 +1774,7 @@ fn success_flag_reflects_is_error_true() {
         meta: None,
     };
 
-    let got = FunctionCallOutputPayload::from(&ctr);
+    let got = ctr.as_function_call_output_payload();
     let expected = FunctionCallOutputPayload {
         body: FunctionCallOutputBody::Text(
             serde_json::to_string(&json!({ "message": "bad" })).unwrap(),
@@ -1713,7 +1794,7 @@ fn success_flag_true_with_no_error_and_content_used() {
         meta: None,
     };
 
-    let got = FunctionCallOutputPayload::from(&ctr);
+    let got = ctr.as_function_call_output_payload();
     let expected = FunctionCallOutputPayload {
         body: FunctionCallOutputBody::Text(
             serde_json::to_string(&vec![text_block("alpha")]).unwrap(),
@@ -1866,6 +1947,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
             .unwrap_or_else(|| model_info.get_model_instructions(config.personality)),
         compact_prompt: config.compact_prompt.clone(),
         approval_policy: config.permissions.approval_policy.clone(),
+        approvals_reviewer: config.approvals_reviewer,
         sandbox_policy: config.permissions.sandbox_policy.clone(),
         file_system_sandbox_policy: config.permissions.file_system_sandbox_policy.clone(),
         network_sandbox_policy: config.permissions.network_sandbox_policy,
@@ -1880,6 +1962,7 @@ pub(crate) async fn make_session_configuration_for_tests() -> SessionConfigurati
         dynamic_tools: Vec::new(),
         persist_extended_history: false,
         inherited_shell_snapshot: None,
+        user_shell_override: None,
     }
 }
 
@@ -1925,6 +2008,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_zsh_path() {
             .unwrap_or_else(|| model_info.get_model_instructions(config.personality)),
         compact_prompt: config.compact_prompt.clone(),
         approval_policy: config.permissions.approval_policy.clone(),
+        approvals_reviewer: config.approvals_reviewer,
         sandbox_policy: config.permissions.sandbox_policy.clone(),
         file_system_sandbox_policy: config.permissions.file_system_sandbox_policy.clone(),
         network_sandbox_policy: config.permissions.network_sandbox_policy,
@@ -1939,6 +2023,7 @@ async fn session_new_fails_when_zsh_fork_enabled_without_zsh_path() {
         dynamic_tools: Vec::new(),
         persist_extended_history: false,
         inherited_shell_snapshot: None,
+        user_shell_override: None,
     };
 
     let (tx_event, _rx_event) = async_channel::unbounded();
@@ -1948,13 +2033,14 @@ async fn session_new_fails_when_zsh_fork_enabled_without_zsh_path() {
     let skills_manager = Arc::new(SkillsManager::new(
         config.codex_home.clone(),
         Arc::clone(&plugins_manager),
+        /*bundled_skills_enabled*/ true,
     ));
     let result = Session::new(
         session_configuration,
         Arc::clone(&config),
         auth_manager,
         models_manager,
-        ExecPolicyManager::default(),
+        Arc::new(ExecPolicyManager::default()),
         tx_event,
         agent_status_tx,
         InitialHistory::New,
@@ -1990,7 +2076,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         CollaborationModesConfig::default(),
     ));
     let agent_control = AgentControl::default();
-    let exec_policy = ExecPolicyManager::default();
+    let exec_policy = Arc::new(ExecPolicyManager::default());
     let (agent_status_tx, _agent_status_rx) = watch::channel(AgentStatus::PendingInit);
     let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref());
     let model_info = ModelsManager::construct_model_info_offline_for_tests(model.as_str(), &config);
@@ -2017,6 +2103,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             .unwrap_or_else(|| model_info.get_model_instructions(config.personality)),
         compact_prompt: config.compact_prompt.clone(),
         approval_policy: config.permissions.approval_policy.clone(),
+        approvals_reviewer: config.approvals_reviewer,
         sandbox_policy: config.permissions.sandbox_policy.clone(),
         file_system_sandbox_policy: config.permissions.file_system_sandbox_policy.clone(),
         network_sandbox_policy: config.permissions.network_sandbox_policy,
@@ -2031,6 +2118,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         dynamic_tools: Vec::new(),
         persist_extended_history: false,
         inherited_shell_snapshot: None,
+        user_shell_override: None,
     };
     let per_turn_config = Session::build_per_turn_config(&session_configuration);
     let model_info = ModelsManager::construct_model_info_offline_for_tests(
@@ -2050,10 +2138,17 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let skills_manager = Arc::new(SkillsManager::new(
         config.codex_home.clone(),
         Arc::clone(&plugins_manager),
+        /*bundled_skills_enabled*/ true,
     ));
     let network_approval = Arc::new(NetworkApprovalService::default());
+    let environment = Arc::new(
+        codex_exec_server::Environment::create(config.experimental_exec_server_url.clone())
+            .await
+            .expect("create exec server environment"),
+    );
 
     let file_watcher = Arc::new(FileWatcher::noop());
+    let user_shell = Arc::new(default_user_shell());
     let services = SessionServices {
         mcp_connection_manager: Arc::new(RwLock::new(
             McpConnectionManager::new_mcp_connection_manager_for_tests(
@@ -2072,12 +2167,18 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         ),
         hooks: Hooks::new(HooksConfig {
             legacy_notify_argv: config.notify.clone(),
+            feature_enabled: config.features.enabled(codex_features::Feature::CodexHooks),
+            config_layer_stack: Some(config.config_layer_stack.clone()),
+            shell_program: None,
+            shell_args: Vec::new(),
+            command_hooks: Default::default(),
         }),
+        pending_hook_context: Mutex::new(Vec::new()),
         rollout: Mutex::new(None),
-        user_shell: Arc::new(default_user_shell()),
+        user_shell: Arc::clone(&user_shell),
         shell_snapshot_tx: watch::channel(None).0,
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
-        exec_policy,
+        exec_policy: Arc::clone(&exec_policy),
         auth_manager: auth_manager.clone(),
         session_telemetry: session_telemetry.clone(),
         models_manager: Arc::clone(&models_manager),
@@ -2091,17 +2192,22 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
         network_proxy: None,
         network_approval: Arc::clone(&network_approval),
         state_db: None,
+        scheduled_tasks: Default::default(),
+        scheduled_tasks_cancellation: CancellationToken::new(),
         model_client: ModelClient::new(
             Some(auth_manager.clone()),
             conversation_id,
             session_configuration.provider.clone(),
             session_configuration.session_source.clone(),
             config.model_verbosity,
-            ws_version_from_features(config.as_ref()),
             config.features.enabled(Feature::EnableRequestCompression),
             config.features.enabled(Feature::RuntimeMetrics),
             Session::build_model_client_beta_features_header(config.as_ref()),
         ),
+        code_mode_service: crate::tools::code_mode::CodeModeService::new(
+            config.js_repl_node_path.clone(),
+        ),
+        environment: Arc::clone(&environment),
     };
     let js_repl = Arc::new(JsReplHandle::with_node_path(
         config.js_repl_node_path.clone(),
@@ -2110,27 +2216,37 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
 
     let skills_outcome = Arc::new(services.skills_manager.skills_for_config(&per_turn_config));
     let turn_context = Session::make_turn_context(
+        conversation_id,
         Some(Arc::clone(&auth_manager)),
         &session_telemetry,
         session_configuration.provider.clone(),
         &session_configuration,
+        user_shell.as_ref(),
+        None,
+        config.main_execve_wrapper_exe.as_ref(),
         per_turn_config,
         model_info,
+        models_manager.as_ref(),
         None,
+        Arc::clone(&environment),
         "turn_id".to_string(),
         Arc::clone(&js_repl),
         skills_outcome,
     );
 
+    let (out_of_band_elicitation_paused, _out_of_band_elicitation_paused_rx) =
+        watch::channel(false);
     let session = Session {
         conversation_id,
         tx_event,
         agent_status: agent_status_tx,
+        out_of_band_elicitation_paused,
         state: Mutex::new(state),
         features: config.features.clone(),
         pending_mcp_server_refresh_config: Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        guardian_review_session: GuardianReviewSessionManager::default(),
         services,
         js_repl,
         next_internal_sub_id: AtomicU64::new(0),
@@ -2148,7 +2264,7 @@ async fn notify_request_permissions_response_ignores_unmatched_call_id() {
         .notify_request_permissions_response(
             "missing",
             codex_protocol::request_permissions::RequestPermissionsResponse {
-                permissions: codex_protocol::models::PermissionProfile {
+                permissions: codex_protocol::request_permissions::RequestPermissionProfile {
                     network: Some(codex_protocol::models::NetworkPermissions {
                         enabled: Some(true),
                     }),
@@ -2173,6 +2289,7 @@ async fn submit_with_id_captures_current_span_trace_context() {
         rx_event,
         agent_status,
         session: Arc::new(session),
+        session_loop_termination: completed_session_loop_termination(),
     };
 
     init_test_tracing();
@@ -2288,6 +2405,7 @@ fn submission_dispatch_span_uses_debug_for_realtime_audio() {
                 data: "ZmFrZQ==".into(),
                 sample_rate: 16_000,
                 num_channels: 1,
+                item_id: None,
                 samples_per_channel: Some(160),
             },
         }),
@@ -2420,7 +2538,7 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
         CollaborationModesConfig::default(),
     ));
     let agent_control = AgentControl::default();
-    let exec_policy = ExecPolicyManager::default();
+    let exec_policy = Arc::new(ExecPolicyManager::default());
     let (agent_status_tx, _agent_status_rx) = watch::channel(AgentStatus::PendingInit);
     let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref());
     let model_info = ModelsManager::construct_model_info_offline_for_tests(model.as_str(), &config);
@@ -2447,6 +2565,7 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
             .unwrap_or_else(|| model_info.get_model_instructions(config.personality)),
         compact_prompt: config.compact_prompt.clone(),
         approval_policy: config.permissions.approval_policy.clone(),
+        approvals_reviewer: config.approvals_reviewer,
         sandbox_policy: config.permissions.sandbox_policy.clone(),
         file_system_sandbox_policy: config.permissions.file_system_sandbox_policy.clone(),
         network_sandbox_policy: config.permissions.network_sandbox_policy,
@@ -2461,6 +2580,7 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
         dynamic_tools,
         persist_extended_history: false,
         inherited_shell_snapshot: None,
+        user_shell_override: None,
     };
     let per_turn_config = Session::build_per_turn_config(&session_configuration);
     let model_info = ModelsManager::construct_model_info_offline_for_tests(
@@ -2480,10 +2600,17 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
     let skills_manager = Arc::new(SkillsManager::new(
         config.codex_home.clone(),
         Arc::clone(&plugins_manager),
+        /*bundled_skills_enabled*/ true,
     ));
     let network_approval = Arc::new(NetworkApprovalService::default());
+    let environment = Arc::new(
+        codex_exec_server::Environment::create(config.experimental_exec_server_url.clone())
+            .await
+            .expect("create exec server environment"),
+    );
 
     let file_watcher = Arc::new(FileWatcher::noop());
+    let user_shell = Arc::new(default_user_shell());
     let services = SessionServices {
         mcp_connection_manager: Arc::new(RwLock::new(
             McpConnectionManager::new_mcp_connection_manager_for_tests(
@@ -2502,12 +2629,18 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
         ),
         hooks: Hooks::new(HooksConfig {
             legacy_notify_argv: config.notify.clone(),
+            feature_enabled: config.features.enabled(codex_features::Feature::CodexHooks),
+            config_layer_stack: Some(config.config_layer_stack.clone()),
+            shell_program: None,
+            shell_args: Vec::new(),
+            command_hooks: Default::default(),
         }),
+        pending_hook_context: Mutex::new(Vec::new()),
         rollout: Mutex::new(None),
-        user_shell: Arc::new(default_user_shell()),
+        user_shell: Arc::clone(&user_shell),
         shell_snapshot_tx: watch::channel(None).0,
         show_raw_agent_reasoning: config.show_raw_agent_reasoning,
-        exec_policy,
+        exec_policy: Arc::clone(&exec_policy),
         auth_manager: Arc::clone(&auth_manager),
         session_telemetry: session_telemetry.clone(),
         models_manager: Arc::clone(&models_manager),
@@ -2521,17 +2654,22 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
         network_proxy: None,
         network_approval: Arc::clone(&network_approval),
         state_db: None,
+        scheduled_tasks: Default::default(),
+        scheduled_tasks_cancellation: CancellationToken::new(),
         model_client: ModelClient::new(
             Some(Arc::clone(&auth_manager)),
             conversation_id,
             session_configuration.provider.clone(),
             session_configuration.session_source.clone(),
             config.model_verbosity,
-            ws_version_from_features(config.as_ref()),
             config.features.enabled(Feature::EnableRequestCompression),
             config.features.enabled(Feature::RuntimeMetrics),
             Session::build_model_client_beta_features_header(config.as_ref()),
         ),
+        code_mode_service: crate::tools::code_mode::CodeModeService::new(
+            config.js_repl_node_path.clone(),
+        ),
+        environment: Arc::clone(&environment),
     };
     let js_repl = Arc::new(JsReplHandle::with_node_path(
         config.js_repl_node_path.clone(),
@@ -2540,27 +2678,37 @@ pub(crate) async fn make_session_and_context_with_dynamic_tools_and_rx(
 
     let skills_outcome = Arc::new(services.skills_manager.skills_for_config(&per_turn_config));
     let turn_context = Arc::new(Session::make_turn_context(
+        conversation_id,
         Some(Arc::clone(&auth_manager)),
         &session_telemetry,
         session_configuration.provider.clone(),
         &session_configuration,
+        user_shell.as_ref(),
+        None,
+        config.main_execve_wrapper_exe.as_ref(),
         per_turn_config,
         model_info,
+        models_manager.as_ref(),
         None,
+        Arc::clone(&environment),
         "turn_id".to_string(),
         Arc::clone(&js_repl),
         skills_outcome,
     ));
 
+    let (out_of_band_elicitation_paused, _out_of_band_elicitation_paused_rx) =
+        watch::channel(false);
     let session = Arc::new(Session {
         conversation_id,
         tx_event,
         agent_status: agent_status_tx,
+        out_of_band_elicitation_paused,
         state: Mutex::new(state),
         features: config.features.clone(),
         pending_mcp_server_refresh_config: Mutex::new(None),
         conversation: Arc::new(RealtimeConversationManager::new()),
         active_turn: Mutex::new(None),
+        guardian_review_session: GuardianReviewSessionManager::default(),
         services,
         js_repl,
         next_internal_sub_id: AtomicU64::new(0),
@@ -2624,7 +2772,7 @@ async fn refresh_mcp_servers_is_deferred_until_next_turn() {
 #[tokio::test]
 async fn record_model_warning_appends_user_message() {
     let (mut session, turn_context) = make_session_and_context().await;
-    let features = crate::features::Features::with_defaults().into();
+    let features = codex_features::Features::with_defaults().into();
     session.features = features;
 
     session
@@ -3576,14 +3724,17 @@ async fn fatal_tool_error_stops_turn_and_reports_error() {
     let app_tools = Some(tools.clone());
     let router = ToolRouter::from_config(
         &turn_context.tools_config,
-        Some(
-            tools
-                .into_iter()
-                .map(|(name, tool)| (name, tool.tool))
-                .collect(),
-        ),
-        app_tools,
-        turn_context.dynamic_tools.as_slice(),
+        crate::tools::router::ToolRouterParams {
+            mcp_tools: Some(
+                tools
+                    .into_iter()
+                    .map(|(name, tool)| (name, tool.tool))
+                    .collect(),
+            ),
+            app_tools,
+            discoverable_tools: None,
+            dynamic_tools: turn_context.dynamic_tools.as_slice(),
+        },
     );
     let item = ResponseItem::CustomToolCall {
         id: None,
@@ -3598,16 +3749,20 @@ async fn fatal_tool_error_stops_turn_and_reports_error() {
         .expect("build tool call")
         .expect("tool call present");
     let tracker = Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new()));
-    let err = router
-        .dispatch_tool_call(
+    let result = router
+        .dispatch_tool_call_with_code_mode_result(
             Arc::clone(&session),
             Arc::clone(&turn_context),
             tracker,
             call,
             ToolCallSource::Direct,
         )
-        .await
-        .expect_err("expected fatal error");
+        .await;
+
+    let err = match result {
+        Ok(_) => panic!("expected fatal error"),
+        Err(err) => err,
+    };
 
     match err {
         FunctionCallError::Fatal(message) => {
@@ -3821,7 +3976,12 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
         env: HashMap::new(),
         network: None,
         sandbox_permissions,
+        capture_policy: crate::exec::ExecCapturePolicy::ShellTool,
         windows_sandbox_level: turn_context.windows_sandbox_level,
+        windows_sandbox_private_desktop: turn_context
+            .config
+            .permissions
+            .windows_sandbox_private_desktop,
         justification: Some("test".to_string()),
         arg0: None,
     };
@@ -3833,7 +3993,12 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
         expiration: timeout_ms.into(),
         env: HashMap::new(),
         network: None,
+        capture_policy: crate::exec::ExecCapturePolicy::ShellTool,
         windows_sandbox_level: turn_context.windows_sandbox_level,
+        windows_sandbox_private_desktop: turn_context
+            .config
+            .permissions
+            .windows_sandbox_private_desktop,
         justification: params.justification.clone(),
         arg0: None,
     };
@@ -3851,6 +4016,7 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
             tracker: Arc::clone(&turn_diff_tracker),
             call_id,
             tool_name: tool_name.to_string(),
+            tool_namespace: None,
             payload: ToolPayload::Function {
                 arguments: serde_json::json!({
                     "command": params.command.clone(),
@@ -3894,6 +4060,7 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
             tracker: Arc::clone(&turn_diff_tracker),
             call_id: "test-call-2".to_string(),
             tool_name: tool_name.to_string(),
+            tool_namespace: None,
             payload: ToolPayload::Function {
                 arguments: serde_json::json!({
                     "command": params2.command.clone(),
@@ -3907,12 +4074,12 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
         })
         .await;
 
-    let output = match resp2.expect("expected Ok result") {
-        ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            ..
-        } => content,
-        _ => panic!("unexpected tool output"),
+    let FunctionToolOutput {
+        body: FunctionCallOutputBody::Text(output),
+        ..
+    } = resp2.expect("expected Ok result")
+    else {
+        panic!("unexpected tool output");
     };
 
     #[derive(Deserialize, PartialEq, Eq, Debug)]
@@ -3955,6 +4122,7 @@ async fn unified_exec_rejects_escalated_permissions_when_policy_not_on_request()
             tracker: Arc::clone(&tracker),
             call_id: "exec-call".to_string(),
             tool_name: "exec_command".to_string(),
+            tool_namespace: None,
             payload: ToolPayload::Function {
                 arguments: serde_json::json!({
                     "cmd": "echo hi",

@@ -56,9 +56,7 @@ fn windows_shell_safety_description() -> String {
 
 fn search_capable_model_info() -> ModelInfo {
     let config = test_config();
-    let mut model_info =
-        ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
-    model_info.supports_search_tool = true;
+    let model_info = ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
     model_info
 }
 
@@ -1933,7 +1931,6 @@ fn search_tool_requires_model_capability_only() {
     let available_models = Vec::new();
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_info: &ModelInfo {
-            supports_search_tool: false,
             ..model_info.clone()
         },
         available_models: &available_models,

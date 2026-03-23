@@ -60,17 +60,18 @@ fn restricted_read_implicitly_allows_helper_executables() -> std::io::Result<()>
     let expected_allowed_arg0_dir = AbsolutePathBuf::try_from(allowed_arg0_dir)?;
     let expected_sibling_arg0_dir = AbsolutePathBuf::try_from(sibling_arg0_dir)?;
     let policy = &config.permissions.file_system_sandbox_policy;
+    let readable_roots = policy.get_readable_roots_with_cwd(&cwd);
 
     assert!(
-        policy.can_read_path_with_cwd(expected_zsh.as_path(), &cwd),
+        readable_roots.contains(&expected_zsh),
         "expected zsh helper path to be readable, policy: {policy:?}"
     );
     assert!(
-        policy.can_read_path_with_cwd(expected_allowed_arg0_dir.as_path(), &cwd),
+        readable_roots.contains(&expected_allowed_arg0_dir),
         "expected active arg0 helper dir to be readable, policy: {policy:?}"
     );
     assert!(
-        !policy.can_read_path_with_cwd(expected_sibling_arg0_dir.as_path(), &cwd),
+        !readable_roots.contains(&expected_sibling_arg0_dir),
         "expected sibling arg0 helper dir to remain unreadable, policy: {policy:?}"
     );
 

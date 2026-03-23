@@ -3,7 +3,7 @@
 
 use anyhow::Result;
 use codex_core::config::Constrained;
-use codex_core::features::Feature;
+use codex_features::Feature;
 use codex_protocol::models::FileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
@@ -172,7 +172,7 @@ async fn expect_request_permissions_event(
     match event {
         EventMsg::RequestPermissions(request) => {
             assert_eq!(request.call_id, expected_call_id);
-            request.permissions
+            request.permissions.into()
         }
         EventMsg::TurnComplete(_) => panic!("expected request_permissions before completion"),
         other => panic!("unexpected event: {other:?}"),
@@ -258,7 +258,7 @@ async fn approved_folder_write_request_permissions_unblocks_later_exec_without_s
         .submit(Op::RequestPermissionsResponse {
             id: "permissions-call".to_string(),
             response: RequestPermissionsResponse {
-                permissions: normalized_requested_permissions,
+                permissions: normalized_requested_permissions.into(),
                 scope: PermissionGrantScope::Turn,
             },
         })
@@ -377,7 +377,7 @@ async fn approved_folder_write_request_permissions_unblocks_later_apply_patch_wi
         .submit(Op::RequestPermissionsResponse {
             id: "permissions-call".to_string(),
             response: RequestPermissionsResponse {
-                permissions: normalized_requested_permissions,
+                permissions: normalized_requested_permissions.into(),
                 scope: PermissionGrantScope::Turn,
             },
         })

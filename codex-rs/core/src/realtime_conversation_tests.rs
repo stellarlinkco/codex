@@ -2,22 +2,22 @@ use super::RealtimeHandoffState;
 use super::RealtimeSessionKind;
 use super::realtime_text_from_handoff_request;
 use async_channel::bounded;
+use codex_protocol::protocol::RealtimeHandoffMessage;
 use codex_protocol::protocol::RealtimeHandoffRequested;
-use codex_protocol::protocol::RealtimeTranscriptEntry;
 use pretty_assertions::assert_eq;
 
 #[test]
-fn extracts_text_from_handoff_request_active_transcript() {
+fn extracts_text_from_handoff_request_messages() {
     let handoff = RealtimeHandoffRequested {
         handoff_id: "handoff_1".to_string(),
         item_id: "item_1".to_string(),
         input_transcript: "ignored".to_string(),
-        active_transcript: vec![
-            RealtimeTranscriptEntry {
+        messages: vec![
+            RealtimeHandoffMessage {
                 role: "user".to_string(),
                 text: "hello".to_string(),
             },
-            RealtimeTranscriptEntry {
+            RealtimeHandoffMessage {
                 role: "assistant".to_string(),
                 text: "hi there".to_string(),
             },
@@ -25,7 +25,7 @@ fn extracts_text_from_handoff_request_active_transcript() {
     };
     assert_eq!(
         realtime_text_from_handoff_request(&handoff),
-        Some("user: hello\nassistant: hi there".to_string())
+        Some("hello\nhi there".to_string())
     );
 }
 
@@ -35,7 +35,7 @@ fn extracts_text_from_handoff_request_input_transcript_if_messages_missing() {
         handoff_id: "handoff_1".to_string(),
         item_id: "item_1".to_string(),
         input_transcript: "ignored".to_string(),
-        active_transcript: vec![],
+        messages: vec![],
     };
     assert_eq!(
         realtime_text_from_handoff_request(&handoff),
@@ -49,7 +49,7 @@ fn ignores_empty_handoff_request_input_transcript() {
         handoff_id: "handoff_1".to_string(),
         item_id: "item_1".to_string(),
         input_transcript: String::new(),
-        active_transcript: vec![],
+        messages: vec![],
     };
     assert_eq!(realtime_text_from_handoff_request(&handoff), None);
 }

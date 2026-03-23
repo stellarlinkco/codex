@@ -6,6 +6,7 @@ use super::connection_handling_websocket::create_config_toml;
 use super::connection_handling_websocket::read_notification_for_method;
 use super::connection_handling_websocket::read_response_and_notification_for_method;
 use super::connection_handling_websocket::read_response_for_id;
+use super::connection_handling_websocket::reserve_local_addr;
 use super::connection_handling_websocket::send_initialize_request;
 use super::connection_handling_websocket::send_request;
 use super::connection_handling_websocket::spawn_websocket_server;
@@ -33,7 +34,8 @@ async fn thread_name_updated_broadcasts_for_loaded_threads() -> Result<()> {
     create_config_toml(codex_home.path(), &server.uri(), "never")?;
     let conversation_id = create_rollout(codex_home.path(), "2025-01-05T12-00-00")?;
 
-    let (mut process, bind_addr) = spawn_websocket_server(codex_home.path()).await?;
+    let bind_addr = reserve_local_addr()?;
+    let mut process = spawn_websocket_server(codex_home.path(), bind_addr).await?;
 
     let result = async {
         let mut ws1 = connect_websocket(bind_addr).await?;
@@ -94,7 +96,8 @@ async fn thread_name_updated_broadcasts_for_not_loaded_threads() -> Result<()> {
     create_config_toml(codex_home.path(), &server.uri(), "never")?;
     let conversation_id = create_rollout(codex_home.path(), "2025-01-05T12-05-00")?;
 
-    let (mut process, bind_addr) = spawn_websocket_server(codex_home.path()).await?;
+    let bind_addr = reserve_local_addr()?;
+    let mut process = spawn_websocket_server(codex_home.path(), bind_addr).await?;
 
     let result = async {
         let mut ws1 = connect_websocket(bind_addr).await?;

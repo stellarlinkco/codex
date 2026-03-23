@@ -2,8 +2,8 @@
 
 use anyhow::Result;
 use codex_core::config::Constrained;
-use codex_core::features::Feature;
 use codex_core::sandboxing::SandboxPermissions;
+use codex_features::Feature;
 use codex_protocol::models::FileSystemPermissions;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::protocol::AskForApproval;
@@ -270,7 +270,7 @@ async fn expect_request_permissions_event(
     match event {
         EventMsg::RequestPermissions(request) => {
             assert_eq!(request.call_id, expected_call_id);
-            request.permissions
+            request.permissions.into()
         }
         EventMsg::TurnComplete(_) => panic!("expected request_permissions before completion"),
         other => panic!("unexpected event: {other:?}"),
@@ -993,7 +993,7 @@ async fn request_permissions_grants_apply_to_later_exec_command_calls() -> Resul
         .submit(Op::RequestPermissionsResponse {
             id: "permissions-call".to_string(),
             response: RequestPermissionsResponse {
-                permissions: normalized_requested_permissions.clone(),
+                permissions: normalized_requested_permissions.clone().into(),
                 scope: PermissionGrantScope::Turn,
             },
         })
@@ -1107,7 +1107,7 @@ async fn request_permissions_preapprove_explicit_exec_permissions_outside_on_req
         .submit(Op::RequestPermissionsResponse {
             id: "permissions-call".to_string(),
             response: RequestPermissionsResponse {
-                permissions: normalized_requested_permissions,
+                permissions: normalized_requested_permissions.into(),
                 scope: PermissionGrantScope::Turn,
             },
         })
@@ -1220,7 +1220,7 @@ async fn request_permissions_grants_apply_to_later_shell_command_calls() -> Resu
         .submit(Op::RequestPermissionsResponse {
             id: "permissions-call".to_string(),
             response: RequestPermissionsResponse {
-                permissions: normalized_requested_permissions.clone(),
+                permissions: normalized_requested_permissions.clone().into(),
                 scope: PermissionGrantScope::Turn,
             },
         })
@@ -1363,7 +1363,7 @@ async fn partial_request_permissions_grants_do_not_preapprove_new_permissions() 
         .submit(Op::RequestPermissionsResponse {
             id: "permissions-call".to_string(),
             response: RequestPermissionsResponse {
-                permissions: granted_permissions.clone(),
+                permissions: granted_permissions.clone().into(),
                 scope: PermissionGrantScope::Turn,
             },
         })
@@ -1481,7 +1481,7 @@ async fn request_permissions_grants_do_not_carry_across_turns() -> Result<()> {
         .submit(Op::RequestPermissionsResponse {
             id: "permissions-call".to_string(),
             response: RequestPermissionsResponse {
-                permissions: normalized_requested_permissions,
+                permissions: normalized_requested_permissions.into(),
                 scope: PermissionGrantScope::Turn,
             },
         })
@@ -1598,7 +1598,7 @@ async fn request_permissions_session_grants_carry_across_turns() -> Result<()> {
         .submit(Op::RequestPermissionsResponse {
             id: "permissions-call".to_string(),
             response: RequestPermissionsResponse {
-                permissions: normalized_requested_permissions,
+                permissions: normalized_requested_permissions.into(),
                 scope: PermissionGrantScope::Session,
             },
         })

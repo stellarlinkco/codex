@@ -79,7 +79,6 @@ fn test_model_info(
         supported_in_api: true,
         input_modalities,
         used_fallback_model_metadata: false,
-        supports_search_tool: false,
         priority: 1,
         upgrade: None,
         base_instructions: "base instructions".to_string(),
@@ -98,6 +97,7 @@ fn test_model_info(
         auto_compact_token_limit: None,
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
+        prefer_websockets: false,
     }
 }
 
@@ -891,7 +891,6 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
         supported_in_api: true,
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,
-        supports_search_tool: false,
         priority: 1,
         upgrade: None,
         base_instructions: "base instructions".to_string(),
@@ -910,6 +909,7 @@ async fn model_switch_to_smaller_model_updates_token_context_window() -> Result<
         auto_compact_token_limit: None,
         effective_context_window_percent,
         experimental_supported_tools: Vec::new(),
+        prefer_websockets: false,
     };
     let mut smaller_model = base_model.clone();
     smaller_model.slug = smaller_model_slug.to_string();

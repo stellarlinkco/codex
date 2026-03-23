@@ -76,6 +76,7 @@ fn test_skill_metadata(permission_profile: Option<PermissionProfile>) -> SkillMe
         dependencies: None,
         policy: None,
         permission_profile,
+        managed_network_override: None,
         path_to_skills_md: PathBuf::from("/tmp/skill/SKILL.md"),
         scope: SkillScope::User,
     }
@@ -547,7 +548,7 @@ async fn prepare_escalated_exec_turn_default_preserves_macos_seatbelt_extensions
             ..Default::default()
         }),
         codex_linux_sandbox_exe: None,
-        use_linux_sandbox_bwrap: false,
+        use_legacy_landlock: false,
     };
 
     let prepared = executor
@@ -596,7 +597,7 @@ async fn prepare_escalated_exec_permissions_preserve_macos_seatbelt_extensions()
         sandbox_policy_cwd: cwd.to_path_buf(),
         macos_seatbelt_profile_extensions: None,
         codex_linux_sandbox_exe: None,
-        use_linux_sandbox_bwrap: false,
+        use_legacy_landlock: false,
     };
 
     let permissions = Permissions {
@@ -610,6 +611,7 @@ async fn prepare_escalated_exec_permissions_preserve_macos_seatbelt_extensions()
         allow_login_shell: true,
         shell_environment_policy: ShellEnvironmentPolicy::default(),
         windows_sandbox_mode: None,
+        windows_sandbox_private_desktop: false,
         macos_seatbelt_profile_extensions: Some(MacOsSeatbeltProfileExtensions {
             macos_preferences: MacOsPreferencesPermission::ReadWrite,
             ..Default::default()
@@ -675,7 +677,7 @@ async fn prepare_escalated_exec_permission_profile_unions_turn_and_requested_mac
             ..Default::default()
         }),
         codex_linux_sandbox_exe: None,
-        use_linux_sandbox_bwrap: false,
+        use_legacy_landlock: false,
     };
 
     let prepared = executor

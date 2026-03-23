@@ -548,12 +548,10 @@ mod phase2 {
         }
 
         async fn shutdown_threads(&self) {
-            let report = self
-                .manager
-                .shutdown_all_threads_bounded(std::time::Duration::from_secs(10))
-                .await;
-            assert!(report.submit_failed.is_empty());
-            assert!(report.timed_out.is_empty());
+            self.manager
+                .remove_and_close_all_threads()
+                .await
+                .expect("all test threads should shut down");
         }
 
         fn user_input_ops_count(&self) -> usize {

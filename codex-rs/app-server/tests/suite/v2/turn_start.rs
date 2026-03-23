@@ -1673,6 +1673,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
     const SPAWN_CALL_ID: &str = "spawn-call-1";
     const REQUESTED_MODEL: &str = "gpt-5.1";
     const REQUESTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Low;
+    const EXPECTED_REASONING_EFFORT: ReasoningEffort = ReasoningEffort::Medium;
 
     let server = responses::start_mock_server().await;
     let spawn_args = serde_json::to_string(&json!({
@@ -1779,7 +1780,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
             receiver_thread_ids: Vec::new(),
             prompt: Some(CHILD_PROMPT.to_string()),
             model: Some(REQUESTED_MODEL.to_string()),
-            reasoning_effort: Some(REQUESTED_REASONING_EFFORT),
+            reasoning_effort: Some(EXPECTED_REASONING_EFFORT),
             agents_states: HashMap::new(),
         }
     );
@@ -1824,7 +1825,7 @@ async fn turn_start_emits_spawn_agent_item_with_model_metadata_v2() -> Result<()
     assert_eq!(receiver_thread_ids, vec![receiver_thread_id.clone()]);
     assert_eq!(prompt, Some(CHILD_PROMPT.to_string()));
     assert_eq!(model, Some(REQUESTED_MODEL.to_string()));
-    assert_eq!(reasoning_effort, Some(REQUESTED_REASONING_EFFORT));
+    assert_eq!(reasoning_effort, Some(EXPECTED_REASONING_EFFORT));
     let agent_state = agents_states
         .get(&receiver_thread_id)
         .expect("spawn completion should include child agent state");

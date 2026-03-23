@@ -29,6 +29,7 @@ use super::connection_handling_websocket::assert_no_message;
 use super::connection_handling_websocket::connect_websocket;
 use super::connection_handling_websocket::create_config_toml;
 use super::connection_handling_websocket::read_jsonrpc_message;
+use super::connection_handling_websocket::reserve_local_addr;
 use super::connection_handling_websocket::send_initialize_request;
 use super::connection_handling_websocket::send_request;
 use super::connection_handling_websocket::spawn_websocket_server;
@@ -717,7 +718,8 @@ async fn command_exec_process_ids_are_connection_scoped_and_disconnect_terminate
             .as_nanos()
     );
 
-    let (mut process, bind_addr) = spawn_websocket_server(codex_home.path()).await?;
+    let bind_addr = reserve_local_addr()?;
+    let mut process = spawn_websocket_server(codex_home.path(), bind_addr).await?;
 
     let mut ws1 = connect_websocket(bind_addr).await?;
     let mut ws2 = connect_websocket(bind_addr).await?;

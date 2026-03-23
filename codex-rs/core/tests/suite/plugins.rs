@@ -7,7 +7,7 @@ use std::time::Instant;
 
 use anyhow::Result;
 use codex_core::CodexAuth;
-use codex_core::features::Feature;
+use codex_features::Feature;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::Op;
 use core_test_support::apps_test_server::AppsTestServer;
@@ -116,10 +116,6 @@ async fn build_apps_enabled_plugin_test_codex(
             config
                 .features
                 .enable(Feature::Apps)
-                .expect("test config should allow feature update");
-            config
-                .features
-                .disable(Feature::AppsMcpGateway)
                 .expect("test config should allow feature update");
             config.chatgpt_base_url = apps_base_url;
         });
@@ -315,7 +311,6 @@ async fn plugin_apps_expose_tools_after_canonical_name_mention() -> Result<()> {
         .with_auth(CodexAuth::from_api_key("Test API Key"))
         .with_config(move |config| {
             let _ = config.features.enable(Feature::Apps);
-            let _ = config.features.disable(Feature::AppsMcpGateway);
             config.chatgpt_base_url = apps_server.chatgpt_base_url;
         });
     let codex = builder

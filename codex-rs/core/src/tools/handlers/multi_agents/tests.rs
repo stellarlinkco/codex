@@ -12,6 +12,7 @@ use crate::protocol::Op;
 use crate::protocol::SandboxPolicy;
 use crate::protocol::SessionSource;
 use crate::protocol::SubAgentSource;
+use crate::tools::context::FunctionToolOutput;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_hooks::CommandHookConfig;
 use codex_hooks::CommandHooksConfig;
@@ -19,6 +20,7 @@ use codex_hooks::Hooks;
 use codex_hooks::HooksConfig;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::RolloutItem;
@@ -47,6 +49,7 @@ fn invocation(
         tracker: Arc::new(Mutex::new(TurnDiffTracker::default())),
         call_id: "call-1".to_string(),
         tool_name: tool_name.to_string(),
+        tool_namespace: None,
         payload,
     }
 }
@@ -60,7 +63,7 @@ fn function_payload(args: serde_json::Value) -> ToolPayload {
 fn thread_manager() -> ThreadManager {
     ThreadManager::with_models_provider_for_tests(
         CodexAuth::from_api_key("dummy"),
-        built_in_model_providers()["openai"].clone(),
+        built_in_model_providers(/* openai_base_url */ None)["openai"].clone(),
     )
 }
 
@@ -298,7 +301,7 @@ async fn spawn_agent_uses_explorer_role_and_inherits_approval_policy() {
         .handle(invocation)
         .await
         .expect("spawn_agent should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(content),
         ..
     } = output
@@ -344,7 +347,7 @@ async fn spawn_agent_accepts_model_provider_and_model_overrides() {
         .handle(invocation)
         .await
         .expect("spawn_agent should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(content),
         ..
     } = output
@@ -388,7 +391,7 @@ async fn spawn_agent_accepts_backendground_alias() {
         .handle(invocation)
         .await
         .expect("spawn_agent should accept backendground alias");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(content),
         ..
     } = output
@@ -432,7 +435,7 @@ async fn spawn_agent_accepts_background_field() {
         .handle(invocation)
         .await
         .expect("spawn_agent should accept background field");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(content),
         ..
     } = output
@@ -483,6 +486,7 @@ async fn spawn_agent_dispatches_subagent_start_hook() {
             }],
             ..Default::default()
         },
+        ..Default::default()
     });
 
     let invocation = invocation(
@@ -497,7 +501,7 @@ async fn spawn_agent_dispatches_subagent_start_hook() {
         .handle(invocation)
         .await
         .expect("spawn_agent should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(content),
         ..
     } = output
@@ -621,7 +625,7 @@ async fn spawn_agent_worktree_sets_cwd_and_close_agent_cleans_up() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_agent with worktree should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         success: spawn_success,
         ..
@@ -660,7 +664,7 @@ async fn spawn_agent_worktree_sets_cwd_and_close_agent_cleans_up() {
         .handle(close_invocation)
         .await
         .expect("close_agent should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(close_content),
         success: close_success,
         ..
@@ -735,6 +739,7 @@ async fn spawn_agent_rejects_when_depth_limit_exceeded() {
     turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id: session.conversation_id,
         depth: turn.config.agent_max_depth,
+        agent_path: None,
         agent_nickname: None,
         agent_role: None,
     });
@@ -1054,7 +1059,7 @@ async fn resume_agent_noops_for_active_agent() {
         .handle(invocation)
         .await
         .expect("resume_agent should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(content),
         success,
         ..
@@ -1123,7 +1128,7 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
         .handle(resume_invocation)
         .await
         .expect("resume_agent should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(content),
         success,
         ..
@@ -1146,7 +1151,7 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
         .handle(send_invocation)
         .await
         .expect("send_input should succeed after resume");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(content),
         success,
         ..
@@ -1179,6 +1184,7 @@ async fn resume_agent_rejects_when_depth_limit_exceeded() {
     turn.session_source = SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
         parent_thread_id: session.conversation_id,
         depth: turn.config.agent_max_depth,
+        agent_path: None,
         agent_nickname: None,
         agent_role: None,
     });
@@ -1283,7 +1289,7 @@ async fn wait_returns_not_found_for_missing_agents() {
         .handle(invocation)
         .await
         .expect("wait should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(content),
         success,
         ..
@@ -1323,7 +1329,7 @@ async fn wait_times_out_when_status_is_not_final() {
         .handle(invocation)
         .await
         .expect("wait should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(content),
         success,
         ..
@@ -1419,7 +1425,7 @@ async fn wait_returns_final_status_without_timeout() {
         .handle(invocation)
         .await
         .expect("wait should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(content),
         success,
         ..
@@ -1563,7 +1569,7 @@ async fn close_agent_submits_shutdown_and_returns_status() {
         .handle(invocation)
         .await
         .expect("close_agent should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(content),
         success,
         ..
@@ -1613,7 +1619,7 @@ async fn close_agent_releases_slot_for_already_shutdown_agent() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_agent should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         success: spawn_success,
         ..
@@ -1676,7 +1682,7 @@ async fn close_agent_releases_slot_for_already_shutdown_agent() {
         .handle(unblocked_invocation)
         .await
         .expect("spawn_agent should succeed after close_agent releases slot");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(unblocked_content),
         success: unblocked_success,
         ..
@@ -1721,7 +1727,7 @@ async fn spawn_agent_reaps_shutdown_agent_on_thread_limit() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_agent should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         success: spawn_success,
         ..
@@ -1770,7 +1776,7 @@ async fn spawn_agent_reaps_shutdown_agent_on_thread_limit() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_agent should succeed by reaping shutdown agent");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         success: spawn_success,
         ..
@@ -1822,7 +1828,7 @@ async fn spawn_team_reaps_shutdown_agent_on_thread_limit() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_agent should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         success: spawn_success,
         ..
@@ -1875,7 +1881,7 @@ async fn spawn_team_reaps_shutdown_agent_on_thread_limit() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_team should succeed by reaping shutdown agent");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         success: spawn_success,
         ..
@@ -1927,7 +1933,7 @@ async fn spawn_agent_fails_when_limit_reached_without_reclaimable_threads() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_agent should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         success: spawn_success,
         ..
@@ -2187,7 +2193,7 @@ async fn close_team_releases_slot_for_already_shutdown_member() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         success: spawn_success,
         ..
@@ -2253,7 +2259,7 @@ async fn close_team_releases_slot_for_already_shutdown_member() {
         .handle(unblocked_invocation)
         .await
         .expect("spawn_agent should succeed after close_team releases slot");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(unblocked_content),
         success: unblocked_success,
         ..
@@ -2302,7 +2308,7 @@ async fn team_cleanup_fails_when_teammate_is_active() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         success: spawn_success,
         ..
@@ -2373,7 +2379,7 @@ async fn team_cleanup_fails_when_teammate_is_active() {
         .handle(unblocked_invocation)
         .await
         .expect("spawn_agent should succeed after team_cleanup releases slot");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(unblocked_content),
         success: unblocked_success,
         ..
@@ -2501,7 +2507,7 @@ async fn spawn_team_wait_team_and_close_team_flow() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         success: spawn_success,
         ..
@@ -2602,7 +2608,7 @@ async fn spawn_team_wait_team_and_close_team_flow() {
         .handle(wait_invocation)
         .await
         .expect("wait_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(wait_content),
         success: wait_success,
         ..
@@ -2636,7 +2642,7 @@ async fn spawn_team_wait_team_and_close_team_flow() {
         .handle(close_invocation)
         .await
         .expect("close_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(close_content),
         success: close_success,
         ..
@@ -2754,7 +2760,7 @@ async fn wait_team_any_includes_non_final_member_statuses_in_events() {
         ))
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         ..
     } = spawn_output
@@ -2850,7 +2856,7 @@ async fn team_cleanup_only_removes_requested_team_when_multiple_teams_exist() {
         ))
         .await
         .expect("spawn_team team-a should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_team_a_content),
         ..
     } = spawn_team_a_output
@@ -2879,7 +2885,7 @@ async fn team_cleanup_only_removes_requested_team_when_multiple_teams_exist() {
         ))
         .await
         .expect("spawn_team team-b should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_team_b_content),
         ..
     } = spawn_team_b_output
@@ -2979,7 +2985,7 @@ async fn team_cleanup_only_removes_requested_team_when_multiple_teams_exist() {
         ))
         .await
         .expect("wait_team team-b should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(wait_team_b_content),
         success: wait_team_b_success,
         ..
@@ -3045,7 +3051,7 @@ async fn spawn_team_accepts_backendground_alias() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_team should accept backendground alias");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         success: spawn_success,
         ..
@@ -3071,7 +3077,7 @@ async fn spawn_team_accepts_backendground_alias() {
         .handle(close_invocation)
         .await
         .expect("close_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         success: close_success,
         ..
     } = close_output
@@ -3109,7 +3115,7 @@ async fn spawn_team_accepts_background_field() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_team should accept background field");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         success: spawn_success,
         ..
@@ -3135,7 +3141,7 @@ async fn spawn_team_accepts_background_field() {
         .handle(close_invocation)
         .await
         .expect("close_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         success: close_success,
         ..
     } = close_output
@@ -3167,7 +3173,7 @@ async fn spawn_team_background_member_auto_closes_after_shutdown() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         success: spawn_success,
         ..
@@ -3335,7 +3341,7 @@ async fn close_team_cleans_worktree_leases_for_worktree_members() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_team with worktree members should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         success: spawn_success,
         ..
@@ -3381,7 +3387,7 @@ async fn close_team_cleans_worktree_leases_for_worktree_members() {
         .handle(close_invocation)
         .await
         .expect("close_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(close_content),
         success: close_success,
         ..
@@ -3437,7 +3443,7 @@ async fn close_team_partial_close_removes_only_selected_member_worktree() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_team with worktree members should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         success: spawn_success,
         ..
@@ -3467,7 +3473,7 @@ async fn close_team_partial_close_removes_only_selected_member_worktree() {
         .handle(partial_close_invocation)
         .await
         .expect("close_team should close selected member");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(partial_close_content),
         success: partial_close_success,
         ..
@@ -3508,7 +3514,7 @@ async fn close_team_partial_close_removes_only_selected_member_worktree() {
         .handle(final_close_invocation)
         .await
         .expect("close remaining team member");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         success: final_close_success,
         ..
     } = final_close_output
@@ -3595,7 +3601,7 @@ async fn team_cleanup_removes_worktrees_when_members_are_already_shutdown() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_team with worktree members should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         success: spawn_success,
         ..
@@ -3649,7 +3655,7 @@ async fn team_cleanup_removes_worktrees_when_members_are_already_shutdown() {
         .handle(cleanup_invocation)
         .await
         .expect("team_cleanup should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(cleanup_content),
         success: cleanup_success,
         ..
@@ -3704,7 +3710,7 @@ async fn wait_team_any_returns_triggered_member() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         ..
     } = spawn_output
@@ -3735,7 +3741,7 @@ async fn wait_team_any_returns_triggered_member() {
         .handle(wait_invocation)
         .await
         .expect("wait_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(wait_content),
         ..
     } = wait_output
@@ -3792,7 +3798,7 @@ async fn close_team_partial_close_updates_persisted_team_config() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         ..
     } = spawn_output
@@ -3815,7 +3821,7 @@ async fn close_team_partial_close_updates_persisted_team_config() {
         .handle(partial_close_invocation)
         .await
         .expect("close_team should succeed for selected members");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(partial_close_content),
         ..
     } = partial_close_output
@@ -3922,7 +3928,7 @@ async fn team_task_lifecycle_and_team_cleanup_flow() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         ..
     } = spawn_output
@@ -3944,7 +3950,7 @@ async fn team_task_lifecycle_and_team_cleanup_flow() {
         .handle(list_invocation)
         .await
         .expect("team_task_list should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(list_content),
         ..
     } = list_output
@@ -3976,7 +3982,7 @@ async fn team_task_lifecycle_and_team_cleanup_flow() {
         .handle(claim_next_invocation)
         .await
         .expect("team_task_claim_next should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(claim_next_content),
         ..
     } = claim_next_output
@@ -4005,7 +4011,7 @@ async fn team_task_lifecycle_and_team_cleanup_flow() {
         .handle(complete_invocation)
         .await
         .expect("team_task_complete should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(complete_content),
         ..
     } = complete_output
@@ -4037,7 +4043,7 @@ async fn team_task_lifecycle_and_team_cleanup_flow() {
         .handle(claim_invocation)
         .await
         .expect("team_task_claim should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(claim_content),
         ..
     } = claim_output
@@ -4074,7 +4080,7 @@ async fn team_task_lifecycle_and_team_cleanup_flow() {
         .handle(cleanup_invocation)
         .await
         .expect("team_cleanup should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(cleanup_content),
         ..
     } = cleanup_output
@@ -4130,7 +4136,7 @@ async fn team_task_claim_and_complete_error_paths() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         ..
     } = spawn_output
@@ -4196,7 +4202,7 @@ async fn team_task_claim_and_complete_error_paths() {
         .handle(complete_planner_invocation)
         .await
         .expect("team_task_complete for planner should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(complete_planner_content),
         ..
     } = complete_planner_output
@@ -4225,7 +4231,7 @@ async fn team_task_claim_and_complete_error_paths() {
         .handle(claim_worker_invocation)
         .await
         .expect("team_task_claim should succeed after dependency completion");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(claim_worker_content),
         ..
     } = claim_worker_output
@@ -4250,7 +4256,7 @@ async fn team_task_claim_and_complete_error_paths() {
         .handle(complete_worker_invocation)
         .await
         .expect("team_task_complete for worker should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(complete_worker_content),
         ..
     } = complete_worker_output
@@ -4335,7 +4341,7 @@ async fn team_message_and_team_broadcast_send_inputs() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         ..
     } = spawn_output
@@ -4364,7 +4370,7 @@ async fn team_message_and_team_broadcast_send_inputs() {
         .handle(message_invocation)
         .await
         .expect("team_message should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(message_content),
         ..
     } = message_output
@@ -4390,7 +4396,7 @@ async fn team_message_and_team_broadcast_send_inputs() {
         .handle(broadcast_invocation)
         .await
         .expect("team_broadcast should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(broadcast_content),
         ..
     } = broadcast_output
@@ -4467,7 +4473,7 @@ async fn team_message_uses_team_id_when_member_names_overlap() {
         ))
         .await
         .expect("spawn_team team-a should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_team_a_content),
         ..
     } = spawn_team_a_output
@@ -4495,7 +4501,7 @@ async fn team_message_uses_team_id_when_member_names_overlap() {
         ))
         .await
         .expect("spawn_team team-b should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_team_b_content),
         ..
     } = spawn_team_b_output
@@ -4524,7 +4530,7 @@ async fn team_message_uses_team_id_when_member_names_overlap() {
         ))
         .await
         .expect("team_message team-a should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(message_team_a_content),
         ..
     } = message_team_a_output
@@ -4548,7 +4554,7 @@ async fn team_message_uses_team_id_when_member_names_overlap() {
         ))
         .await
         .expect("team_message team-b should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(message_team_b_content),
         ..
     } = message_team_b_output
@@ -4651,7 +4657,7 @@ async fn team_message_persists_inbox_when_delivery_fails() {
         .handle(spawn_invocation)
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         ..
     } = spawn_output
@@ -4688,7 +4694,7 @@ async fn team_message_persists_inbox_when_delivery_fails() {
         .handle(message_invocation)
         .await
         .expect("team_message should succeed even if delivery fails");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(message_content),
         ..
     } = message_output
@@ -4743,7 +4749,7 @@ async fn team_ask_lead_persists_and_lead_can_pop_and_ack() {
         ))
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         ..
     } = spawn_output
@@ -4777,7 +4783,7 @@ async fn team_ask_lead_persists_and_lead_can_pop_and_ack() {
         ))
         .await
         .expect("team_ask_lead should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(ask_content),
         ..
     } = ask_output
@@ -4812,7 +4818,7 @@ async fn team_ask_lead_persists_and_lead_can_pop_and_ack() {
         ))
         .await
         .expect("team_inbox_pop should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(pop_content),
         ..
     } = pop_output
@@ -4844,7 +4850,7 @@ async fn team_ask_lead_persists_and_lead_can_pop_and_ack() {
         ))
         .await
         .expect("team_inbox_ack should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(ack_content),
         ..
     } = ack_output
@@ -4868,7 +4874,7 @@ async fn team_ask_lead_persists_and_lead_can_pop_and_ack() {
         ))
         .await
         .expect("team_inbox_pop should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(pop_again_content),
         ..
     } = pop_again_output
@@ -4904,7 +4910,7 @@ async fn team_inbox_ack_noops_when_token_empty() {
         ))
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         ..
     } = spawn_output
@@ -4926,7 +4932,7 @@ async fn team_inbox_ack_noops_when_token_empty() {
         ))
         .await
         .expect("team_inbox_ack should succeed with empty token");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(ack_content),
         ..
     } = ack_output
@@ -4979,7 +4985,7 @@ async fn team_inbox_ack_rejects_invalid_token() {
         ))
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         ..
     } = spawn_output
@@ -5052,7 +5058,7 @@ async fn team_inbox_ack_rejects_team_id_mismatch() {
         ))
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         ..
     } = spawn_output
@@ -5101,7 +5107,7 @@ async fn team_inbox_ack_rejects_team_id_mismatch() {
         ))
         .await
         .expect("team_inbox_pop should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(pop_content),
         ..
     } = pop_output
@@ -5178,7 +5184,7 @@ async fn team_inbox_ack_rejects_thread_id_mismatch() {
         ))
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         ..
     } = spawn_output
@@ -5227,7 +5233,7 @@ async fn team_inbox_ack_rejects_thread_id_mismatch() {
         ))
         .await
         .expect("team_inbox_pop should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(pop_content),
         ..
     } = pop_output
@@ -5302,7 +5308,7 @@ async fn team_ask_lead_rejects_when_called_by_lead() {
         ))
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         ..
     } = spawn_output
@@ -5354,7 +5360,7 @@ async fn team_inbox_pop_rejects_non_member() {
         ))
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         ..
     } = spawn_output
@@ -5494,7 +5500,7 @@ async fn team_task_claim_is_exclusive_under_concurrency() {
         ))
         .await
         .expect("spawn_team should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(spawn_content),
         ..
     } = spawn_output
@@ -5513,7 +5519,7 @@ async fn team_task_claim_is_exclusive_under_concurrency() {
         ))
         .await
         .expect("team_task_list should succeed");
-    let ToolOutput::Function {
+    let FunctionToolOutput {
         body: FunctionCallOutputBody::Text(list_content),
         ..
     } = list_output

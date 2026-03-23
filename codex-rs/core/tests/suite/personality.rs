@@ -660,7 +660,7 @@ async fn remote_model_friendly_personality_instructions_with_feature() -> anyhow
         experimental_supported_tools: Vec::new(),
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,
-        supports_search_tool: false,
+        prefer_websockets: false,
     };
 
     let _models_mock = mount_models_once(
@@ -775,7 +775,7 @@ async fn user_turn_personality_remote_model_template_includes_update_message() -
         experimental_supported_tools: Vec::new(),
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,
-        supports_search_tool: false,
+        prefer_websockets: false,
     };
 
     let _models_mock = mount_models_once(

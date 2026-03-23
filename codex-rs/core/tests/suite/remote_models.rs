@@ -290,7 +290,6 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         supported_in_api: true,
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,
-        supports_search_tool: false,
         priority: 1,
         upgrade: None,
         base_instructions: "base instructions".to_string(),
@@ -309,6 +308,7 @@ async fn remote_models_remote_model_uses_unified_exec() -> Result<()> {
         auto_compact_token_limit: None,
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
+        prefer_websockets: false,
     };
 
     let models_mock = mount_models_once(
@@ -533,7 +533,6 @@ async fn remote_models_apply_remote_base_instructions() -> Result<()> {
         supported_in_api: true,
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,
-        supports_search_tool: false,
         priority: 1,
         upgrade: None,
         base_instructions: remote_base.to_string(),
@@ -552,6 +551,7 @@ async fn remote_models_apply_remote_base_instructions() -> Result<()> {
         auto_compact_token_limit: None,
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
+        prefer_websockets: false,
     };
     mount_models_once(
         &server,
@@ -1002,7 +1002,6 @@ fn test_remote_model_with_policy(
         supported_in_api: true,
         input_modalities: default_input_modalities(),
         used_fallback_model_metadata: false,
-        supports_search_tool: false,
         priority,
         upgrade: None,
         base_instructions: "base instructions".to_string(),
@@ -1021,5 +1020,6 @@ fn test_remote_model_with_policy(
         auto_compact_token_limit: None,
         effective_context_window_percent: 95,
         experimental_supported_tools: Vec::new(),
+        prefer_websockets: false,
     }
 }

@@ -400,6 +400,7 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                 shell_type: ConfigShellToolType::Default,
                 visibility: ModelVisibility::List,
                 supported_in_api: true,
+                prefer_websockets: false,
                 priority: 1,
                 upgrade: None,
                 base_instructions: "base instructions".to_string(),
@@ -420,7 +421,6 @@ async fn stdio_image_responses_are_sanitized_for_text_only_model() -> anyhow::Re
                 experimental_supported_tools: Vec::new(),
                 input_modalities: vec![InputModality::Text],
                 used_fallback_model_metadata: false,
-                supports_search_tool: false,
             }],
         },
     )

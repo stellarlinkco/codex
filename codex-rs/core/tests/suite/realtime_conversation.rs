@@ -197,6 +197,7 @@ async fn conversation_start_audio_text_close_round_trip() -> Result<()> {
                 data: "AQID".to_string(),
                 sample_rate: 24000,
                 num_channels: 1,
+                item_id: None,
                 samples_per_channel: Some(480),
             },
         }))
@@ -435,6 +436,7 @@ async fn conversation_audio_before_start_emits_error() -> Result<()> {
                 data: "AQID".to_string(),
                 sample_rate: 24000,
                 num_channels: 1,
+                item_id: None,
                 samples_per_channel: Some(480),
             },
         }))
@@ -544,6 +546,7 @@ async fn conversation_second_start_replaces_runtime() -> Result<()> {
                 data: "AQID".to_string(),
                 sample_rate: 24000,
                 num_channels: 1,
+                item_id: None,
                 samples_per_channel: Some(480),
             },
         }))
@@ -1864,6 +1867,7 @@ async fn inbound_handoff_request_steers_active_turn() -> Result<()> {
                 data: "AQID".to_string(),
                 sample_rate: 24000,
                 num_channels: 1,
+                item_id: None,
                 samples_per_channel: Some(480),
             },
         }))

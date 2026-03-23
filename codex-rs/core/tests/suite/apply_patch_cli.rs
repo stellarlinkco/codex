@@ -742,9 +742,7 @@ async fn apply_patch_shell_command_heredoc_with_cd_updates_relative_workdir() ->
 async fn apply_patch_cli_can_use_shell_command_output_as_patch_input() -> Result<()> {
     skip_if_no_network!(Ok(()));
 
-    let harness =
-        apply_patch_harness_with(|builder| builder.with_model("gpt-5.1").with_windows_cmd_shell())
-            .await?;
+    let harness = apply_patch_harness_with(|builder| builder.with_model("gpt-5.1")).await?;
 
     let source_contents = "line1\nnaïve café\nline3\n";
     let source_path = harness.path("source.txt");
