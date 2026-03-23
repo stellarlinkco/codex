@@ -41,7 +41,6 @@ use ratatui::layout::Rect;
 use ratatui::text::Line;
 use std::time::Duration;
 
-#[allow(dead_code)]
 mod app_link_view;
 mod approval_overlay;
 mod mcp_server_elicitation;
@@ -57,7 +56,6 @@ pub(crate) use approval_overlay::format_additional_permissions_rule;
 pub(crate) use mcp_server_elicitation::McpServerElicitationFormRequest;
 pub(crate) use mcp_server_elicitation::McpServerElicitationOverlay;
 pub(crate) use request_user_input::RequestUserInputOverlay;
-#[allow(dead_code)]
 mod bottom_pane_view;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -73,7 +71,6 @@ pub(crate) struct MentionBinding {
     /// Canonical mention target (for example `app://...` or absolute SKILL.md path).
     pub(crate) path: String,
 }
-#[allow(dead_code)]
 mod chat_composer;
 mod chat_composer_history;
 mod command_popup;
@@ -1630,6 +1627,7 @@ mod tests {
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: PathBuf::from("test-skill"),
                 scope: SkillScope::User,
             }]),

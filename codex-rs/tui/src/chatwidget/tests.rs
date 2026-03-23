@@ -27,11 +27,12 @@ use codex_core::config::types::Notifications;
 use codex_core::config::types::WindowsSandboxModeToml;
 use codex_core::config_loader::RequirementSource;
 use codex_core::features::FEATURES;
-use codex_core::features::Feature;
+use codex_core::features::Feature as CoreFeature;
 use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_core::models_manager::manager::ModelsManager;
 use codex_core::skills::model::SkillMetadata;
 use codex_core::terminal::TerminalName;
+use codex_features::Feature;
 use codex_otel::RuntimeMetricsSummary;
 use codex_otel::SessionTelemetry;
 use codex_protocol::ThreadId;
@@ -173,6 +174,7 @@ async fn resumed_initial_messages_render_history() {
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
+        approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -188,6 +190,7 @@ async fn resumed_initial_messages_render_history() {
             EventMsg::AgentMessage(AgentMessageEvent {
                 message: "assistant reply".to_string(),
                 phase: None,
+                memory_citation: None,
             }),
         ]),
         network_proxy: None,
@@ -236,6 +239,7 @@ async fn thread_snapshot_replay_does_not_duplicate_agent_message_history() {
                     text: "assistant reply".to_string(),
                 }],
                 phase: None,
+                memory_citation: None,
             }),
         }),
     });
@@ -244,6 +248,7 @@ async fn thread_snapshot_replay_does_not_duplicate_agent_message_history() {
         msg: EventMsg::AgentMessage(AgentMessageEvent {
             message: "assistant reply".to_string(),
             phase: None,
+            memory_citation: None,
         }),
     });
 
@@ -282,6 +287,7 @@ async fn replayed_user_message_preserves_text_elements_and_local_images() {
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
+        approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -342,6 +348,7 @@ async fn replayed_user_message_preserves_remote_image_urls() {
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
+        approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -409,6 +416,7 @@ async fn session_configured_syncs_widget_config_permissions_and_cwd() {
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
+        approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
         sandbox_policy: expected_sandbox.clone(),
         cwd: expected_cwd.clone(),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -451,6 +459,7 @@ async fn replayed_user_message_with_only_remote_images_renders_history_cell() {
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
+        approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -503,6 +512,7 @@ async fn replayed_user_message_with_only_local_images_does_not_render_history_ce
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
+        approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -614,6 +624,7 @@ async fn submission_preserves_text_elements_and_local_images() {
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
+        approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -697,6 +708,7 @@ async fn submission_with_remote_and_local_images_keeps_local_placeholder_numberi
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
+        approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -791,6 +803,7 @@ async fn enter_with_only_remote_images_submits_user_turn() {
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
+        approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -855,6 +868,7 @@ async fn shift_enter_with_only_remote_images_does_not_submit_user_turn() {
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
+        approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -894,6 +908,7 @@ async fn enter_with_only_remote_images_does_not_submit_when_modal_is_active() {
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
+        approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -933,6 +948,7 @@ async fn enter_with_only_remote_images_does_not_submit_when_input_disabled() {
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
+        approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -973,6 +989,7 @@ async fn submission_prefers_selected_duplicate_skill_path() {
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
+        approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -999,6 +1016,7 @@ async fn submission_prefers_selected_duplicate_skill_path() {
             dependencies: None,
             policy: None,
             permission_profile: None,
+            managed_network_override: None,
             path_to_skills_md: repo_skill_path,
             scope: SkillScope::Repo,
         },
@@ -1010,6 +1028,7 @@ async fn submission_prefers_selected_duplicate_skill_path() {
             dependencies: None,
             policy: None,
             permission_profile: None,
+            managed_network_override: None,
             path_to_skills_md: user_skill_path.clone(),
             scope: SkillScope::User,
         },
@@ -1518,6 +1537,7 @@ async fn live_agent_message_renders_during_review_mode() {
         msg: EventMsg::AgentMessage(AgentMessageEvent {
             message: "Review progress update".to_string(),
             phase: None,
+            memory_citation: None,
         }),
     });
 
@@ -1544,6 +1564,7 @@ async fn thread_snapshot_replay_preserves_agent_message_during_review_mode() {
         msg: EventMsg::AgentMessage(AgentMessageEvent {
             message: "Review progress update".to_string(),
             phase: None,
+            memory_citation: None,
         }),
     });
 
@@ -3460,6 +3481,7 @@ fn complete_assistant_message(
                     text: text.to_string(),
                 }],
                 phase,
+                memory_citation: None,
             }),
         }),
     });
@@ -4051,6 +4073,7 @@ async fn live_legacy_agent_message_after_item_completed_does_not_duplicate_assis
         msg: EventMsg::AgentMessage(AgentMessageEvent {
             message: "hello".into(),
             phase: Some(MessagePhase::FinalAnswer),
+            memory_citation: None,
         }),
     });
 
@@ -5418,6 +5441,7 @@ async fn plan_slash_command_with_args_submits_prompt_in_plan_mode() {
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
+        approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -5577,6 +5601,7 @@ async fn loop_slash_command_with_default_interval_submits_scheduled_task_prompt(
         model_provider_id: "test-provider".to_string(),
         service_tier: None,
         approval_policy: AskForApproval::Never,
+        approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
         sandbox_policy: SandboxPolicy::new_read_only_policy(),
         cwd: PathBuf::from("/home/user/project"),
         reasoning_effort: Some(ReasoningEffortConfig::default()),
@@ -5950,6 +5975,7 @@ async fn slash_copy_is_unavailable_when_legacy_agent_message_is_not_repeated_on_
         msg: EventMsg::AgentMessage(AgentMessageEvent {
             message: "Legacy final message".into(),
             phase: None,
+            memory_citation: None,
         }),
     });
     let _ = drain_insert_history(&mut rx);
@@ -6049,16 +6075,12 @@ async fn slash_exit_requests_exit() {
 async fn slash_clean_submits_background_terminal_cleanup() {
     let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
 
-    chat.dispatch_command(SlashCommand::Clean);
+    chat.dispatch_command(SlashCommand::Clear);
 
-    assert_matches!(op_rx.try_recv(), Ok(Op::CleanBackgroundTerminals));
+    assert_matches!(rx.try_recv(), Ok(AppEvent::ClearUi));
+    assert_matches!(op_rx.try_recv(), Err(_));
     let cells = drain_insert_history(&mut rx);
-    assert_eq!(cells.len(), 1, "expected cleanup confirmation message");
-    let rendered = lines_to_single_string(&cells[0]);
-    assert!(
-        rendered.contains("Stopping all background terminals."),
-        "expected cleanup confirmation, got {rendered:?}"
-    );
+    assert!(cells.is_empty(), "expected no cleanup history message");
 }
 
 #[tokio::test]
@@ -7223,7 +7245,7 @@ async fn experimental_popup_shows_js_repl_node_requirement() {
 
     let js_repl_description = FEATURES
         .iter()
-        .find(|spec| spec.id == Feature::JsRepl)
+        .find(|spec| spec.id == CoreFeature::JsRepl)
         .and_then(|spec| spec.stage.experimental_menu_description())
         .expect("expected js_repl experimental description");
     let node_requirement = js_repl_description

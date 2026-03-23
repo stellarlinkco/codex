@@ -1403,6 +1403,8 @@ mod tests {
                     ]),
                     macos_accessibility: true,
                     macos_calendar: true,
+                    macos_reminders: true,
+                    ..Default::default()
                 }),
                 ..Default::default()
             }),

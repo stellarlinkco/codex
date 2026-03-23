@@ -96,7 +96,6 @@ mod audio_device {
     }
 }
 mod bottom_pane;
-#[allow(dead_code)]
 mod chatwidget;
 mod cli;
 mod clipboard_paste;
