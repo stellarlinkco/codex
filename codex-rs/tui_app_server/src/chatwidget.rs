@@ -6479,6 +6479,7 @@ impl ChatWidget {
                 );
             }
             EventMsg::ListSkillsResponse(ev) => self.on_list_skills(ev),
+            EventMsg::ListRemoteSkillsResponse(_) | EventMsg::RemoteSkillDownloaded(_) => {}
             EventMsg::SkillsUpdateAvailable => {
                 self.submit_op(AppCommand::list_skills(
                     Vec::new(),
