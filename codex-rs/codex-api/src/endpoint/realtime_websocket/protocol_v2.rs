@@ -5,6 +5,7 @@ use codex_protocol::protocol::RealtimeAudioFrame;
 use codex_protocol::protocol::RealtimeEvent;
 use codex_protocol::protocol::RealtimeHandoffMessage;
 use codex_protocol::protocol::RealtimeHandoffRequested;
+use codex_protocol::protocol::RealtimeTranscriptUpdated;
 use serde_json::Map as JsonMap;
 use serde_json::Value;
 use tracing::debug;
@@ -23,10 +24,13 @@ pub(super) fn parse_realtime_event_v2(payload: &str) -> Option<RealtimeEvent> {
             parse_output_audio_delta_event(&parsed)
         }
         "conversation.item.input_audio_transcription.delta"
-        | "conversation.item.input_audio_transcription.completed"
-        | "response.output_text.delta"
-        | "response.output_audio_transcript.delta"
-        | "input_audio_buffer.speech_started" => None,
+        | "conversation.item.input_audio_transcription.completed" => {
+            parse_transcript_updated_event(&parsed, "user")
+        }
+        "response.output_text.delta" | "response.output_audio_transcript.delta" => {
+            parse_transcript_updated_event(&parsed, "assistant")
+        }
+        "input_audio_buffer.speech_started" => None,
         "conversation.item.added" => parsed
             .get("item")
             .cloned()
@@ -41,6 +45,25 @@ pub(super) fn parse_realtime_event_v2(payload: &str) -> Option<RealtimeEvent> {
             None
         }
     }
+}
+
+fn parse_transcript_updated_event(parsed: &Value, role: &str) -> Option<RealtimeEvent> {
+    let text = parsed
+        .get("delta")
+        .or_else(|| parsed.get("transcript"))
+        .or_else(|| parsed.get("text"))
+        .and_then(Value::as_str)?
+        .to_string();
+    if text.is_empty() {
+        return None;
+    }
+
+    Some(RealtimeEvent::TranscriptUpdated(
+        RealtimeTranscriptUpdated {
+            role: role.to_string(),
+            text,
+        },
+    ))
 }
 
 fn parse_output_audio_delta_event(parsed: &Value) -> Option<RealtimeEvent> {

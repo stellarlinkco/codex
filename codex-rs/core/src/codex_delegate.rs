@@ -552,6 +552,10 @@ where
 }
 
 #[cfg(test)]
+#[path = "codex_delegate_tests.rs"]
+mod delegate_tests;
+
+#[cfg(any())]
 mod tests {
     use super::*;
     use async_channel::bounded;

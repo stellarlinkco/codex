@@ -794,6 +794,7 @@ mod tests {
                 ]),
                 macos_accessibility: true,
                 macos_calendar: true,
+                ..Default::default()
             }),
         );
         let policy = &args[1];

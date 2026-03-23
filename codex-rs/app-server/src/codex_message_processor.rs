@@ -194,6 +194,7 @@ use codex_core::config::edit::ConfigEdit;
 use codex_core::config::edit::ConfigEditsBuilder;
 use codex_core::config::types::McpServerTransportConfig;
 use codex_core::config_loader::CloudRequirementsLoader;
+use codex_core::connectors::connector_install_url;
 use codex_core::connectors::filter_disallowed_connectors;
 use codex_core::connectors::merge_plugin_apps;
 use codex_core::default_client::set_default_client_residency_requirement;
@@ -201,8 +202,6 @@ use codex_core::error::CodexErr;
 use codex_core::exec::ExecExpiration;
 use codex_core::exec::ExecParams;
 use codex_core::exec_env::create_env;
-use codex_core::features::FEATURES;
-use codex_core::features::Stage;
 use codex_core::find_archived_thread_path_by_id_str;
 use codex_core::find_thread_name_by_id;
 use codex_core::find_thread_names_by_ids;
@@ -231,8 +230,9 @@ use codex_core::state_db::reconcile_rollout;
 use codex_core::windows_sandbox::WindowsSandboxLevelExt;
 use codex_core::windows_sandbox::WindowsSandboxSetupMode as CoreWindowsSandboxSetupMode;
 use codex_core::windows_sandbox::WindowsSandboxSetupRequest;
+use codex_features::FEATURES;
 use codex_features::Feature;
-use codex_features::canonical_feature_for_key;
+use codex_features::Stage;
 use codex_feedback::CodexFeedback;
 use codex_login::ServerOptions as LoginServerOptions;
 use codex_login::ShutdownHandle;
@@ -365,8 +365,8 @@ fn convert_remote_product_surface(
     }
 }
 
-fn feature_enabled(config: &Config, feature: codex_core::features::Feature) -> bool {
-    canonical_feature_for_key(feature.key()).is_some_and(|mapped| config.features.enabled(mapped))
+fn feature_enabled(config: &Config, feature: codex_features::Feature) -> bool {
+    config.features.enabled(feature)
 }
 
 impl Drop for ActiveLogin {
@@ -5128,7 +5128,16 @@ impl CodexMessageProcessor {
                     && !accessible_ids.contains(connector.id.as_str())
             })
             .cloned()
-            .map(AppSummary::from)
+            .map(|connector| {
+                let install_url = connector
+                    .install_url
+                    .clone()
+                    .or_else(|| Some(connector_install_url(&connector.name, &connector.id)));
+                AppSummary {
+                    install_url,
+                    ..AppSummary::from(connector)
+                }
+            })
             .collect()
     }
 
@@ -7908,6 +7917,7 @@ mod tests {
             name: "my_tool".to_string(),
             description: "test".to_string(),
             input_schema: json!({"type": "null"}),
+            defer_loading: false,
         }];
         let err = validate_dynamic_tools(&tools).expect_err("invalid schema");
         assert!(err.contains("my_tool"), "unexpected error: {err}");
@@ -7920,6 +7930,7 @@ mod tests {
             description: "test".to_string(),
             // Missing `type` is common; core sanitizes these to a supported schema.
             input_schema: json!({"properties": {}}),
+            defer_loading: false,
         }];
         validate_dynamic_tools(&tools).expect("valid schema");
     }
@@ -7964,6 +7975,7 @@ mod tests {
             service_tier: Some(Some(codex_protocol::config_types::ServiceTier::Fast)),
             cwd: None,
             approval_policy: None,
+            approvals_reviewer: None,
             sandbox: None,
             config: None,
             base_instructions: None,
@@ -7976,6 +7988,7 @@ mod tests {
             model_provider_id: "openai".to_string(),
             service_tier: Some(codex_protocol::config_types::ServiceTier::Flex),
             approval_policy: codex_protocol::protocol::AskForApproval::OnRequest,
+            approvals_reviewer: codex_protocol::config_types::ApprovalsReviewer::User,
             sandbox_policy: codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
             cwd: PathBuf::from("/tmp"),
             ephemeral: false,
@@ -8128,6 +8141,7 @@ mod tests {
             source: SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id,
                 depth: 1,
+                agent_path: None,
                 agent_nickname: None,
                 agent_role: None,
             }),
@@ -8220,6 +8234,7 @@ mod tests {
             serde_json::to_string(&SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
                 parent_thread_id: ThreadId::from_string("ad7f0408-99b8-4f6e-a46f-bd0eec433370")?,
                 depth: 1,
+                agent_path: None,
                 agent_nickname: None,
                 agent_role: None,
             }))?;

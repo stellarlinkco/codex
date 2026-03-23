@@ -1105,8 +1105,8 @@ fn cwd_matches(session_cwd: &Path, cwd: &Path) -> bool {
 mod tests {
     use super::*;
     use crate::config::ConfigBuilder;
-    use crate::features::Feature;
     use chrono::TimeZone;
+    use codex_features::Feature;
     use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
     use codex_protocol::protocol::AgentMessageEvent;
     use codex_protocol::protocol::AskForApproval;
@@ -1190,6 +1190,7 @@ mod tests {
                 AgentMessageEvent {
                     message: "buffered-event".to_string(),
                     phase: None,
+                    memory_citation: None,
                 },
             ))])
             .await?;
@@ -1307,6 +1308,7 @@ mod tests {
                 AgentMessageEvent {
                     message: "assistant text".to_string(),
                     phase: None,
+                    memory_citation: None,
                 },
             ))])
             .await?;
@@ -1358,6 +1360,7 @@ mod tests {
             AgentMessageEvent {
                 message: "assistant text".to_string(),
                 phase: None,
+                memory_citation: None,
             },
         ))];
 

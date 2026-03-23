@@ -469,6 +469,7 @@ mod tests {
             ResponseItem::FunctionCall {
                 id: None,
                 name: "shell".to_string(),
+                namespace: None,
                 arguments: "{}".to_string(),
                 call_id: "call-1".to_string(),
             },
@@ -485,6 +486,7 @@ mod tests {
             },
             ResponseItem::CustomToolCallOutput {
                 call_id: "call-2".to_string(),
+                name: None,
                 output: FunctionCallOutputPayload::from_text(raw_output.to_string()),
             },
         ];
@@ -497,6 +499,7 @@ mod tests {
                 ResponseItem::FunctionCall {
                     id: None,
                     name: "shell".to_string(),
+                    namespace: None,
                     arguments: "{}".to_string(),
                     call_id: "call-1".to_string(),
                 },
@@ -513,6 +516,7 @@ mod tests {
                 },
                 ResponseItem::CustomToolCallOutput {
                     call_id: "call-2".to_string(),
+                    name: None,
                     output: FunctionCallOutputPayload::from_text(expected_output.to_string()),
                 },
             ]

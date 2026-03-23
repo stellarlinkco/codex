@@ -170,6 +170,7 @@ mod tests {
             ]),
             macos_accessibility: false,
             macos_calendar: false,
+            ..Default::default()
         };
         let requested = MacOsSeatbeltProfileExtensions {
             macos_preferences: MacOsPreferencesPermission::ReadWrite,
@@ -179,6 +180,7 @@ mod tests {
             ]),
             macos_accessibility: true,
             macos_calendar: true,
+            ..Default::default()
         };
 
         let merged =
@@ -194,6 +196,7 @@ mod tests {
                 ]),
                 macos_accessibility: true,
                 macos_calendar: true,
+                ..Default::default()
             }
         );
     }
@@ -243,6 +246,7 @@ mod tests {
             ]),
             macos_accessibility: true,
             macos_calendar: true,
+            ..Default::default()
         };
         let granted = MacOsSeatbeltProfileExtensions::default();
 

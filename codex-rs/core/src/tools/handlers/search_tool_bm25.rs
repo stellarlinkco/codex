@@ -290,6 +290,7 @@ mod tests {
             ToolInfo {
                 server_name: server_name.to_string(),
                 tool_name: tool_name.to_string(),
+                tool_namespace: server_name.to_string(),
                 tool: Tool {
                     name: tool_name.to_string().into(),
                     title: None,
@@ -304,6 +305,7 @@ mod tests {
                 connector_id: connector_id.map(str::to_string),
                 connector_name: connector_id.map(str::to_string),
                 plugin_display_names: Vec::new(),
+                connector_description: None,
             },
         )
     }

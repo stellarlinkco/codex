@@ -226,6 +226,7 @@ mod tests {
                 allow_login_shell: true,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
                 windows_sandbox_mode: None,
+                windows_sandbox_private_desktop: false,
                 #[cfg(target_os = "macos")]
                 macos_seatbelt_profile_extensions: Some(
                     crate::seatbelt_permissions::MacOsSeatbeltProfileExtensions::default(),
@@ -276,6 +277,7 @@ mod tests {
                 allow_login_shell: true,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
                 windows_sandbox_mode: None,
+                windows_sandbox_private_desktop: false,
                 #[cfg(target_os = "macos")]
                 macos_seatbelt_profile_extensions: Some(
                     crate::seatbelt_permissions::MacOsSeatbeltProfileExtensions::default(),
@@ -326,6 +328,7 @@ mod tests {
                 allow_login_shell: true,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
                 windows_sandbox_mode: None,
+                windows_sandbox_private_desktop: false,
                 #[cfg(target_os = "macos")]
                 macos_seatbelt_profile_extensions: Some(
                     crate::seatbelt_permissions::MacOsSeatbeltProfileExtensions::default(),
@@ -351,6 +354,7 @@ mod tests {
                 ]),
                 macos_accessibility: true,
                 macos_calendar: true,
+                ..Default::default()
             }),
             ..Default::default()
         }))
@@ -368,6 +372,7 @@ mod tests {
                         ],),
                     macos_accessibility: true,
                     macos_calendar: true,
+                    ..Default::default()
                 }
             )
         );

@@ -78,6 +78,7 @@ use codex_app_server_protocol::ThreadRealtimeErrorNotification;
 use codex_app_server_protocol::ThreadRealtimeItemAddedNotification;
 use codex_app_server_protocol::ThreadRealtimeOutputAudioDeltaNotification;
 use codex_app_server_protocol::ThreadRealtimeStartedNotification;
+use codex_app_server_protocol::ThreadRealtimeTranscriptUpdatedNotification;
 use codex_app_server_protocol::ThreadRollbackResponse;
 use codex_app_server_protocol::ThreadTokenUsage;
 use codex_app_server_protocol::ThreadTokenUsageUpdatedNotification;
@@ -283,6 +284,18 @@ pub(crate) async fn apply_bespoke_event_handling(
                         outgoing
                             .send_server_notification(
                                 ServerNotification::ThreadRealtimeOutputAudioDelta(notification),
+                            )
+                            .await;
+                    }
+                    RealtimeEvent::TranscriptUpdated(update) => {
+                        let notification = ThreadRealtimeTranscriptUpdatedNotification {
+                            thread_id: conversation_id.to_string(),
+                            role: update.role,
+                            text: update.text,
+                        };
+                        outgoing
+                            .send_server_notification(
+                                ServerNotification::ThreadRealtimeTranscriptUpdated(notification),
                             )
                             .await;
                     }
@@ -2717,6 +2730,7 @@ mod tests {
                 ]),
                 macos_accessibility: true,
                 macos_calendar: true,
+                ..Default::default()
             }),
             ..Default::default()
         };
@@ -2732,6 +2746,7 @@ mod tests {
                         macos_automation: MacOsAutomationPermission::None,
                         macos_accessibility: false,
                         macos_calendar: false,
+                        ..Default::default()
                     }),
                     ..Default::default()
                 },
@@ -2750,6 +2765,7 @@ mod tests {
                         ]),
                         macos_accessibility: false,
                         macos_calendar: false,
+                        ..Default::default()
                     }),
                     ..Default::default()
                 },
@@ -2764,6 +2780,7 @@ mod tests {
                         macos_automation: MacOsAutomationPermission::None,
                         macos_accessibility: true,
                         macos_calendar: false,
+                        ..Default::default()
                     }),
                     ..Default::default()
                 },
@@ -2778,6 +2795,7 @@ mod tests {
                         macos_automation: MacOsAutomationPermission::None,
                         macos_accessibility: false,
                         macos_calendar: true,
+                        ..Default::default()
                     }),
                     ..Default::default()
                 },
@@ -2798,7 +2816,7 @@ mod tests {
             assert_eq!(
                 response,
                 CoreRequestPermissionsResponse {
-                    permissions: expected_permissions,
+                    permissions: expected_permissions.into(),
                     scope: CorePermissionGrantScope::Turn,
                 }
             );
@@ -2819,7 +2837,7 @@ mod tests {
         assert_eq!(
             response,
             CoreRequestPermissionsResponse {
-                permissions: CorePermissionProfile::default(),
+                permissions: CorePermissionProfile::default().into(),
                 scope: CorePermissionGrantScope::Session,
             }
         );
@@ -2843,6 +2861,8 @@ mod tests {
             sender_thread_id: event.sender_thread_id.to_string(),
             receiver_thread_ids: vec![event.receiver_thread_id.to_string()],
             prompt: None,
+            model: None,
+            reasoning_effort: None,
             agents_states: HashMap::new(),
         };
         assert_eq!(item, expected);
@@ -2868,6 +2888,8 @@ mod tests {
             sender_thread_id: event.sender_thread_id.to_string(),
             receiver_thread_ids: vec![receiver_id.clone()],
             prompt: None,
+            model: None,
+            reasoning_effort: None,
             agents_states: [(
                 receiver_id,
                 V2CollabAgentStatus::from(codex_protocol::protocol::AgentStatus::NotFound),

@@ -1102,6 +1102,7 @@ mod tests {
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -1259,6 +1260,7 @@ mod tests {
                 }),
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -1315,6 +1317,7 @@ interface:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(skill_path.as_path()),
                 scope: SkillScope::User,
             }]
@@ -1348,6 +1351,7 @@ policy:
             outcome.skills[0].policy,
             Some(SkillPolicy {
                 allow_implicit_invocation: Some(false),
+                products: Vec::new(),
             })
         );
         assert!(outcome.allowed_skills_for_implicit_invocation().is_empty());
@@ -1379,6 +1383,7 @@ policy: {}
             outcome.skills[0].policy,
             Some(SkillPolicy {
                 allow_implicit_invocation: None,
+                products: Vec::new(),
             })
         );
         assert_eq!(
@@ -1503,6 +1508,7 @@ permissions:
                     ]),
                     macos_accessibility: true,
                     macos_calendar: true,
+                    ..Default::default()
                 }),
                 ..Default::default()
             })
@@ -1599,6 +1605,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -1640,6 +1647,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -1694,6 +1702,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -1736,6 +1745,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -1781,6 +1791,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&shared_skill_path),
                 scope: SkillScope::User,
             }]
@@ -1842,6 +1853,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -1879,6 +1891,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&shared_skill_path),
                 scope: SkillScope::Admin,
             }]
@@ -1920,6 +1933,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&linked_skill_path),
                 scope: SkillScope::Repo,
             }]
@@ -2012,6 +2026,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&within_depth_path),
                 scope: SkillScope::User,
             }]
@@ -2040,6 +2055,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -2073,6 +2089,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -2115,6 +2132,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -2147,6 +2165,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::User,
             }]
@@ -2260,6 +2279,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::Repo,
             }]
@@ -2296,6 +2316,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::Repo,
             }]
@@ -2350,6 +2371,7 @@ permissions:
                     dependencies: None,
                     policy: None,
                     permission_profile: None,
+                    managed_network_override: None,
                     path_to_skills_md: normalized(&nested_skill_path),
                     scope: SkillScope::Repo,
                 },
@@ -2361,6 +2383,7 @@ permissions:
                     dependencies: None,
                     policy: None,
                     permission_profile: None,
+                    managed_network_override: None,
                     path_to_skills_md: normalized(&root_skill_path),
                     scope: SkillScope::Repo,
                 },
@@ -2401,6 +2424,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::Repo,
             }]
@@ -2439,6 +2463,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::Repo,
             }]
@@ -2481,6 +2506,7 @@ permissions:
                     dependencies: None,
                     policy: None,
                     permission_profile: None,
+                    managed_network_override: None,
                     path_to_skills_md: normalized(&repo_skill_path),
                     scope: SkillScope::Repo,
                 },
@@ -2492,6 +2518,7 @@ permissions:
                     dependencies: None,
                     policy: None,
                     permission_profile: None,
+                    managed_network_override: None,
                     path_to_skills_md: normalized(&user_skill_path),
                     scope: SkillScope::User,
                 },
@@ -2557,6 +2584,7 @@ permissions:
                     dependencies: None,
                     policy: None,
                     permission_profile: None,
+                    managed_network_override: None,
                     path_to_skills_md: first_path,
                     scope: SkillScope::Repo,
                 },
@@ -2568,6 +2596,7 @@ permissions:
                     dependencies: None,
                     policy: None,
                     permission_profile: None,
+                    managed_network_override: None,
                     path_to_skills_md: second_path,
                     scope: SkillScope::Repo,
                 },
@@ -2640,6 +2669,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::Repo,
             }]
@@ -2699,6 +2729,7 @@ permissions:
                 dependencies: None,
                 policy: None,
                 permission_profile: None,
+                managed_network_override: None,
                 path_to_skills_md: normalized(&skill_path),
                 scope: SkillScope::System,
             }]

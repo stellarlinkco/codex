@@ -2,6 +2,7 @@ use crate::endpoint::realtime_websocket::protocol_v1::parse_realtime_event_v1;
 use crate::endpoint::realtime_websocket::protocol_v2::parse_realtime_event_v2;
 pub use codex_protocol::protocol::RealtimeAudioFrame;
 pub use codex_protocol::protocol::RealtimeEvent;
+pub use codex_protocol::protocol::RealtimeHandoffMessage;
 pub use codex_protocol::protocol::RealtimeHandoffRequested;
 use serde::Serialize;
 use serde_json::Value;

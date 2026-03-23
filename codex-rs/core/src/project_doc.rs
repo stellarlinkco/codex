@@ -314,9 +314,9 @@ fn candidate_filenames<'a>(config: &'a Config) -> Vec<&'a str> {
 mod tests {
     use super::*;
     use crate::config::ConfigBuilder;
-    use crate::features::Feature;
     use crate::skills::loader::SkillRoot;
     use crate::skills::loader::load_skills_from_roots;
+    use codex_features::Feature;
     use codex_protocol::protocol::SkillScope;
     use std::fs;
     use std::path::PathBuf;

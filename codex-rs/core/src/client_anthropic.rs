@@ -1488,6 +1488,7 @@ mod tests {
                 ResponseItem::FunctionCall {
                     id: None,
                     name: "shell".to_string(),
+                    namespace: None,
                     arguments: r#"{"command":["pwd"]}"#.to_string(),
                     call_id: "call_1".to_string(),
                 },
@@ -1500,6 +1501,7 @@ mod tests {
                 ToolSpec::Function(ResponsesApiTool {
                     name: "shell".to_string(),
                     description: "Run shell".to_string(),
+                    defer_loading: None,
                     strict: false,
                     parameters: JsonSchema::Object {
                         properties: BTreeMap::from([(
@@ -1512,6 +1514,7 @@ mod tests {
                         required: Some(vec!["command".to_string()]),
                         additional_properties: Some(AdditionalProperties::Boolean(false)),
                     },
+                    output_schema: None,
                 }),
                 ToolSpec::Freeform(FreeformTool {
                     name: "apply_patch".to_string(),
@@ -2364,6 +2367,7 @@ mod tests {
             ResponseEvent::OutputItemDone(ResponseItem::FunctionCall {
                 id: None,
                 name: "shell".to_string(),
+                namespace: None,
                 arguments: "{}".to_string(),
                 call_id: "call_1".to_string(),
             }),
@@ -2473,6 +2477,7 @@ mod tests {
             ResponseItem::FunctionCall {
                 id: None,
                 name: "anthropic_tool_missing_name_3".to_string(),
+                namespace: None,
                 arguments: r#"{"command":["pwd"]}"#.to_string(),
                 call_id: "call_missing_name".to_string()
             }

@@ -269,6 +269,7 @@ mod tests {
                     ("personality".to_string(), true),
                 ]),
             }),
+            apps: None,
             mcp_servers: None,
             rules: None,
             enforce_residency: Some(CoreResidencyRequirement::Us),
@@ -285,6 +286,7 @@ mod tests {
                 allow_unix_sockets: Some(vec!["/tmp/proxy.sock".to_string()]),
                 allow_local_binding: Some(true),
             }),
+            guardian_developer_instructions: None,
         };
 
         let mapped = map_requirements_toml_to_api(requirements);
@@ -339,10 +341,12 @@ mod tests {
             allowed_sandbox_modes: None,
             allowed_web_search_modes: Some(Vec::new()),
             feature_requirements: None,
+            apps: None,
             mcp_servers: None,
             rules: None,
             enforce_residency: None,
             network: None,
+            guardian_developer_instructions: None,
         };
 
         let mapped = map_requirements_toml_to_api(requirements);

@@ -206,6 +206,7 @@ mod tests {
             tracker: Arc::new(tokio::sync::Mutex::new(TurnDiffTracker::new())),
             call_id: "call-1".to_string(),
             tool_name: tool_name.to_string(),
+            tool_namespace: None,
             payload: ToolPayload::Function {
                 arguments: arguments.to_string(),
             },
@@ -231,9 +232,7 @@ mod tests {
             .await
             .expect("create output");
 
-        let FunctionToolOutput { body, .. } = create_output else {
-            panic!("expected function output");
-        };
+        let FunctionToolOutput { body, .. } = create_output;
         let created_json: serde_json::Value =
             serde_json::from_str(body.to_text().as_deref().expect("text output"))
                 .expect("valid json");
@@ -252,9 +251,7 @@ mod tests {
             .await
             .expect("list output");
 
-        let FunctionToolOutput { body, .. } = list_output else {
-            panic!("expected function output");
-        };
+        let FunctionToolOutput { body, .. } = list_output;
         let list_json: serde_json::Value =
             serde_json::from_str(body.to_text().as_deref().expect("text output"))
                 .expect("valid json");
@@ -270,9 +267,7 @@ mod tests {
             .await
             .expect("delete output");
 
-        let FunctionToolOutput { body, .. } = delete_output else {
-            panic!("expected function output");
-        };
+        let FunctionToolOutput { body, .. } = delete_output;
         let delete_json: serde_json::Value =
             serde_json::from_str(body.to_text().as_deref().expect("text output"))
                 .expect("valid json");

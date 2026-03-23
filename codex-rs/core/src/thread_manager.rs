@@ -33,11 +33,14 @@ use codex_protocol::protocol::Op;
 use codex_protocol::protocol::RolloutItem;
 use codex_protocol::protocol::SessionSource;
 use codex_protocol::protocol::W3cTraceContext;
+use futures::StreamExt;
+use futures::stream::FuturesUnordered;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::time::Duration;
 use tokio::runtime::Handle;
 use tokio::runtime::RuntimeFlavor;
 use tokio::sync::RwLock;
@@ -54,6 +57,19 @@ static FORCE_TEST_THREAD_MANAGER_BEHAVIOR: AtomicBool = AtomicBool::new(false);
 
 type CapturedOps = Vec<(ThreadId, Op)>;
 type SharedCapturedOps = Arc<std::sync::Mutex<CapturedOps>>;
+
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct ThreadShutdownReport {
+    pub completed: Vec<ThreadId>,
+    pub submit_failed: Vec<ThreadId>,
+    pub timed_out: Vec<ThreadId>,
+}
+
+enum ShutdownOutcome {
+    Complete,
+    SubmitFailed,
+    TimedOut,
+}
 
 #[derive(Default)]
 pub(crate) struct SpawnThreadSourceOptions {
@@ -412,6 +428,54 @@ impl ThreadManager {
     /// Returns the thread if the thread was found and removed.
     pub async fn remove_thread(&self, thread_id: &ThreadId) -> Option<Arc<CodexThread>> {
         self.state.threads.write().await.remove(thread_id)
+    }
+
+    pub async fn shutdown_all_threads_bounded(&self, timeout: Duration) -> ThreadShutdownReport {
+        let threads = {
+            let threads = self.state.threads.read().await;
+            threads
+                .iter()
+                .map(|(thread_id, thread)| (*thread_id, Arc::clone(thread)))
+                .collect::<Vec<_>>()
+        };
+
+        let mut shutdowns = threads
+            .into_iter()
+            .map(|(thread_id, thread)| async move {
+                let outcome = match tokio::time::timeout(timeout, thread.shutdown_and_wait()).await
+                {
+                    Ok(Ok(())) => ShutdownOutcome::Complete,
+                    Ok(Err(_)) => ShutdownOutcome::SubmitFailed,
+                    Err(_) => ShutdownOutcome::TimedOut,
+                };
+                (thread_id, outcome)
+            })
+            .collect::<FuturesUnordered<_>>();
+        let mut report = ThreadShutdownReport::default();
+
+        while let Some((thread_id, outcome)) = shutdowns.next().await {
+            match outcome {
+                ShutdownOutcome::Complete => report.completed.push(thread_id),
+                ShutdownOutcome::SubmitFailed => report.submit_failed.push(thread_id),
+                ShutdownOutcome::TimedOut => report.timed_out.push(thread_id),
+            }
+        }
+
+        let mut tracked_threads = self.state.threads.write().await;
+        for thread_id in &report.completed {
+            tracked_threads.remove(thread_id);
+        }
+
+        report
+            .completed
+            .sort_by_key(std::string::ToString::to_string);
+        report
+            .submit_failed
+            .sort_by_key(std::string::ToString::to_string);
+        report
+            .timed_out
+            .sort_by_key(std::string::ToString::to_string);
+        report
     }
 
     /// Closes all threads open in this ThreadManager
@@ -807,6 +871,7 @@ mod tests {
                 id: None,
                 call_id: "c1".to_string(),
                 name: "tool".to_string(),
+                namespace: None,
                 arguments: "{}".to_string(),
             },
             assistant_msg("a4"),

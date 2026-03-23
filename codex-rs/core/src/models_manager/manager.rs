@@ -528,6 +528,7 @@ mod tests {
             experimental_bearer_token: None,
             wire_api: WireApi::Responses,
             query_params: None,
+            websocket_connect_timeout_ms: None,
             http_headers: None,
             env_http_headers: None,
             request_max_retries: Some(0),

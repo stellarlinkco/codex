@@ -160,12 +160,19 @@ pub struct RealtimeHandoffRequested {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
+pub struct RealtimeTranscriptUpdated {
+    pub role: String,
+    pub text: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq, JsonSchema, TS)]
 pub enum RealtimeEvent {
     SessionUpdated {
         session_id: String,
         instructions: Option<String>,
     },
     AudioOut(RealtimeAudioFrame),
+    TranscriptUpdated(RealtimeTranscriptUpdated),
     ConversationItemAdded(Value),
     ConversationItemDone {
         item_id: String,

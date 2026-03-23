@@ -3014,8 +3014,8 @@ mod tests {
     use crate::config::types::NotificationMethod;
     use crate::config::types::Notifications;
     use crate::config_loader::RequirementSource;
-    use crate::features::Feature;
     use codex_config::CONFIG_TOML_FILE;
+    use codex_features::Feature;
 
     use super::*;
     use core_test_support::test_absolute_path;
@@ -3187,6 +3187,7 @@ phase_2_model = "gpt-5"
                 show_tooltips: true,
                 alternate_screen: AltScreenMode::default(),
                 status_line: None,
+                terminal_title: None,
                 theme: None,
                 model_availability_nux: ModelAvailabilityNuxConfig {
                     shown_count: HashMap::from([
@@ -3375,6 +3376,7 @@ theme = "dracula"
                 show_tooltips: true,
                 alternate_screen: AltScreenMode::Auto,
                 status_line: None,
+                terminal_title: None,
                 theme: None,
                 model_availability_nux: ModelAvailabilityNuxConfig::default(),
             }
@@ -3879,7 +3881,7 @@ trust_level = "trusted"
         profiles.insert(
             "work".to_string(),
             ConfigProfile {
-                features: Some(crate::features::FeaturesToml {
+                features: Some(codex_features::FeaturesToml {
                     entries: BTreeMap::from([("web_search_request".to_string(), false)]),
                 }),
                 ..Default::default()
@@ -4028,7 +4030,7 @@ profile = "project"
         let mut entries = BTreeMap::new();
         entries.insert("apply_patch_freeform".to_string(), false);
         let cfg = ConfigToml {
-            features: Some(crate::features::FeaturesToml { entries }),
+            features: Some(codex_features::FeaturesToml { entries }),
             ..Default::default()
         };
 
@@ -4076,7 +4078,7 @@ profile = "project"
             let mut entries = BTreeMap::new();
             entries.insert(feature_key.to_string(), true);
             let cfg = ConfigToml {
-                features: Some(crate::features::FeaturesToml { entries }),
+                features: Some(codex_features::FeaturesToml { entries }),
                 ..Default::default()
             };
 
@@ -5451,6 +5453,7 @@ model_verbosity = "high"
             query_params: None,
             http_headers: None,
             env_http_headers: None,
+            websocket_connect_timeout_ms: None,
             request_max_retries: Some(4),
             stream_max_retries: Some(10),
             stream_idle_timeout_ms: Some(300_000),
@@ -5458,7 +5461,7 @@ model_verbosity = "high"
             supports_websockets: false,
         };
         let model_provider_map = {
-            let mut model_provider_map = built_in_model_providers();
+            let mut model_provider_map = built_in_model_providers(/* openai_base_url */ None);
             model_provider_map.insert("openai-custom".to_string(), openai_custom_provider.clone());
             model_provider_map
         };
@@ -5526,6 +5529,7 @@ model_verbosity = "high"
                     allow_login_shell: true,
                     shell_environment_policy: ShellEnvironmentPolicy::default(),
                     windows_sandbox_mode: None,
+                    windows_sandbox_private_desktop: false,
                     macos_seatbelt_profile_extensions: None,
                 },
                 enforce_residency: Constrained::allow_any(None),
@@ -5606,6 +5610,7 @@ model_verbosity = "high"
                 tui_status_line: None,
                 tui_theme: None,
                 otel: OtelConfig::default(),
+                ..o3_profile_config.clone()
             },
             o3_profile_config
         );
@@ -5664,6 +5669,7 @@ model_verbosity = "high"
                 allow_login_shell: true,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
                 windows_sandbox_mode: None,
+                windows_sandbox_private_desktop: false,
                 macos_seatbelt_profile_extensions: None,
             },
             enforce_residency: Constrained::allow_any(None),
@@ -5744,6 +5750,7 @@ model_verbosity = "high"
             tui_status_line: None,
             tui_theme: None,
             otel: OtelConfig::default(),
+            ..gpt3_profile_config.clone()
         };
 
         assert_eq!(expected_gpt3_profile_config, gpt3_profile_config);
@@ -5800,6 +5807,7 @@ model_verbosity = "high"
                 allow_login_shell: true,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
                 windows_sandbox_mode: None,
+                windows_sandbox_private_desktop: false,
                 macos_seatbelt_profile_extensions: None,
             },
             enforce_residency: Constrained::allow_any(None),
@@ -5880,6 +5888,7 @@ model_verbosity = "high"
             tui_status_line: None,
             tui_theme: None,
             otel: OtelConfig::default(),
+            ..zdr_profile_config.clone()
         };
 
         assert_eq!(expected_zdr_profile_config, zdr_profile_config);
@@ -5922,6 +5931,7 @@ model_verbosity = "high"
                 allow_login_shell: true,
                 shell_environment_policy: ShellEnvironmentPolicy::default(),
                 windows_sandbox_mode: None,
+                windows_sandbox_private_desktop: false,
                 macos_seatbelt_profile_extensions: None,
             },
             enforce_residency: Constrained::allow_any(None),
@@ -6002,6 +6012,7 @@ model_verbosity = "high"
             tui_status_line: None,
             tui_theme: None,
             otel: OtelConfig::default(),
+            ..gpt5_profile_config.clone()
         };
 
         assert_eq!(expected_gpt5_profile_config, gpt5_profile_config);
@@ -6041,6 +6052,8 @@ model_verbosity = "high"
             rules: None,
             enforce_residency: None,
             network: None,
+            apps: None,
+            guardian_developer_instructions: None,
         };
         let requirement_source = crate::config_loader::RequirementSource::Unknown;
         let requirement_source_for_error = requirement_source.clone();
@@ -6646,6 +6659,8 @@ mcp_oauth_callback_url = "https://example.com/callback"
             rules: None,
             enforce_residency: None,
             network: None,
+            apps: None,
+            guardian_developer_instructions: None,
         };
 
         let config = ConfigBuilder::default()
