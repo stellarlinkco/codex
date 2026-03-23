@@ -159,7 +159,7 @@ impl PluginStore {
         let installed_path = self.plugin_root(&plugin_id, &plugin_version);
         replace_plugin_root_atomically(
             source_path.as_path(),
-            self.plugin_base_root(&plugin_id).as_path(),
+            installed_path.as_path(),
             &plugin_version,
         )?;
 

@@ -1352,7 +1352,31 @@ async fn start_apps_server_with_delays_and_control(
         let _ = axum::serve(listener, router).await;
     });
 
-    Ok((format!("http://{addr}"), handle, server_control))
+    let base_url = format!("http://{addr}");
+    let client = reqwest::Client::new();
+    let ready_url = format!("{base_url}/connectors/directory/list?external_logos=true");
+    let deadline = tokio::time::Instant::now() + DEFAULT_TIMEOUT;
+    loop {
+        match client
+            .get(&ready_url)
+            .bearer_auth("chatgpt-token")
+            .header("chatgpt-account-id", "account-123")
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => break,
+            Ok(_) | Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Ok(response) => anyhow::bail!(
+                "apps test server readiness probe failed: {}",
+                response.status()
+            ),
+            Err(err) => anyhow::bail!("apps test server readiness probe failed: {err}"),
+        }
+    }
+
+    Ok((base_url, handle, server_control))
 }
 
 async fn list_directory_connectors(
@@ -1421,7 +1445,7 @@ chatgpt_base_url = "{base_url}"
 mcp_oauth_credentials_store = "file"
 
 [features]
-connectors = true
+apps = true
 "#
         ),
     )

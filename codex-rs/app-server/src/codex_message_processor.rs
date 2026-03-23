@@ -516,6 +516,7 @@ impl CodexMessageProcessor {
     ) -> Result<Config, JSONRPCErrorError> {
         let cloud_requirements = self.current_cloud_requirements();
         let mut config = codex_core::config::ConfigBuilder::default()
+            .codex_home(self.config.as_ref().codex_home.clone())
             .cli_overrides(self.cli_overrides.clone())
             .fallback_cwd(fallback_cwd)
             .cloud_requirements(cloud_requirements)
@@ -3270,7 +3271,7 @@ impl CodexMessageProcessor {
                         thread_id,
                         thread.as_ref(),
                         &response_history,
-                        rollout_path.as_path(),
+                        Some(rollout_path.as_path()),
                         fallback_model_provider.as_str(),
                     )
                     .await
@@ -3565,15 +3566,23 @@ impl CodexMessageProcessor {
         thread_id: ThreadId,
         thread: &CodexThread,
         thread_history: &InitialHistory,
-        rollout_path: &Path,
+        rollout_path: Option<&Path>,
         fallback_provider: &str,
     ) -> Option<Thread> {
         let thread = match thread_history {
             InitialHistory::Resumed(resumed) => {
+                let Some(rollout_path) = rollout_path else {
+                    self.send_internal_error(
+                        request_id,
+                        format!("rollout path missing for thread {thread_id}"),
+                    )
+                    .await;
+                    return None;
+                };
                 load_thread_summary_for_rollout(
                     &self.config,
                     resumed.conversation_id,
-                    resumed.rollout_path.as_path(),
+                    rollout_path,
                     fallback_provider,
                 )
                 .await
@@ -3583,7 +3592,7 @@ impl CodexMessageProcessor {
                 let mut thread = build_thread_from_snapshot(
                     thread_id,
                     &config_snapshot,
-                    Some(rollout_path.into()),
+                    rollout_path.map(Path::to_path_buf),
                 );
                 thread.preview = preview_from_rollout_items(items);
                 Ok(thread)
@@ -3600,7 +3609,7 @@ impl CodexMessageProcessor {
             }
         };
         thread.id = thread_id.to_string();
-        thread.path = Some(rollout_path.to_path_buf());
+        thread.path = rollout_path.map(Path::to_path_buf);
         let history_items = thread_history.get_rollout_items();
         if let Err(message) = populate_resume_turns(
             &mut thread,
@@ -3753,6 +3762,7 @@ impl CodexMessageProcessor {
 
         let NewThread {
             thread_id,
+            thread,
             session_configured,
             ..
         } = match self
@@ -3785,15 +3795,10 @@ impl CodexMessageProcessor {
             }
         };
 
-        let SessionConfiguredEvent { rollout_path, .. } = session_configured;
-        let Some(rollout_path) = rollout_path else {
-            self.send_internal_error(
-                request_id,
-                format!("rollout path missing for thread {thread_id}"),
-            )
-            .await;
-            return;
-        };
+        let SessionConfiguredEvent {
+            rollout_path: fork_rollout_path,
+            ..
+        } = session_configured;
         // Auto-attach a conversation listener when forking a thread.
         Self::log_listener_attach_result(
             self.ensure_conversation_listener(
@@ -3808,42 +3813,66 @@ impl CodexMessageProcessor {
             "thread",
         );
 
-        let mut thread = match read_summary_from_rollout(
-            rollout_path.as_path(),
-            fallback_model_provider.as_str(),
-        )
-        .await
-        {
-            Ok(summary) => summary_to_thread(summary),
-            Err(err) => {
-                self.send_internal_error(
-                    request_id,
-                    format!(
-                        "failed to load rollout `{}` for thread {thread_id}: {err}",
-                        rollout_path.display()
-                    ),
-                )
-                .await;
-                return;
+        let mut thread = if let Some(fork_rollout_path) = fork_rollout_path.as_deref() {
+            match read_summary_from_rollout(fork_rollout_path, fallback_model_provider.as_str())
+                .await
+            {
+                Ok(summary) => {
+                    let mut thread = summary_to_thread(summary);
+                    match read_rollout_items_from_rollout(fork_rollout_path).await {
+                        Ok(items) => {
+                            thread.turns = build_turns_from_rollout_items(&items);
+                            thread
+                        }
+                        Err(err) => {
+                            self.send_internal_error(
+                                request_id,
+                                format!(
+                                    "failed to load rollout `{}` for thread {thread_id}: {err}",
+                                    fork_rollout_path.display()
+                                ),
+                            )
+                            .await;
+                            return;
+                        }
+                    }
+                }
+                Err(err) => {
+                    self.send_internal_error(
+                        request_id,
+                        format!(
+                            "failed to load rollout `{}` for thread {thread_id}: {err}",
+                            fork_rollout_path.display()
+                        ),
+                    )
+                    .await;
+                    return;
+                }
+            }
+        } else {
+            let config_snapshot = thread.config_snapshot().await;
+            let mut thread =
+                build_thread_from_snapshot(thread_id, &config_snapshot, /*path*/ None);
+            match read_rollout_items_from_rollout(rollout_path.as_path()).await {
+                Ok(items) => {
+                    thread.preview = preview_from_rollout_items(&items);
+                    thread.turns = build_turns_from_rollout_items(&items);
+                    thread
+                }
+                Err(err) => {
+                    self.send_internal_error(
+                        request_id,
+                        format!(
+                            "failed to load rollout `{}` for thread {thread_id}: {err}",
+                            rollout_path.display()
+                        ),
+                    )
+                    .await;
+                    return;
+                }
             }
         };
-        // forked thread names do not inherit the source thread name
-        match read_rollout_items_from_rollout(rollout_path.as_path()).await {
-            Ok(items) => {
-                thread.turns = build_turns_from_rollout_items(&items);
-            }
-            Err(err) => {
-                self.send_internal_error(
-                    request_id,
-                    format!(
-                        "failed to load rollout `{}` for thread {thread_id}: {err}",
-                        rollout_path.display()
-                    ),
-                )
-                .await;
-                return;
-            }
-        }
+        thread.name = None;
 
         self.thread_watch_manager
             .upsert_thread_silently(thread.clone())
@@ -5134,6 +5163,7 @@ impl CodexMessageProcessor {
                     .clone()
                     .or_else(|| Some(connector_install_url(&connector.name, &connector.id)));
                 AppSummary {
+                    needs_auth: true,
                     install_url,
                     ..AppSummary::from(connector)
                 }

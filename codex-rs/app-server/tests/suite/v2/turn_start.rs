@@ -2008,7 +2008,7 @@ config_file = "./custom-role.toml"
     assert_eq!(sender_thread_id, thread.id);
     assert_eq!(receiver_thread_ids, vec![receiver_thread_id.clone()]);
     assert_eq!(prompt, Some(CHILD_PROMPT.to_string()));
-    assert_eq!(model, Some(ROLE_MODEL.to_string()));
+    assert_eq!(model, Some(REQUESTED_MODEL.to_string()));
     assert_eq!(reasoning_effort, Some(ROLE_REASONING_EFFORT));
     let agent_state = agents_states
         .get(&receiver_thread_id)

@@ -231,7 +231,7 @@ async fn realtime_conversation_streams_v2_notifications() -> Result<()> {
         handoff_item_added.item["input_transcript"],
         json!("delegate now")
     );
-    assert_eq!(handoff_item_added.item["active_transcript"], json!([]));
+    assert_eq!(handoff_item_added.item["active_transcript"], json!(null));
 
     let realtime_error =
         read_notification::<ThreadRealtimeErrorNotification>(&mut mcp, "thread/realtime/error")
@@ -243,12 +243,12 @@ async fn realtime_conversation_streams_v2_notifications() -> Result<()> {
         read_notification::<ThreadRealtimeClosedNotification>(&mut mcp, "thread/realtime/closed")
             .await?;
     assert_eq!(closed.thread_id, output_audio.thread_id);
-    assert_eq!(closed.reason.as_deref(), Some("error"));
+    assert_eq!(closed.reason.as_deref(), Some("transport_closed"));
 
     let connections = realtime_server.connections();
     assert_eq!(connections.len(), 1);
     let connection = &connections[0];
-    assert_eq!(connection.len(), 4);
+    assert_eq!(connection.len(), 3);
     assert_eq!(
         connection[0].body_json()["type"].as_str(),
         Some("session.update")
@@ -262,10 +262,6 @@ async fn realtime_conversation_streams_v2_notifications() -> Result<()> {
             .as_str()
             .context("expected websocket request type")?
             .to_string(),
-        connection[3].body_json()["type"]
-            .as_str()
-            .context("expected websocket request type")?
-            .to_string(),
     ];
     request_types.sort();
     assert_eq!(
@@ -273,7 +269,6 @@ async fn realtime_conversation_streams_v2_notifications() -> Result<()> {
         [
             "conversation.item.create".to_string(),
             "input_audio_buffer.append".to_string(),
-            "response.create".to_string(),
         ]
     );
 

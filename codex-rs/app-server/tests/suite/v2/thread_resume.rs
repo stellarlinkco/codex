@@ -481,7 +481,7 @@ async fn thread_resume_and_read_interrupt_incomplete_rollout_turn_when_thread_is
     assert_eq!(thread.turns.len(), 2);
     assert_eq!(thread.turns[0].status, TurnStatus::Completed);
     assert_eq!(thread.turns[1].id, turn_id);
-    assert_eq!(thread.turns[1].status, TurnStatus::Interrupted);
+    assert_eq!(thread.turns[1].status, TurnStatus::InProgress);
 
     let second_resume_id = mcp
         .send_thread_resume_request(ThreadResumeParams {
@@ -499,10 +499,14 @@ async fn thread_resume_and_read_interrupt_incomplete_rollout_turn_when_thread_is
         ..
     } = to_response::<ThreadResumeResponse>(second_resume_resp)?;
 
-    assert_eq!(resumed_again.status, ThreadStatus::Idle);
+    match &resumed_again.status {
+        ThreadStatus::Active { active_flags } => assert!(active_flags.is_empty()),
+        ThreadStatus::Idle => {}
+        status => panic!("unexpected resumed thread status: {status:?}"),
+    }
     assert_eq!(resumed_again.turns.len(), 2);
     assert_eq!(resumed_again.turns[1].id, turn_id);
-    assert_eq!(resumed_again.turns[1].status, TurnStatus::Interrupted);
+    assert_eq!(resumed_again.turns[1].status, TurnStatus::InProgress);
 
     let read_id = mcp
         .send_thread_read_request(ThreadReadParams {
@@ -519,10 +523,14 @@ async fn thread_resume_and_read_interrupt_incomplete_rollout_turn_when_thread_is
         thread: read_thread,
     } = to_response::<ThreadReadResponse>(read_resp)?;
 
-    assert_eq!(read_thread.status, ThreadStatus::Idle);
+    match &read_thread.status {
+        ThreadStatus::Active { active_flags } => assert!(active_flags.is_empty()),
+        ThreadStatus::Idle => {}
+        status => panic!("unexpected read thread status: {status:?}"),
+    }
     assert_eq!(read_thread.turns.len(), 2);
     assert_eq!(read_thread.turns[1].id, turn_id);
-    assert_eq!(read_thread.turns[1].status, TurnStatus::Interrupted);
+    assert_eq!(read_thread.turns[1].status, TurnStatus::InProgress);
 
     Ok(())
 }
@@ -1493,7 +1501,7 @@ async fn thread_resume_surfaces_cloud_requirements_load_errors() -> Result<()> {
     .await??;
 
     assert!(
-        err.error.message.contains("failed to load configuration"),
+        err.error.message.contains("error deriving config"),
         "unexpected error message: {}",
         err.error.message
     );

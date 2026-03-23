@@ -297,10 +297,7 @@ async fn thread_fork_surfaces_cloud_requirements_load_errors() -> Result<()> {
     .await??;
 
     assert!(
-        fork_err
-            .error
-            .message
-            .contains("failed to load configuration"),
+        fork_err.error.message.contains("error deriving config"),
         "unexpected fork error: {}",
         fork_err.error.message
     );

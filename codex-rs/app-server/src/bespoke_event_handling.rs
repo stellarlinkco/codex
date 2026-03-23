@@ -51,6 +51,8 @@ use codex_app_server_protocol::JSONRPCErrorError;
 use codex_app_server_protocol::McpServerElicitationAction;
 use codex_app_server_protocol::McpServerElicitationRequestParams;
 use codex_app_server_protocol::McpServerElicitationRequestResponse;
+use codex_app_server_protocol::McpServerStartupState;
+use codex_app_server_protocol::McpServerStatusUpdatedNotification;
 use codex_app_server_protocol::McpToolCallError;
 use codex_app_server_protocol::McpToolCallResult;
 use codex_app_server_protocol::McpToolCallStatus;
@@ -114,6 +116,7 @@ use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecApprovalRequestEvent;
 use codex_protocol::protocol::ExecCommandEndEvent;
+use codex_protocol::protocol::McpStartupStatus;
 use codex_protocol::protocol::McpToolCallBeginEvent;
 use codex_protocol::protocol::McpToolCallEndEvent;
 use codex_protocol::protocol::Op;
@@ -244,6 +247,28 @@ pub(crate) async fn apply_bespoke_event_handling(
             }
         }
         EventMsg::Warning(_warning_event) => {}
+        EventMsg::McpStartupUpdate(event) => {
+            if let ApiVersion::V2 = api_version {
+                let (status, error) = match event.status {
+                    McpStartupStatus::Starting => (McpServerStartupState::Starting, None),
+                    McpStartupStatus::Ready => (McpServerStartupState::Ready, None),
+                    McpStartupStatus::Failed { error } => {
+                        (McpServerStartupState::Failed, Some(error))
+                    }
+                    McpStartupStatus::Cancelled => (McpServerStartupState::Cancelled, None),
+                };
+                let notification = McpServerStatusUpdatedNotification {
+                    name: event.server,
+                    status,
+                    error,
+                };
+                outgoing
+                    .send_server_notification(ServerNotification::McpServerStatusUpdated(
+                        notification,
+                    ))
+                    .await;
+            }
+        }
         EventMsg::ModelReroute(event) => {
             if let ApiVersion::V2 = api_version {
                 let notification = ModelReroutedNotification {

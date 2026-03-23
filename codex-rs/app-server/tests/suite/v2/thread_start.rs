@@ -479,7 +479,7 @@ async fn thread_start_surfaces_cloud_requirements_load_errors() -> Result<()> {
     .await??;
 
     assert!(
-        err.error.message.contains("failed to load configuration"),
+        err.error.message.contains("error deriving config"),
         "unexpected error message: {}",
         err.error.message
     );

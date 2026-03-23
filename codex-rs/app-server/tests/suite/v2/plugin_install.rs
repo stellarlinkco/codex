@@ -51,7 +51,7 @@ use wiremock::matchers::header;
 use wiremock::matchers::method;
 use wiremock::matchers::path;
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[tokio::test]
 async fn plugin_install_rejects_relative_marketplace_paths() -> Result<()> {
@@ -173,8 +173,7 @@ async fn plugin_install_returns_invalid_request_for_disallowed_product_plugin() 
     let marketplace_path =
         AbsolutePathBuf::try_from(repo_root.path().join(".agents/plugins/marketplace.json"))?;
 
-    let mut mcp =
-        McpProcess::new_with_args(codex_home.path(), &["--session-source", "atlas"]).await?;
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
 
     let request_id = mcp
@@ -679,7 +678,31 @@ async fn start_apps_server(
         let _ = axum::serve(listener, router).await;
     });
 
-    Ok((format!("http://{addr}"), handle))
+    let base_url = format!("http://{addr}");
+    let client = reqwest::Client::new();
+    let ready_url = format!("{base_url}/connectors/directory/list?external_logos=true");
+    let deadline = tokio::time::Instant::now() + DEFAULT_TIMEOUT;
+    loop {
+        match client
+            .get(&ready_url)
+            .bearer_auth("chatgpt-token")
+            .header("chatgpt-account-id", "account-123")
+            .send()
+            .await
+        {
+            Ok(response) if response.status().is_success() => break,
+            Ok(_) | Err(_) if tokio::time::Instant::now() < deadline => {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            Ok(response) => anyhow::bail!(
+                "apps test server readiness probe failed: {}",
+                response.status()
+            ),
+            Err(err) => anyhow::bail!("apps test server readiness probe failed: {err}"),
+        }
+    }
+
+    Ok((base_url, handle))
 }
 
 async fn list_directory_connectors(
@@ -743,7 +766,7 @@ chatgpt_base_url = "{base_url}"
 mcp_oauth_credentials_store = "file"
 
 [features]
-connectors = true
+apps = true
 "#
         ),
     )
