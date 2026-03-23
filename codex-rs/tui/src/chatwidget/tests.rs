@@ -83,6 +83,9 @@ use codex_protocol::protocol::PatchApplyBeginEvent;
 use codex_protocol::protocol::PatchApplyEndEvent;
 use codex_protocol::protocol::PatchApplyStatus as CorePatchApplyStatus;
 use codex_protocol::protocol::RateLimitWindow;
+use codex_protocol::protocol::RealtimeConversationRealtimeEvent;
+use codex_protocol::protocol::RealtimeEvent;
+use codex_protocol::protocol::RealtimeTranscriptUpdated;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
 use codex_protocol::protocol::SessionSource;
@@ -10018,6 +10021,27 @@ async fn enter_queues_user_messages_while_review_is_running() {
     assert!(chat.pending_steers.is_empty());
     assert_no_submit_op(&mut op_rx);
     assert!(drain_insert_history(&mut rx).is_empty());
+}
+
+#[tokio::test]
+async fn realtime_transcript_updates_do_not_interrupt_live_session() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.realtime_conversation.phase =
+        crate::chatwidget::realtime::RealtimeConversationPhase::Active;
+
+    chat.on_realtime_conversation_realtime(RealtimeConversationRealtimeEvent {
+        payload: RealtimeEvent::TranscriptUpdated(RealtimeTranscriptUpdated {
+            role: "assistant".to_string(),
+            text: "partial transcript".to_string(),
+        }),
+    });
+
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    assert!(drain_insert_history(&mut rx).is_empty());
+    assert_eq!(
+        chat.realtime_conversation.phase,
+        crate::chatwidget::realtime::RealtimeConversationPhase::Active
+    );
 }
 
 #[tokio::test]

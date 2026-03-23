@@ -26,6 +26,7 @@ use codex_app_server_protocol::TurnStatus;
 use codex_app_server_protocol::UserInput;
 use codex_core::auth::AuthCredentialsStoreMode;
 use codex_core::auth::REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR;
+use codex_core::find_thread_path_by_id_str;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
@@ -442,6 +443,11 @@ async fn thread_fork_ephemeral_remains_pathless_and_omits_listing() -> Result<()
     assert!(
         data.iter().any(|candidate| candidate.id == conversation_id),
         "persistent source thread should remain listed"
+    );
+    assert_eq!(
+        find_thread_path_by_id_str(codex_home.path(), &fork_thread_id).await?,
+        None,
+        "ephemeral forks should not materialize a rollout on disk"
     );
 
     let turn_id = mcp

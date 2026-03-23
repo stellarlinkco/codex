@@ -109,6 +109,7 @@ use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::GuardianRiskLevel;
 use codex_protocol::protocol::ImageGenerationEndEvent;
 use codex_protocol::protocol::ItemCompletedEvent;
+use codex_protocol::protocol::ListRemoteSkillsResponseEvent;
 use codex_protocol::protocol::McpStartupCompleteEvent;
 use codex_protocol::protocol::McpStartupStatus;
 use codex_protocol::protocol::McpStartupUpdateEvent;
@@ -121,6 +122,9 @@ use codex_protocol::protocol::ReadOnlyAccess;
 use codex_protocol::protocol::RealtimeConversationClosedEvent;
 use codex_protocol::protocol::RealtimeConversationRealtimeEvent;
 use codex_protocol::protocol::RealtimeEvent;
+use codex_protocol::protocol::RealtimeTranscriptUpdated;
+use codex_protocol::protocol::RemoteSkillDownloadedEvent;
+use codex_protocol::protocol::RemoteSkillSummary;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
 use codex_protocol::protocol::SessionConfiguredEvent;
@@ -5485,6 +5489,53 @@ async fn realtime_error_closes_without_followup_closed_info() {
         .map(|lines| lines_to_single_string(&lines))
         .collect::<Vec<_>>();
     assert_snapshot!(rendered.join("\n\n"), @"■ Realtime voice error: boom");
+}
+
+#[tokio::test]
+async fn realtime_transcript_updates_do_not_interrupt_live_session() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+    chat.realtime_conversation.phase = RealtimeConversationPhase::Active;
+
+    chat.on_realtime_conversation_realtime(RealtimeConversationRealtimeEvent {
+        payload: RealtimeEvent::TranscriptUpdated(RealtimeTranscriptUpdated {
+            role: "assistant".to_string(),
+            text: "partial transcript".to_string(),
+        }),
+    });
+
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
+    assert_eq!(
+        chat.realtime_conversation.phase,
+        RealtimeConversationPhase::Active
+    );
+}
+
+#[tokio::test]
+async fn remote_skill_events_are_ignored_without_side_effects() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(None).await;
+
+    chat.handle_codex_event(Event {
+        id: "remote-skills-1".into(),
+        msg: EventMsg::ListRemoteSkillsResponse(ListRemoteSkillsResponseEvent {
+            skills: vec![RemoteSkillSummary {
+                id: "skill-1".to_string(),
+                name: "Demo Skill".to_string(),
+                description: "demo".to_string(),
+            }],
+        }),
+    });
+    chat.handle_codex_event(Event {
+        id: "remote-skills-2".into(),
+        msg: EventMsg::RemoteSkillDownloaded(RemoteSkillDownloadedEvent {
+            id: "skill-1".to_string(),
+            name: "Demo Skill".to_string(),
+            path: PathBuf::from("/tmp/demo-skill/SKILL.md"),
+        }),
+    });
+
+    assert_matches!(op_rx.try_recv(), Err(TryRecvError::Empty));
+    assert!(drain_insert_history(&mut rx).is_empty());
 }
 
 #[cfg(not(target_os = "linux"))]
