@@ -198,7 +198,10 @@ diff --git a/builder/main.rs b/builder/main.rs
  }
  
  fn get_builder(prefix: &Option<String>, manifest_dir: &Path, out_dir: &Path) -> Box<dyn Builder> {
-@@ -817,6 +836,10 @@ fn main() {
+@@ -817,8 +836,12 @@ fn main() {
+     initialize();
+     prepare_cargo_cfg();
+ 
      let manifest_dir = current_dir();
      let manifest_dir = dunce::canonicalize(Path::new(&manifest_dir)).unwrap();
 +    if let Some(execroot) = bazel_execroot(manifest_dir.as_path()) {
