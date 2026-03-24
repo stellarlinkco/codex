@@ -73,7 +73,7 @@ index 95cacb048..e20591475 100644
          memcmp_compile_args.push(
              self.manifest_dir
                  .join("aws-lc")
-@@ -742,4 +769,93 @@ impl CcBuilder {
+@@ -742,4 +769,131 @@ impl CcBuilder {
          );
          let _ = fs::remove_file(exec_path);
      }
@@ -82,23 +82,61 @@ index 95cacb048..e20591475 100644
 +        path.starts_with("bazel-out/") || path.starts_with("external/")
 +    }
 +
++    fn rewrite_bazel_execroot_value(execroot: &Path, value: &str) -> Option<String> {
++        if Self::bazel_execroot_relative_path(value) {
++            return Some(execroot.join(value).display().to_string());
++        }
++
++        let (prefix, path) = value.split_once('=')?;
++        if Self::bazel_execroot_relative_path(path) {
++            Some(format!("{prefix}={}", execroot.join(path).display()))
++        } else {
++            None
++        }
++    }
++
++    fn rewrite_bazel_execroot_comma_arg(execroot: &Path, arg: &str) -> Option<String> {
++        let mut changed = false;
++        let rewritten = arg
++            .split(',')
++            .map(|segment| {
++                if let Some(rewritten) = Self::rewrite_bazel_execroot_value(execroot, segment) {
++                    changed = true;
++                    rewritten
++                } else {
++                    segment.to_string()
++                }
++            })
++            .collect::<Vec<_>>();
++
++        if changed {
++            Some(rewritten.join(","))
++        } else {
++            None
++        }
++    }
++
 +    fn rewrite_bazel_execroot_arg(execroot: &Path, arg: &mut std::ffi::OsString) {
 +        let Some(arg_str) = arg.to_str() else {
 +            return;
 +        };
 +
-+        if Self::bazel_execroot_relative_path(arg_str) {
-+            *arg = execroot.join(arg_str).into_os_string();
++        if let Some(rewritten) = Self::rewrite_bazel_execroot_value(execroot, arg_str) {
++            *arg = rewritten.into();
 +            return;
 +        }
 +
 +        for flag_prefix in ["-B", "-L", "-I", "-F", "--sysroot=", "--gcc-toolchain="] {
 +            if let Some(path) = arg_str.strip_prefix(flag_prefix) {
-+                if Self::bazel_execroot_relative_path(path) {
-+                    *arg = format!("{flag_prefix}{}", execroot.join(path).display()).into();
++                if let Some(rewritten) = Self::rewrite_bazel_execroot_value(execroot, path) {
++                    *arg = format!("{flag_prefix}{rewritten}").into();
 +                    return;
 +                }
 +            }
++        }
++
++        if let Some(rewritten) = Self::rewrite_bazel_execroot_comma_arg(execroot, arg_str) {
++            *arg = rewritten.into();
 +        }
 +    }
 +
