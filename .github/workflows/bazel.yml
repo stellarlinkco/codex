@@ -167,6 +167,10 @@ jobs:
             exit 1
           fi
           bazel_args+=("--action_env=CODEX_CLI_VERSION=${codex_cli_version}")
+          # Keep strict action env, but allow build scripts that spawn system tools
+          # (for example aws-lc-sys invoking cmake/compiler toolchain helpers) to
+          # resolve the runner's standard PATH.
+          bazel_args+=("--action_env=PATH=${PATH}")
 
           if [[ "${RUNNER_OS:-}" != "Windows" ]]; then
             # Bazel test sandboxes on macOS may resolve an older Homebrew `node`
