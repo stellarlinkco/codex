@@ -74,6 +74,7 @@ crate.annotation(
     build_script_env = {
         "AWS_LC_SYS_NO_JITTER_ENTROPY": "1",
     },
+    build_script_rundir = ".",
     crate = "aws-lc-sys",
     patch_args = ["-p1"],
     patches = [
