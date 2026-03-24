@@ -198,7 +198,7 @@ impl ToolHandler for ApplyPatchHandler {
                             changes,
                             exec_approval_requirement: apply.exec_approval_requirement,
                             timeout_ms: None,
-                            codex_exe: turn.codex_linux_sandbox_exe.clone(),
+                            codex_exe: None,
                         };
 
                         let mut orchestrator = ToolOrchestrator::new();
@@ -295,7 +295,7 @@ pub(crate) async fn intercept_apply_patch(
                         changes,
                         exec_approval_requirement: apply.exec_approval_requirement,
                         timeout_ms,
-                        codex_exe: turn.codex_linux_sandbox_exe.clone(),
+                        codex_exe: None,
                     };
 
                     let mut orchestrator = ToolOrchestrator::new();

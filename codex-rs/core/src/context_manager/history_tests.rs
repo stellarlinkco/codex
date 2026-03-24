@@ -505,10 +505,6 @@ fn for_prompt_rewrites_image_generation_calls_when_images_are_unsupported() {
                         text: "Prompt: lobster".to_string(),
                     },
                     ContentItem::InputText {
-                        text: "image content omitted because you do not support image input"
-                            .to_string(),
-                    },
-                    ContentItem::InputText {
                         text: "Saved to: CWD".to_string(),
                     },
                 ],

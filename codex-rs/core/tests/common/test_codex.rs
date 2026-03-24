@@ -464,6 +464,8 @@ impl TestCodexHarness {
             .expect("mock server should not fail")
             .into_iter()
             .filter(|req| path_matcher.matches(req))
+            .filter(|req| req.method == wiremock::http::Method::POST)
+            .filter(|req| !req.body.is_empty())
             .map(|req| {
                 req.body_json::<Value>()
                     .expect("request body to be valid JSON")
