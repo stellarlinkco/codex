@@ -85,11 +85,13 @@ default:
 ./tools/argument-comment-lint/run.sh -p codex-core
 ```
 
-The wrapper does that by setting `DYLINT_RUSTFLAGS`, and it leaves an explicit
-existing setting alone. It also defaults `CARGO_INCREMENTAL=0` unless you have
-already set it, because the current nightly Dylint flow can otherwise hit a
-rustc incremental compilation ICE locally. To override that behavior for an ad
-hoc run:
+The wrapper does that by setting `DYLINT_RUSTFLAGS`, leaves an explicit
+existing setting alone, and also appends `-A unknown_lints` to `RUSTFLAGS` so
+non-linted rustc invocations do not emit noisy "unknown lint" warnings during
+repo runs. It also defaults `CARGO_INCREMENTAL=0` unless you have already set
+it, because the current nightly Dylint flow can otherwise hit a rustc
+incremental compilation ICE locally. To override that behavior for an ad hoc
+run:
 
 ```bash
 DYLINT_RUSTFLAGS="-A uncommented-anonymous-literal-argument" \

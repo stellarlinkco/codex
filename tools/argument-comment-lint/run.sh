@@ -83,6 +83,9 @@ fi
 if [[ "${DYLINT_RUSTFLAGS:-}" != *"$noise_lint"* ]]; then
     export DYLINT_RUSTFLAGS="${DYLINT_RUSTFLAGS:+${DYLINT_RUSTFLAGS} }-A $noise_lint"
 fi
+if [[ "${RUSTFLAGS:-}" != *"$noise_lint"* ]]; then
+    export RUSTFLAGS="${RUSTFLAGS:+${RUSTFLAGS} }-A $noise_lint"
+fi
 
 if [[ -z "${CARGO_INCREMENTAL:-}" ]]; then
     export CARGO_INCREMENTAL=0
