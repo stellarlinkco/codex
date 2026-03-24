@@ -1,4 +1,5 @@
 #![allow(clippy::module_inception)]
+#![allow(dead_code)]
 
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;

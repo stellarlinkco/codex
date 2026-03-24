@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::Feature;
 use super::Features;
 use tracing::info;

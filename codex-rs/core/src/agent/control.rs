@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::agent::AgentStatus;
 use crate::agent::guards::AgentMetadata;
 use crate::agent::guards::Guards;

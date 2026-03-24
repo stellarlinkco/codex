@@ -1554,6 +1554,7 @@ permissions:
                     ]),
                     macos_accessibility: true,
                     macos_calendar: true,
+                    ..Default::default()
                 }),
                 ..Default::default()
             })

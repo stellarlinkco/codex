@@ -3080,10 +3080,7 @@ async fn spawn_team_accepts_backendground_alias() {
     let FunctionToolOutput {
         success: close_success,
         ..
-    } = close_output
-    else {
-        panic!("expected function output");
-    };
+    } = close_output;
     assert_eq!(close_success, Some(true));
 }
 

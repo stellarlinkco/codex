@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::bespoke_event_handling::apply_bespoke_event_handling;
 use crate::command_exec::CommandExecManager;
 use crate::command_exec::StartCommandExecParams;

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::error::CodexErr;
 use crate::error::Result;
 use codex_protocol::AgentPath;

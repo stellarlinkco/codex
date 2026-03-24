@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::client_common::tools::ToolSearchOutputTool;
 use crate::codex::Session;
 use crate::codex::TurnContext;

@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! The chat composer is the bottom-pane text input state machine.
 //!
 //! It is responsible for:

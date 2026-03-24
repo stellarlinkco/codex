@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Terminal-title output helpers for the TUI.
 //!
 //! This module owns the low-level OSC title write path and the sanitization

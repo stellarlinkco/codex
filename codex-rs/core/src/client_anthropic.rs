@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use anthropic_sdk::Anthropic;
 use anthropic_sdk::ClientOptions;
 use anthropic_sdk::Error as AnthropicError;

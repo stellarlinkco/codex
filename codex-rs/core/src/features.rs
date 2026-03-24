@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Centralized feature flags and metadata.
 //!
 //! This module defines a small set of toggles that gate experimental and

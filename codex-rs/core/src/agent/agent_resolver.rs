@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::codex::Session;
 use crate::codex::TurnContext;
 use crate::function_tool::FunctionCallError;

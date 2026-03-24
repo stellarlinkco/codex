@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use codex_protocol::models::ContentItem;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;

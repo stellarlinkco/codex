@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Session-wide mutable state.
 
 use codex_artifact_presentation::PresentationArtifactManager;

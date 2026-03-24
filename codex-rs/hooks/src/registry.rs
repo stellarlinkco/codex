@@ -1564,6 +1564,8 @@ mod tests {
             transcript_path: None,
             cwd: cwd.to_path_buf(),
             permission_mode: "never".to_string(),
+            client: None,
+            triggered_at: None,
             hook_event,
         }
     }
@@ -1579,6 +1581,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks
@@ -1616,6 +1619,7 @@ mod tests {
                 ],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks
@@ -1657,6 +1661,7 @@ mod tests {
                 ],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks
@@ -1726,6 +1731,7 @@ mod tests {
                 ],
                 ..Default::default()
             },
+            ..Default::default()
         });
         hooks.set_non_command_executor(Arc::new(BarrierExecutor {
             barrier: tokio::sync::Barrier::new(2),
@@ -1759,6 +1765,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks
@@ -1792,6 +1799,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks
@@ -1827,6 +1835,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks
@@ -1856,6 +1865,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks
@@ -1882,6 +1892,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks
@@ -1912,6 +1923,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks
@@ -1942,6 +1954,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks
@@ -1979,6 +1992,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let hook_event = HookEvent::SessionStart {
@@ -2015,6 +2029,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let first = hooks
@@ -2056,6 +2071,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let does_not_match = hooks
@@ -2190,6 +2206,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks
@@ -2241,6 +2258,7 @@ mod tests {
                 ],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks
@@ -2272,6 +2290,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let matches = hooks
@@ -2312,6 +2331,7 @@ mod tests {
                 ],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks
@@ -2343,6 +2363,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks
@@ -2370,6 +2391,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks
@@ -2405,6 +2427,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks
@@ -2710,6 +2733,7 @@ mod tests {
                 }],
                 ..Default::default()
             },
+            ..Default::default()
         });
 
         let outcomes = hooks

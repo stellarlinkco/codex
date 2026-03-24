@@ -296,6 +296,8 @@ pub struct HookResponse {
 mod tests {
     use std::path::PathBuf;
 
+    use chrono::TimeZone;
+    use chrono::Utc;
     use pretty_assertions::assert_eq;
     use serde_json::json;
 

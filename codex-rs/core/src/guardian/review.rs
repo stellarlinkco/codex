@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::sync::Arc;
 
 use codex_protocol::config_types::ApprovalsReviewer;

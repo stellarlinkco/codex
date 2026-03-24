@@ -44,9 +44,18 @@ mod tests {
 
         let context = v8::Context::new(scope, Default::default());
         let scope = &mut v8::ContextScope::new(scope, context);
-        let source = v8::String::new(scope, expression).expect("expression should be valid UTF-8");
-        let script = v8::Script::compile(scope, source, None).expect("expression should compile");
-        let result = script.run(scope).expect("expression should evaluate");
+        let source = match v8::String::new(scope, expression) {
+            Some(source) => source,
+            None => panic!("expression should be valid UTF-8"),
+        };
+        let script = match v8::Script::compile(scope, source, None) {
+            Some(script) => script,
+            None => panic!("expression should compile"),
+        };
+        let result = match script.run(scope) {
+            Some(result) => result,
+            None => panic!("expression should evaluate"),
+        };
 
         result.to_rust_string_lossy(scope)
     }

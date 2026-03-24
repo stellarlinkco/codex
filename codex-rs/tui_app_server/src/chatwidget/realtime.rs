@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use super::*;
 use codex_protocol::protocol::ConversationStartParams;
 use codex_protocol::protocol::RealtimeAudioFrame;

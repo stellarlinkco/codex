@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 //! Turn-scoped state and active turn metadata scaffolding.
 
 use indexmap::IndexMap;

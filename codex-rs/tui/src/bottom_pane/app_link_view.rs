@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use codex_protocol::ThreadId;
 use codex_protocol::approvals::ElicitationAction;
 use codex_protocol::mcp::RequestId as McpRequestId;

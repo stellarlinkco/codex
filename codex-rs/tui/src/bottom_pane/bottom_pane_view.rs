@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::McpServerElicitationFormRequest;
 use crate::render::renderable::Renderable;
