@@ -396,7 +396,7 @@ impl AgentControl {
         }
         let state = self.upgrade()?;
         if state.get_thread(thread_id).await.is_err() {
-            self.state.release_spawned_thread(thread_id);
+            self.state.release_spawned_subtree(thread_id);
         }
         let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
         let (session_source, agent_metadata) = match session_source {

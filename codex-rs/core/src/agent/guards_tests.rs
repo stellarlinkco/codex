@@ -140,6 +140,45 @@ fn release_is_idempotent_for_registered_threads() {
 }
 
 #[test]
+fn release_spawned_subtree_removes_descendants_and_frees_slots() {
+    let guards = Arc::new(Guards::default());
+
+    let root_id = ThreadId::new();
+    guards.register_root_thread(root_id);
+
+    let child_id = ThreadId::new();
+    let child_path = agent_path("/root/explorer");
+    let child_reservation = guards
+        .reserve_spawn_slot(Some(2))
+        .expect("reserve child slot");
+    child_reservation.commit(AgentMetadata {
+        agent_id: Some(child_id),
+        agent_path: Some(child_path.clone()),
+        ..Default::default()
+    });
+
+    let grandchild_id = ThreadId::new();
+    let grandchild_reservation = guards
+        .reserve_spawn_slot(Some(2))
+        .expect("reserve grandchild slot");
+    grandchild_reservation.commit(AgentMetadata {
+        agent_id: Some(grandchild_id),
+        agent_path: Some(child_path.join("worker").expect("child path join")),
+        ..Default::default()
+    });
+
+    guards.release_spawned_subtree(child_id);
+
+    assert_eq!(guards.agent_id_for_path(&child_path), None);
+    assert_eq!(guards.agent_metadata_for_thread(grandchild_id), None);
+
+    let reservation = guards
+        .reserve_spawn_slot(Some(2))
+        .expect("subtree release should free counted slots");
+    drop(reservation);
+}
+
+#[test]
 fn failed_spawn_keeps_nickname_marked_used() {
     let guards = Arc::new(Guards::default());
     let mut reservation = guards.reserve_spawn_slot(None).expect("reserve slot");

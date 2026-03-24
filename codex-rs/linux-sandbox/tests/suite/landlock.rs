@@ -135,7 +135,7 @@ async fn run_cmd_result_with_policies(
         network_sandbox_policy,
         sandbox_cwd.as_path(),
         &codex_linux_sandbox_exe,
-        use_bwrap_sandbox,
+        !use_bwrap_sandbox,
         None,
     )
     .await

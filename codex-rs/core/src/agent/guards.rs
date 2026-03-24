@@ -119,6 +119,45 @@ impl Guards {
         }
     }
 
+    pub(crate) fn release_spawned_subtree(&self, thread_id: ThreadId) {
+        let removed_counted_agents = {
+            let mut active_agents = self
+                .active_agents
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let root_path = active_agents
+                .agent_tree
+                .values()
+                .find(|metadata| metadata.agent_id == Some(thread_id))
+                .and_then(|metadata| metadata.agent_path.clone());
+            let removed_keys: Vec<String> = active_agents
+                .agent_tree
+                .iter()
+                .filter_map(|(key, metadata)| {
+                    let remove_for_thread = metadata.agent_id == Some(thread_id);
+                    let remove_for_path = root_path.as_ref().is_some_and(|root_path| {
+                        metadata.agent_path.as_ref().is_some_and(|agent_path| {
+                            agent_path == root_path
+                                || agent_path
+                                    .as_str()
+                                    .starts_with(format!("{root_path}/").as_str())
+                        })
+                    });
+                    (remove_for_thread || remove_for_path).then_some(key.clone())
+                })
+                .collect();
+            removed_keys
+                .into_iter()
+                .filter_map(|key| active_agents.agent_tree.remove(key.as_str()))
+                .filter(|metadata| !metadata.agent_path.as_ref().is_some_and(AgentPath::is_root))
+                .count()
+        };
+        if removed_counted_agents > 0 {
+            self.total_count
+                .fetch_sub(removed_counted_agents, Ordering::AcqRel);
+        }
+    }
+
     pub(crate) fn register_root_thread(&self, thread_id: ThreadId) {
         let mut active_agents = self
             .active_agents

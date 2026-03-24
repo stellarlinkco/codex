@@ -61,6 +61,7 @@ pub use crate::remote::RemoteAppServerClient;
 pub use crate::remote::RemoteAppServerConnectArgs;
 
 const SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(5);
+const IN_PROCESS_SHUTDOWN_GRACE_TIMEOUT: Duration = Duration::from_millis(500);
 
 /// Raw app-server request result for typed in-process requests.
 ///
@@ -675,21 +676,37 @@ impl InProcessAppServerClient {
         // and getting aborted with the runtime still attached.
         drop(event_rx);
         let (response_tx, response_rx) = oneshot::channel();
-        if command_tx
+        let shutdown_response = if command_tx
             .send(ClientCommand::Shutdown { response_tx })
             .await
             .is_ok()
-            && let Ok(command_result) = timeout(SHUTDOWN_TIMEOUT, response_rx).await
         {
-            command_result.map_err(|_| {
-                IoError::new(
+            timeout(IN_PROCESS_SHUTDOWN_GRACE_TIMEOUT, response_rx)
+                .await
+                .ok()
+        } else {
+            None
+        };
+
+        let worker_join_timeout = match shutdown_response {
+            Some(Ok(Ok(()))) => IN_PROCESS_SHUTDOWN_GRACE_TIMEOUT,
+            Some(Ok(Err(err))) => {
+                worker_handle.abort();
+                let _ = worker_handle.await;
+                return Err(err);
+            }
+            Some(Err(_)) => {
+                worker_handle.abort();
+                let _ = worker_handle.await;
+                return Err(IoError::new(
                     ErrorKind::BrokenPipe,
                     "in-process app-server shutdown channel is closed",
-                )
-            })??;
-        }
+                ));
+            }
+            None => Duration::ZERO,
+        };
 
-        if let Err(_elapsed) = timeout(SHUTDOWN_TIMEOUT, &mut worker_handle).await {
+        if let Err(_elapsed) = timeout(worker_join_timeout, &mut worker_handle).await {
             worker_handle.abort();
             let _ = worker_handle.await;
         }
