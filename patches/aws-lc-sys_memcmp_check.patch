@@ -73,24 +73,28 @@ index 95cacb048..e20591475 100644
          memcmp_compile_args.push(
              self.manifest_dir
                  .join("aws-lc")
-@@ -742,4 +769,89 @@ impl CcBuilder {
+@@ -742,4 +769,93 @@ impl CcBuilder {
          );
          let _ = fs::remove_file(exec_path);
      }
++
++    fn bazel_execroot_relative_path(path: &str) -> bool {
++        path.starts_with("bazel-out/") || path.starts_with("external/")
++    }
 +
 +    fn rewrite_bazel_execroot_arg(execroot: &Path, arg: &mut std::ffi::OsString) {
 +        let Some(arg_str) = arg.to_str() else {
 +            return;
 +        };
 +
-+        if arg_str.starts_with("bazel-out/") {
++        if Self::bazel_execroot_relative_path(arg_str) {
 +            *arg = execroot.join(arg_str).into_os_string();
 +            return;
 +        }
 +
-+        for flag_prefix in ["-B", "-L"] {
++        for flag_prefix in ["-B", "-L", "-I", "-F", "--sysroot=", "--gcc-toolchain="] {
 +            if let Some(path) = arg_str.strip_prefix(flag_prefix) {
-+                if path.starts_with("bazel-out/") {
++                if Self::bazel_execroot_relative_path(path) {
 +                    *arg = format!("{flag_prefix}{}", execroot.join(path).display()).into();
 +                    return;
 +                }
