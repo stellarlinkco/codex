@@ -163,3 +163,20 @@ index 95cacb048..e20591475 100644
 +    }
 +
      fn run_compiler_checks(&self, cc_build: &mut cc::Build) {
+diff --git a/builder/main.rs b/builder/main.rs
+--- a/builder/main.rs
++++ b/builder/main.rs
+@@ -479,8 +479,12 @@ fn out_dir() -> PathBuf {
+     PathBuf::from(cargo_env("OUT_DIR"))
+ }
+ 
+ fn current_dir() -> PathBuf {
+-    std::env::current_dir().unwrap()
++    if let Some(manifest_dir) = env::var_os("CARGO_MANIFEST_DIR") {
++        return PathBuf::from(manifest_dir);
++    }
++
++    std::env::current_dir().unwrap()
+ }
+ 
+ fn get_builder(prefix: &Option<String>, manifest_dir: &Path, out_dir: &Path) -> Box<dyn Builder> {
