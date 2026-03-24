@@ -337,11 +337,19 @@ impl InProcessClientHandle {
     /// Shutdown is bounded by internal timeouts and may abort background tasks
     /// if graceful drain does not complete in time.
     pub async fn shutdown(self) -> IoResult<()> {
-        let mut runtime_handle = self.runtime_handle;
+        let Self {
+            client,
+            event_rx,
+            runtime_handle,
+        } = self;
+        let mut runtime_handle = runtime_handle;
+        // Drop the runtime-facing receiver before requesting shutdown so
+        // must-deliver terminal notifications cannot block the runtime on an
+        // undrained event queue during teardown.
+        drop(event_rx);
         let (done_tx, done_rx) = oneshot::channel();
 
-        if self
-            .client
+        if client
             .client_tx
             .send(InProcessClientMessage::Shutdown { done_tx })
             .await

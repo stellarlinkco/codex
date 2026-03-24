@@ -4165,6 +4165,7 @@ mod tests {
                 "model": "codex-mini-latest",
                 "model_provider_id": "openai",
                 "approval_policy": "never",
+                "approvals_reviewer": "user",
                 "sandbox_policy": {
                     "type": "read-only"
                 },

@@ -395,6 +395,9 @@ impl AgentControl {
             let _ = config.features.disable(Feature::Collab);
         }
         let state = self.upgrade()?;
+        if state.get_thread(thread_id).await.is_err() {
+            self.state.release_spawned_thread(thread_id);
+        }
         let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
         let (session_source, agent_metadata) = match session_source {
             SessionSource::SubAgent(SubAgentSource::ThreadSpawn {

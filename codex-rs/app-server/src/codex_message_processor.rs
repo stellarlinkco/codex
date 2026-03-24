@@ -5295,7 +5295,7 @@ impl CodexMessageProcessor {
         let roots = params.cwds.unwrap_or_default();
         let force_remote_sync = params.force_remote_sync;
 
-        let config = match self.load_latest_config(/*fallback_cwd*/ None).await {
+        let mut config = match self.load_latest_config(/*fallback_cwd*/ None).await {
             Ok(config) => config,
             Err(err) => {
                 self.outgoing.send_error(request_id, err).await;
@@ -5311,6 +5311,18 @@ impl CodexMessageProcessor {
                 .await
         {
             remote_sync_error = Some(err.to_string());
+        } else if force_remote_sync {
+            match self.load_latest_config(/*fallback_cwd*/ None).await {
+                Ok(latest_config) => config = latest_config,
+                Err(err) => {
+                    self.send_internal_error(
+                        request_id,
+                        format!("failed to reload config after plugin sync: {}", err.message),
+                    )
+                    .await;
+                    return;
+                }
+            }
         }
         let featured_plugin_ids = match plugins_manager
             .featured_plugin_ids_for_config(&config, auth.as_ref())

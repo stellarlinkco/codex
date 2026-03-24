@@ -651,6 +651,106 @@ fn transform_additional_permissions_preserves_denied_entries() {
 }
 
 #[test]
+fn linux_seccomp_transform_enables_bwrap_without_proxy_by_default() {
+    let manager = SandboxManager::new();
+    let cwd = std::env::current_dir().expect("current dir");
+    let sandbox_exe = std::path::PathBuf::from("/tmp/codex-linux-sandbox");
+
+    let exec_request = manager
+        .transform(super::SandboxTransformRequest {
+            spec: super::CommandSpec {
+                program: "true".to_string(),
+                args: Vec::new(),
+                cwd: cwd.clone(),
+                env: HashMap::new(),
+                expiration: crate::exec::ExecExpiration::DefaultTimeout,
+                capture_policy: crate::exec::ExecCapturePolicy::ShellTool,
+                sandbox_permissions: super::SandboxPermissions::UseDefault,
+                additional_permissions: None,
+                justification: None,
+            },
+            policy: &SandboxPolicy::new_read_only_policy(),
+            file_system_policy: &FileSystemSandboxPolicy::from(
+                &SandboxPolicy::new_read_only_policy(),
+            ),
+            network_policy: NetworkSandboxPolicy::Restricted,
+            sandbox: SandboxType::LinuxSeccomp,
+            enforce_managed_network: false,
+            network: None,
+            sandbox_policy_cwd: cwd.as_path(),
+            #[cfg(target_os = "macos")]
+            macos_seatbelt_profile_extensions: None,
+            codex_linux_sandbox_exe: Some(&sandbox_exe),
+            use_legacy_landlock: false,
+            windows_sandbox_level: WindowsSandboxLevel::Disabled,
+            windows_sandbox_private_desktop: false,
+        })
+        .expect("transform");
+
+    assert_eq!(
+        exec_request
+            .command
+            .contains(&"--use-bwrap-sandbox".to_string()),
+        true
+    );
+    assert_eq!(
+        exec_request
+            .command
+            .contains(&"--allow-network-for-proxy".to_string()),
+        false
+    );
+}
+
+#[test]
+fn linux_seccomp_transform_only_enables_proxy_flag_for_managed_network() {
+    let manager = SandboxManager::new();
+    let cwd = std::env::current_dir().expect("current dir");
+    let sandbox_exe = std::path::PathBuf::from("/tmp/codex-linux-sandbox");
+
+    let exec_request = manager
+        .transform(super::SandboxTransformRequest {
+            spec: super::CommandSpec {
+                program: "true".to_string(),
+                args: Vec::new(),
+                cwd: cwd.clone(),
+                env: HashMap::new(),
+                expiration: crate::exec::ExecExpiration::DefaultTimeout,
+                capture_policy: crate::exec::ExecCapturePolicy::ShellTool,
+                sandbox_permissions: super::SandboxPermissions::UseDefault,
+                additional_permissions: None,
+                justification: None,
+            },
+            policy: &SandboxPolicy::DangerFullAccess,
+            file_system_policy: &FileSystemSandboxPolicy::unrestricted(),
+            network_policy: NetworkSandboxPolicy::Enabled,
+            sandbox: SandboxType::LinuxSeccomp,
+            enforce_managed_network: true,
+            network: None,
+            sandbox_policy_cwd: cwd.as_path(),
+            #[cfg(target_os = "macos")]
+            macos_seatbelt_profile_extensions: None,
+            codex_linux_sandbox_exe: Some(&sandbox_exe),
+            use_legacy_landlock: false,
+            windows_sandbox_level: WindowsSandboxLevel::Disabled,
+            windows_sandbox_private_desktop: false,
+        })
+        .expect("transform");
+
+    assert_eq!(
+        exec_request
+            .command
+            .contains(&"--use-bwrap-sandbox".to_string()),
+        true
+    );
+    assert_eq!(
+        exec_request
+            .command
+            .contains(&"--allow-network-for-proxy".to_string()),
+        true
+    );
+}
+
+#[test]
 fn merge_file_system_policy_with_additional_permissions_preserves_unreadable_roots() {
     let temp_dir = TempDir::new().expect("create temp dir");
     let cwd = AbsolutePathBuf::from_absolute_path(

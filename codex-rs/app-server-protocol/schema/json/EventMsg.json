@@ -4944,6 +4944,19 @@
         {
           "additionalProperties": false,
           "properties": {
+            "TranscriptUpdated": {
+              "$ref": "#/definitions/RealtimeTranscriptUpdated"
+            }
+          },
+          "required": [
+            "TranscriptUpdated"
+          ],
+          "title": "TranscriptUpdatedRealtimeEvent",
+          "type": "object"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
             "ConversationItemAdded": true
           },
           "required": [
@@ -5039,6 +5052,21 @@
         "input_transcript",
         "item_id",
         "messages"
+      ],
+      "type": "object"
+    },
+    "RealtimeTranscriptUpdated": {
+      "properties": {
+        "role": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "role",
+        "text"
       ],
       "type": "object"
     },

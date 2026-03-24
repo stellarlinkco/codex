@@ -24,172 +24,11 @@ fn build_pptx_bytes(document: &PresentationDocument, action: &str) -> Result<Vec
     patch_pptx_package(bytes, document).map_err(|error| format!("{action}: {error}"))
 }
 
-struct SlideImageAsset {
-    xml: String,
-    relationship_xml: String,
-    media_path: String,
-    media_bytes: Vec<u8>,
-    extension: String,
-}
-
 fn normalized_image_extension(format: &str) -> String {
     match format.to_ascii_lowercase().as_str() {
         "jpeg" => "jpg".to_string(),
         other => other.to_string(),
     }
-}
-
-fn image_relationship_xml(relationship_id: &str, target: &str) -> String {
-    format!(
-        r#"<Relationship Id="{relationship_id}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="{}"/>"#,
-        ppt_rs::escape_xml(target)
-    )
-}
-
-fn image_picture_xml(
-    image: &ImageElement,
-    shape_id: usize,
-    relationship_id: &str,
-    frame: Rect,
-    crop: Option<ImageCrop>,
-) -> String {
-    let blip_fill = if let Some((crop_left, crop_top, crop_right, crop_bottom)) = crop {
-        format!(
-            r#"<p:blipFill>
-<a:blip r:embed="{relationship_id}"/>
-<a:srcRect l="{}" t="{}" r="{}" b="{}"/>
-<a:stretch>
-<a:fillRect/>
-</a:stretch>
-</p:blipFill>"#,
-            (crop_left * 100_000.0).round() as u32,
-            (crop_top * 100_000.0).round() as u32,
-            (crop_right * 100_000.0).round() as u32,
-            (crop_bottom * 100_000.0).round() as u32,
-        )
-    } else {
-        format!(
-            r#"<p:blipFill>
-<a:blip r:embed="{relationship_id}"/>
-<a:stretch>
-<a:fillRect/>
-</a:stretch>
-</p:blipFill>"#
-        )
-    };
-    let descr = image
-        .alt_text
-        .as_deref()
-        .map(|alt| format!(r#" descr="{}""#, ppt_rs::escape_xml(alt)))
-        .unwrap_or_default();
-    let no_change_aspect = if image.lock_aspect_ratio { 1 } else { 0 };
-    let rotation = image
-        .rotation_degrees
-        .map(|rotation| format!(r#" rot="{}""#, i64::from(rotation) * 60_000))
-        .unwrap_or_default();
-    let flip_horizontal = if image.flip_horizontal {
-        r#" flipH="1""#
-    } else {
-        ""
-    };
-    let flip_vertical = if image.flip_vertical {
-        r#" flipV="1""#
-    } else {
-        ""
-    };
-    format!(
-        r#"<p:pic>
-<p:nvPicPr>
-<p:cNvPr id="{shape_id}" name="Picture {shape_id}"{descr}/>
-<p:cNvPicPr>
-<a:picLocks noChangeAspect="{no_change_aspect}"/>
-</p:cNvPicPr>
-<p:nvPr/>
-</p:nvPicPr>
-{blip_fill}
-<p:spPr>
-<a:xfrm{rotation}{flip_horizontal}{flip_vertical}>
-<a:off x="{}" y="{}"/>
-<a:ext cx="{}" cy="{}"/>
-</a:xfrm>
-<a:prstGeom prst="rect">
-<a:avLst/>
-</a:prstGeom>
-</p:spPr>
-</p:pic>"#,
-        points_to_emu(frame.left),
-        points_to_emu(frame.top),
-        points_to_emu(frame.width),
-        points_to_emu(frame.height),
-    )
-}
-
-fn slide_image_assets(
-    slide: &PresentationSlide,
-    next_media_index: &mut usize,
-) -> Vec<SlideImageAsset> {
-    let mut ordered = slide.elements.iter().collect::<Vec<_>>();
-    ordered.sort_by_key(|element| element.z_order());
-    let shape_count = ordered
-        .iter()
-        .filter(|element| {
-            matches!(
-                element,
-                PresentationElement::Text(_)
-                    | PresentationElement::Shape(_)
-                    | PresentationElement::Image(ImageElement { payload: None, .. })
-            )
-        })
-        .count()
-        + usize::from(slide.background_fill.is_some());
-    let mut image_index = 0_usize;
-    let mut assets = Vec::new();
-    for element in ordered {
-        let PresentationElement::Image(image) = element else {
-            continue;
-        };
-        let Some(payload) = &image.payload else {
-            continue;
-        };
-        let (left, top, width, height, fitted_crop) = if image.fit_mode != ImageFitMode::Stretch {
-            fit_image(image)
-        } else {
-            (
-                image.frame.left,
-                image.frame.top,
-                image.frame.width,
-                image.frame.height,
-                None,
-            )
-        };
-        image_index += 1;
-        let relationship_id = format!("rIdImage{image_index}");
-        let extension = normalized_image_extension(&payload.format);
-        let media_name = format!("image{next_media_index}.{extension}");
-        *next_media_index += 1;
-        assets.push(SlideImageAsset {
-            xml: image_picture_xml(
-                image,
-                20 + shape_count + image_index - 1,
-                &relationship_id,
-                Rect {
-                    left,
-                    top,
-                    width,
-                    height,
-                },
-                image.crop.or(fitted_crop),
-            ),
-            relationship_xml: image_relationship_xml(
-                &relationship_id,
-                &format!("../media/{media_name}"),
-            ),
-            media_path: format!("ppt/media/{media_name}"),
-            media_bytes: payload.bytes.clone(),
-            extension,
-        });
-    }
-    assets
 }
 
 fn patch_pptx_package(
@@ -199,28 +38,23 @@ fn patch_pptx_package(
     let mut archive =
         ZipArchive::new(Cursor::new(source_bytes)).map_err(|error| error.to_string())?;
     let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
-    let mut next_media_index = 1_usize;
     let mut pending_slide_relationships = HashMap::new();
-    let mut pending_slide_images = HashMap::new();
-    let mut pending_media = Vec::new();
     let mut image_extensions = BTreeSet::new();
     for (slide_index, slide) in document.slides.iter().enumerate() {
         let slide_number = slide_index + 1;
-        let images = slide_image_assets(slide, &mut next_media_index);
-        let mut relationships = slide_hyperlink_relationships(slide);
-        relationships.extend(images.iter().map(|image| image.relationship_xml.clone()));
+        let relationships = slide_hyperlink_relationships(slide);
         if !relationships.is_empty() {
             pending_slide_relationships.insert(slide_number, relationships);
         }
-        if !images.is_empty() {
-            image_extensions.extend(images.iter().map(|image| image.extension.clone()));
-            pending_media.extend(
-                images
-                    .iter()
-                    .map(|image| (image.media_path.clone(), image.media_bytes.clone())),
-            );
-            pending_slide_images.insert(slide_number, images);
-        }
+        image_extensions.extend(slide.elements.iter().filter_map(|element| {
+            let PresentationElement::Image(image) = element else {
+                return None;
+            };
+            image
+                .payload
+                .as_ref()
+                .map(|payload| normalized_image_extension(&payload.format))
+        }));
     }
 
     for index in 0..archive.len() {
@@ -256,15 +90,7 @@ fn patch_pptx_package(
         if let Some(slide_number) = parse_slide_xml_path(&name) {
             writer
                 .write_all(
-                    update_slide_xml(
-                        bytes,
-                        &document.slides[slide_number - 1],
-                        pending_slide_images
-                            .get(&slide_number)
-                            .map(std::vec::Vec::as_slice)
-                            .unwrap_or(&[]),
-                    )?
-                    .as_bytes(),
+                    update_slide_xml(bytes, &document.slides[slide_number - 1])?.as_bytes(),
                 )
                 .map_err(|error| error.to_string())?;
             continue;
@@ -291,15 +117,6 @@ fn patch_pptx_package(
             .map_err(|error| error.to_string())?;
         writer
             .write_all(slide_relationships_xml(&relationships).as_bytes())
-            .map_err(|error| error.to_string())?;
-    }
-
-    for (path, bytes) in pending_media {
-        writer
-            .start_file(path, SimpleFileOptions::default())
-            .map_err(|error| error.to_string())?;
-        writer
-            .write_all(&bytes)
             .map_err(|error| error.to_string())?;
     }
 
@@ -443,13 +260,9 @@ fn update_content_types_xml(
         .ok_or_else(|| "content types xml is missing a closing `</Types>`".to_string())
 }
 
-fn update_slide_xml(
-    existing_bytes: Vec<u8>,
-    slide: &PresentationSlide,
-    slide_images: &[SlideImageAsset],
-) -> Result<String, String> {
+fn update_slide_xml(existing_bytes: Vec<u8>, slide: &PresentationSlide) -> Result<String, String> {
     let existing = String::from_utf8(existing_bytes).map_err(|error| error.to_string())?;
-    let existing = replace_image_placeholders(existing, slide_images)?;
+    let existing = apply_image_block_patches(existing, slide)?;
     let existing = apply_shape_block_patches(existing, slide)?;
     let table_xml = slide_table_xml(slide);
     if table_xml.is_empty() {
@@ -461,36 +274,114 @@ fn update_slide_xml(
         .ok_or_else(|| "slide xml is missing a closing `</p:spTree>`".to_string())
 }
 
-fn replace_image_placeholders(
-    existing: String,
-    slide_images: &[SlideImageAsset],
-) -> Result<String, String> {
-    if slide_images.is_empty() {
+fn apply_image_block_patches(existing: String, slide: &PresentationSlide) -> Result<String, String> {
+    let mut ordered = slide.elements.iter().collect::<Vec<_>>();
+    ordered.sort_by_key(|element| element.z_order());
+    let images = ordered
+        .into_iter()
+        .filter_map(|element| match element {
+            PresentationElement::Image(image) if image.payload.is_some() => Some(image),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if images.is_empty() {
         return Ok(existing);
     }
+
     let mut updated = String::with_capacity(existing.len());
     let mut remaining = existing.as_str();
-    for image in slide_images {
-        let marker = remaining
-            .find("name=\"Image Placeholder: ")
-            .ok_or_else(|| {
-                "slide xml is missing an image placeholder block for exported images".to_string()
-            })?;
-        let start = remaining[..marker].rfind("<p:sp>").ok_or_else(|| {
-            "slide xml is missing an opening `<p:sp>` for image placeholder".to_string()
+    for image in images {
+        let start = remaining.find("<p:pic>").ok_or_else(|| {
+            "slide xml is missing an expected `<p:pic>` block for exported images".to_string()
         })?;
-        let end = remaining[marker..]
-            .find("</p:sp>")
-            .map(|offset| marker + offset + "</p:sp>".len())
-            .ok_or_else(|| {
-                "slide xml is missing a closing `</p:sp>` for image placeholder".to_string()
-            })?;
+        let end = remaining[start..]
+            .find("</p:pic>")
+            .map(|offset| start + offset + "</p:pic>".len())
+            .ok_or_else(|| "slide xml is missing a closing `</p:pic>` block".to_string())?;
         updated.push_str(&remaining[..start]);
-        updated.push_str(&image.xml);
+        updated.push_str(&patch_picture_block(&remaining[start..end], image)?);
         remaining = &remaining[end..];
     }
     updated.push_str(remaining);
     Ok(updated)
+}
+
+fn patch_picture_block(block: &str, image: &ImageElement) -> Result<String, String> {
+    let block = replace_tag_once(block, "<p:cNvPr ", "/>", |tag| {
+        image.alt_text.as_deref().map_or_else(
+            || tag.to_string(),
+            |alt| upsert_tag_attr(tag, "descr", &ppt_rs::escape_xml(alt)),
+        )
+    })?;
+    let block = replace_tag_once(&block, "<a:picLocks", "/>", |tag| {
+        upsert_tag_attr(
+            tag,
+            "noChangeAspect",
+            if image.lock_aspect_ratio { "1" } else { "0" },
+        )
+    })?;
+    replace_tag_once(&block, "<a:xfrm", ">", |tag| {
+        let mut tag = tag.to_string();
+        if let Some(rotation) = image.rotation_degrees {
+            tag = upsert_tag_attr(&tag, "rot", &format!("{}", i64::from(rotation) * 60_000));
+        }
+        if image.flip_horizontal {
+            tag = upsert_tag_attr(&tag, "flipH", "1");
+        }
+        if image.flip_vertical {
+            tag = upsert_tag_attr(&tag, "flipV", "1");
+        }
+        tag
+    })
+}
+
+fn replace_tag_once<F>(
+    xml: &str,
+    start_token: &str,
+    end_token: &str,
+    mutator: F,
+) -> Result<String, String>
+where
+    F: FnOnce(&str) -> String,
+{
+    let start = xml
+        .find(start_token)
+        .ok_or_else(|| format!("xml is missing tag starting with `{start_token}`"))?;
+    let end = xml[start..]
+        .find(end_token)
+        .map(|offset| start + offset + end_token.len())
+        .ok_or_else(|| format!("xml tag starting with `{start_token}` is missing `{end_token}`"))?;
+    Ok(format!(
+        "{}{}{}",
+        &xml[..start],
+        mutator(&xml[start..end]),
+        &xml[end..]
+    ))
+}
+
+fn upsert_tag_attr(tag: &str, attr: &str, value: &str) -> String {
+    let needle = format!(r#" {attr}=""#);
+    if let Some(start) = tag.find(&needle) {
+        let value_start = start + needle.len();
+        if let Some(rel_end) = tag[value_start..].find('"') {
+            let value_end = value_start + rel_end;
+            return format!("{}{}{}", &tag[..value_start], value, &tag[value_end..]);
+        }
+    }
+
+    let insert_at = if tag.ends_with("/>") {
+        tag.len() - 2
+    } else if tag.ends_with('>') {
+        tag.len() - 1
+    } else {
+        tag.len()
+    };
+    format!(
+        "{} {attr}=\"{}\"{}",
+        &tag[..insert_at],
+        value,
+        &tag[insert_at..]
+    )
 }
 
 #[derive(Clone, Copy)]

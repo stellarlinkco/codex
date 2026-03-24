@@ -248,7 +248,7 @@ fn exported_images_are_real_pictures_with_media_parts() -> Result<(), Box<dyn st
 
     assert!(slide_xml.contains("<p:pic>"));
     assert!(slide_xml.contains(r#"descr="Company logo""#));
-    assert!(slide_xml.contains(r#"r:embed="rIdImage1""#));
+    assert!(slide_xml.contains(r#"r:embed="rId2""#));
     assert!(slide_xml.contains(r#"<a:xfrm rot="900000" flipH="1">"#));
     assert!(!slide_xml.contains("Image Placeholder:"));
     assert!(rels_xml.contains("relationships/image"));

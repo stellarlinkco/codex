@@ -807,7 +807,7 @@ mod tests {
             );
             assert_eq!(
                 first_json["session"]["audio"]["output"]["voice"],
-                Value::String("mundo".to_string())
+                Value::String("fathom".to_string())
             );
 
             ws.send(Message::Text(
@@ -852,7 +852,10 @@ mod tests {
             let fourth_json: Value = serde_json::from_str(&fourth).expect("json");
             assert_eq!(fourth_json["type"], "conversation.handoff.append");
             assert_eq!(fourth_json["handoff_id"], "handoff_1");
-            assert_eq!(fourth_json["output_text"], "hello from codex");
+            assert_eq!(
+                fourth_json["output_text"],
+                "\"Agent Final Message\":\n\nhello from codex"
+            );
 
             ws.send(Message::Text(
                 json!({

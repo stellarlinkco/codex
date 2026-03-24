@@ -129,6 +129,7 @@ async fn run_linux_sandbox_direct(
     };
 
     let mut args = vec![
+        "--use-bwrap-sandbox".to_string(),
         "--sandbox-policy-cwd".to_string(),
         cwd.to_string_lossy().to_string(),
         "--sandbox-policy".to_string(),

@@ -676,6 +676,7 @@ impl SandboxManager {
             SandboxType::LinuxSeccomp => {
                 let exe = codex_linux_sandbox_exe
                     .ok_or(SandboxTransformError::MissingLinuxSandboxExecutable)?;
+                let use_bwrap_sandbox = !use_legacy_landlock;
                 let allow_proxy_network = allow_network_for_proxy(enforce_managed_network);
                 let mut args = create_linux_sandbox_command_args_for_policies(
                     command.clone(),
@@ -683,8 +684,8 @@ impl SandboxManager {
                     &effective_file_system_policy,
                     effective_network_policy,
                     spec.cwd.as_path(),
+                    use_bwrap_sandbox,
                     allow_proxy_network,
-                    use_legacy_landlock,
                 );
                 let mut full_command = Vec::with_capacity(1 + args.len());
                 full_command.push(exe.to_string_lossy().to_string());
