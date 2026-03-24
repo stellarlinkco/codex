@@ -73,7 +73,7 @@ index 95cacb048..e20591475 100644
          memcmp_compile_args.push(
              self.manifest_dir
                  .join("aws-lc")
-@@ -742,4 +769,80 @@ impl CcBuilder {
+@@ -742,4 +769,89 @@ impl CcBuilder {
          );
          let _ = fs::remove_file(exec_path);
      }
@@ -143,11 +143,20 @@ index 95cacb048..e20591475 100644
 +    fn bazel_execroot(path: &Path) -> Option<PathBuf> {
 +        let mut prefix = PathBuf::new();
 +        for component in path.components() {
-+            if component.as_os_str() == "bazel-out" {
++            let component = component.as_os_str();
++            if component == "bazel-out" {
++                return if prefix.as_os_str().is_empty() {
++                    std::env::current_dir().ok()
++                } else {
++                    Some(prefix)
++                };
++            }
++
++            if component == "external" {
 +                return Some(prefix);
 +            }
 +
-+            prefix.push(component.as_os_str());
++            prefix.push(component);
 +        }
 +
 +        None
