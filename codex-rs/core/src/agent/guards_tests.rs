@@ -170,7 +170,7 @@ fn release_spawned_subtree_removes_descendants_and_frees_slots() {
     guards.release_spawned_subtree(child_id);
 
     assert_eq!(guards.agent_id_for_path(&child_path), None);
-    assert_eq!(guards.agent_metadata_for_thread(grandchild_id), None);
+    assert!(guards.agent_metadata_for_thread(grandchild_id).is_none());
 
     let reservation = guards
         .reserve_spawn_slot(Some(2))
