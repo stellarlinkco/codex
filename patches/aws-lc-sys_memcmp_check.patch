@@ -166,7 +166,7 @@ index 95cacb048..e20591475 100644
 diff --git a/builder/main.rs b/builder/main.rs
 --- a/builder/main.rs
 +++ b/builder/main.rs
-@@ -479,8 +479,12 @@ fn out_dir() -> PathBuf {
+@@ -479,8 +479,30 @@ fn out_dir() -> PathBuf {
      PathBuf::from(cargo_env("OUT_DIR"))
  }
  
@@ -177,6 +177,34 @@ diff --git a/builder/main.rs b/builder/main.rs
 +    }
 +
 +    std::env::current_dir().unwrap()
++}
++
++fn bazel_execroot(path: &Path) -> Option<PathBuf> {
++    let mut prefix = PathBuf::new();
++    for component in path.components() {
++        let component = component.as_os_str();
++        if component == "bazel-out" || component == "external" {
++            return if prefix.as_os_str().is_empty() {
++                None
++            } else {
++                Some(prefix)
++            };
++        }
++
++        prefix.push(component);
++    }
++
++    None
  }
  
  fn get_builder(prefix: &Option<String>, manifest_dir: &Path, out_dir: &Path) -> Box<dyn Builder> {
+@@ -817,6 +836,10 @@ fn main() {
+     let manifest_dir = current_dir();
+     let manifest_dir = dunce::canonicalize(Path::new(&manifest_dir)).unwrap();
++    if let Some(execroot) = bazel_execroot(manifest_dir.as_path()) {
++        std::env::set_current_dir(execroot).unwrap();
++    }
++
+     let prefix_str = prefix_string();
+     let prefix = if is_no_prefix() {
+         None
