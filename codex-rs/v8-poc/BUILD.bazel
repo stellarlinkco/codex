@@ -4,9 +4,9 @@ codex_rust_crate(
     name = "v8-poc",
     crate_name = "codex_v8_poc",
     # Keep the proof-of-concept crate buildable under Bazel, but skip its
-    # unit test target from wildcard CI runs until rusty_v8's bundled libc++
-    # stops conflicting with the LLVM toolchain's libc++ at link time.
-    test_tags = ["manual"],
+    # unit test target until rusty_v8's bundled libc++ stops conflicting
+    # with the LLVM toolchain's libc++ at link time.
+    unit_tests = False,
 )
 
 alias(

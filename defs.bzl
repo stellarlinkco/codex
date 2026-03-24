@@ -102,6 +102,7 @@ def codex_rust_crate(
         deps_extra = [],
         integration_compile_data_extra = [],
         test_data_extra = [],
+        unit_tests = True,
         test_tags = [],
         extra_binaries = []):
     """Defines a Rust crate with library, binaries, and tests wired for Bazel + Cargo parity.
@@ -132,6 +133,7 @@ def codex_rust_crate(
             Typically only needed when features add additional deps.
         integration_compile_data_extra: Extra compile_data for integration tests.
         test_data_extra: Extra runtime data for tests.
+        unit_tests: Whether to expose Bazel unit test targets for the crate.
         test_tags: Tags applied to unit + integration test targets.
             Typically used to disable the sandbox, but see https://bazel.build/reference/be/common-definitions#common.tags
         extra_binaries: Additional binary labels to surface as test data and
@@ -183,32 +185,33 @@ def codex_rust_crate(
             visibility = ["//visibility:public"],
         )
 
-        unit_test_binary = name + "-unit-tests-bin"
-        rust_test(
-            name = unit_test_binary,
-            crate = name,
-            deps = all_crate_deps(normal = True, normal_dev = True) + maybe_deps + deps_extra,
-            # Bazel has emitted both `codex-rs/<crate>/...` and
-            # `../codex-rs/<crate>/...` paths for `file!()`. Strip either
-            # prefix so the workspace-root launcher sees Cargo-like metadata
-            # such as `tui/src/...`.
-            rustc_flags = rustc_flags_extra + [
-                "--remap-path-prefix=../codex-rs=",
-                "--remap-path-prefix=codex-rs=",
-            ],
-            rustc_env = rustc_env,
-            compile_data = compile_data,
-            data = test_data_extra,
-            tags = test_tags + ["manual"],
-        )
+        if unit_tests:
+            unit_test_binary = name + "-unit-tests-bin"
+            rust_test(
+                name = unit_test_binary,
+                crate = name,
+                deps = all_crate_deps(normal = True, normal_dev = True) + maybe_deps + deps_extra,
+                # Bazel has emitted both `codex-rs/<crate>/...` and
+                # `../codex-rs/<crate>/...` paths for `file!()`. Strip either
+                # prefix so the workspace-root launcher sees Cargo-like metadata
+                # such as `tui/src/...`.
+                rustc_flags = rustc_flags_extra + [
+                    "--remap-path-prefix=../codex-rs=",
+                    "--remap-path-prefix=codex-rs=",
+                ],
+                rustc_env = rustc_env,
+                compile_data = compile_data,
+                data = test_data_extra,
+                tags = test_tags + ["manual"],
+            )
 
-        workspace_root_test(
-            name = name + "-unit-tests",
-            env = test_env,
-            test_bin = ":" + unit_test_binary,
-            workspace_root_marker = "//codex-rs/utils/cargo-bin:repo_root.marker",
-            tags = test_tags,
-        )
+            workspace_root_test(
+                name = name + "-unit-tests",
+                env = test_env,
+                test_bin = ":" + unit_test_binary,
+                workspace_root_marker = "//codex-rs/utils/cargo-bin:repo_root.marker",
+                tags = test_tags,
+            )
 
         maybe_deps += [name]
 
