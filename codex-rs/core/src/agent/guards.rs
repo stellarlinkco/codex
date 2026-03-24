@@ -130,27 +130,24 @@ impl Guards {
                 .values()
                 .find(|metadata| metadata.agent_id == Some(thread_id))
                 .and_then(|metadata| metadata.agent_path.clone());
-            let removed_keys: Vec<String> = active_agents
-                .agent_tree
-                .iter()
-                .filter_map(|(key, metadata)| {
-                    let remove_for_thread = metadata.agent_id == Some(thread_id);
-                    let remove_for_path = root_path.as_ref().is_some_and(|root_path| {
-                        metadata.agent_path.as_ref().is_some_and(|agent_path| {
-                            agent_path == root_path
-                                || agent_path
-                                    .as_str()
-                                    .starts_with(format!("{root_path}/").as_str())
-                        })
-                    });
-                    (remove_for_thread || remove_for_path).then_some(key.clone())
-                })
-                .collect();
-            removed_keys
-                .into_iter()
-                .filter_map(|key| active_agents.agent_tree.remove(key.as_str()))
-                .filter(|metadata| !metadata.agent_path.as_ref().is_some_and(AgentPath::is_root))
-                .count()
+            let mut removed_counted_agents = 0usize;
+            active_agents.agent_tree.retain(|_, metadata| {
+                let remove_for_thread = metadata.agent_id == Some(thread_id);
+                let remove_for_path = root_path.as_ref().is_some_and(|root_path| {
+                    metadata.agent_path.as_ref().is_some_and(|agent_path| {
+                        agent_path == root_path
+                            || agent_path
+                                .as_str()
+                                .starts_with(format!("{root_path}/").as_str())
+                    })
+                });
+                let should_remove = remove_for_thread || remove_for_path;
+                if should_remove && !metadata.agent_path.as_ref().is_some_and(AgentPath::is_root) {
+                    removed_counted_agents += 1;
+                }
+                !should_remove
+            });
+            removed_counted_agents
         };
         if removed_counted_agents > 0 {
             self.total_count
