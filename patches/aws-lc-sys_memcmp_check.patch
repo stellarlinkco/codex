@@ -1,19 +1,26 @@
 diff --git a/builder/cc_builder.rs b/builder/cc_builder.rs
 --- a/builder/cc_builder.rs
 +++ b/builder/cc_builder.rs
-@@ -26,7 +26,7 @@
- };
- use std::cell::Cell;
- use std::collections::HashMap;
+@@ -24,2 +24,2 @@
+-    requested_c_std, set_env_for_target, target, target_arch, target_env, target_os, target_vendor,
+-    test_clang_cl_command, CStdRequested, EnvGuard, OutputLibType,
++    requested_c_std, set_env, set_env_for_target, target, target_arch, target_env, target_os,
++    target_vendor, test_clang_cl_command, CStdRequested, EnvGuard, OutputLibType,
+@@ -29 +29 @@
 -use std::path::PathBuf;
 +use std::path::{Path, PathBuf};
- 
- #[non_exhaustive]
- #[derive(PartialEq, Eq)]
-@@ -671,6 +671,16 @@
-         }
-         let mut memcmp_compile_args = Vec::from(memcmp_compiler.args());
- 
+@@ -366,0 +367,4 @@
++        if let Some(execroot) = Self::bazel_execroot(self.manifest_dir.as_path()) {
++            Self::normalize_bazel_execroot_env(execroot.as_path());
++        }
++
+@@ -629,0 +634,5 @@
++
++        if let Some(execroot) = Self::bazel_execroot(self.manifest_dir.as_path()) {
++            Self::normalize_bazel_execroot_env(execroot.as_path());
++        }
++
+@@ -683,0 +693,10 @@
 +        // Keep the probe self-contained and avoid invoking external debug tools
 +        // (for example `dsymutil`) that may be missing in hermetic sandboxes.
 +        memcmp_compile_args.retain(|arg| {
@@ -24,30 +31,17 @@ diff --git a/builder/cc_builder.rs b/builder/cc_builder.rs
 +        });
 +        memcmp_compile_args.push("-g0".into());
 +
-         // This check invokes the compiled executable and hence needs to link
-         // it. CMake handles this via LDFLAGS but `cc` doesn't. In setups with
-         // custom linker setups this could lead to a mismatch between the
-@@ -682,6 +692,15 @@
-             }
-         }
- 
+@@ -691,0 +711,9 @@
++            }
++        }
++
 +        if let Some(execroot) = Self::bazel_execroot(self.manifest_dir.as_path()) {
 +            // In Bazel build-script sandboxes, `cc` can pass `bazel-out/...` args
 +            // relative to the execroot while the process runs from elsewhere.
 +            // Normalize those args to absolute paths so this check can still link.
 +            for arg in &mut memcmp_compile_args {
 +                Self::rewrite_bazel_execroot_arg(execroot.as_path(), arg);
-+            }
-+        }
-+
-         memcmp_compile_args.push(
-             self.manifest_dir
-                 .join("aws-lc")
-@@ -731,7 +750,40 @@
-             memcmp_compile_result.stdout
-         );
-         let _ = fs::remove_file(exec_path);
-+    }
+@@ -744,0 +773,75 @@
 +
 +    fn rewrite_bazel_execroot_arg(execroot: &Path, arg: &mut std::ffi::OsString) {
 +        let Some(arg_str) = arg.to_str() else {
@@ -67,7 +61,49 @@ diff --git a/builder/cc_builder.rs b/builder/cc_builder.rs
 +                }
 +            }
 +        }
-     }
++    }
++
++    fn normalize_bazel_execroot_env(execroot: &Path) {
++        for env_var in ["CFLAGS", "CXXFLAGS", "LDFLAGS"] {
++            for env_name in Self::flag_env_names(env_var) {
++                let Ok(value) = std::env::var(&env_name) else {
++                    continue;
++                };
++
++                let rewritten = Self::rewrite_bazel_execroot_flags(execroot, &value);
++                if rewritten != value {
++                    set_env(&env_name, &rewritten);
++                }
++            }
++        }
++    }
++
++    fn rewrite_bazel_execroot_flags(execroot: &Path, flags: &str) -> String {
++        let mut rewritten = Vec::new();
++        for flag in flags.split_whitespace() {
++            let mut arg = std::ffi::OsString::from(flag);
++            Self::rewrite_bazel_execroot_arg(execroot, &mut arg);
++            rewritten.push(arg.to_string_lossy().into_owned());
++        }
++        rewritten.join(" ")
++    }
++
++    fn flag_env_names(env_var: &str) -> [String; 4] {
++        let target = target();
++        let target_with_underscores = target.replace(['-', '.'], "_");
++        let kind = if cargo_env("HOST") != target {
++            "TARGET"
++        } else {
++            "HOST"
++        };
++
++        [
++            format!("{env_var}_{target}"),
++            format!("{env_var}_{target_with_underscores}"),
++            format!("{kind}_{env_var}"),
++            env_var.to_string(),
++        ]
++    }
 +
 +    fn bazel_execroot(path: &Path) -> Option<PathBuf> {
 +        let mut prefix = PathBuf::new();
@@ -81,6 +117,3 @@ diff --git a/builder/cc_builder.rs b/builder/cc_builder.rs
 +
 +        None
 +    }
-     fn run_compiler_checks(&self, cc_build: &mut cc::Build) {
-         if self.compiler_check("stdalign_check", Vec::<&'static str>::new()) {
-             cc_build.define("AWS_LC_STDALIGN_AVAILABLE", Some("1"));
