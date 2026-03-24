@@ -40,7 +40,6 @@ use image::load_from_memory;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use std::io::Cursor;
-use std::path::Path;
 use std::path::PathBuf;
 use tokio::fs;
 use tokio::time::Duration;
@@ -76,11 +75,6 @@ fn image_messages(body: &Value) -> Vec<&Value> {
 
 fn find_image_message(body: &Value) -> Option<&Value> {
     image_messages(body).into_iter().next()
-}
-
-fn absolute_path(path: &Path) -> anyhow::Result<codex_utils_absolute_path::AbsolutePathBuf> {
-    codex_utils_absolute_path::AbsolutePathBuf::try_from(path.to_path_buf())
-        .map_err(|err| anyhow::anyhow!("invalid absolute path {}: {err}", path.display()))
 }
 
 fn png_bytes(width: u32, height: u32, rgba: [u8; 4]) -> anyhow::Result<Vec<u8>> {

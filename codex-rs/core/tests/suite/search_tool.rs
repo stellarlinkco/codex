@@ -94,14 +94,8 @@ fn configure_apps(config: &mut Config, apps_base_url: &str) {
     config.chatgpt_base_url = apps_base_url.to_string();
     config.model = Some("gpt-5-codex".to_string());
 
-    let mut model_catalog: ModelsResponse =
-        serde_json::from_str(include_str!("../../models.json")).expect("valid models.json");
-    let model = model_catalog
-        .models
-        .iter_mut()
-        .find(|model| model.slug == "gpt-5-codex")
-        .expect("gpt-5-codex exists in bundled models.json");
-    config.model_catalog = Some(model_catalog);
+    config.model_catalog =
+        Some(serde_json::from_str(include_str!("../../models.json")).expect("valid models.json"));
 }
 
 fn configured_builder(apps_base_url: String) -> TestCodexBuilder {

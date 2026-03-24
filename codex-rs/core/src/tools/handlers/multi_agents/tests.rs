@@ -3141,10 +3141,7 @@ async fn spawn_team_accepts_background_field() {
     let FunctionToolOutput {
         success: close_success,
         ..
-    } = close_output
-    else {
-        panic!("expected function output");
-    };
+    } = close_output;
     assert_eq!(close_success, Some(true));
 }
 
@@ -3514,10 +3511,7 @@ async fn close_team_partial_close_removes_only_selected_member_worktree() {
     let FunctionToolOutput {
         success: final_close_success,
         ..
-    } = final_close_output
-    else {
-        panic!("expected function output");
-    };
+    } = final_close_output;
     assert_eq!(final_close_success, Some(true));
     assert_eq!(
         list_worktree_paths(codex_home.as_path(), lead_thread_id).is_empty(),

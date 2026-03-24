@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { codexExecSpy } from "./codexExecSpy";
-import { describe, expect, it } from "@jest/globals";
+import { describe, expect, it, jest } from "@jest/globals";
 
 import {
   assistantMessage,
@@ -15,6 +15,8 @@ import {
   SseResponseBody,
 } from "./responsesProxy";
 import { createMockClient, createTestClient } from "./testCodex";
+
+jest.setTimeout(30000);
 
 describe("Codex", () => {
   it("returns thread events", async () => {

@@ -56,8 +56,7 @@ fn windows_shell_safety_description() -> String {
 
 fn search_capable_model_info() -> ModelInfo {
     let config = test_config();
-    let model_info = ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
-    model_info
+    ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config)
 }
 
 #[test]

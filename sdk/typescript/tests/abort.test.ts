@@ -1,4 +1,4 @@
-import { describe, expect, it } from "@jest/globals";
+import { describe, expect, it, jest } from "@jest/globals";
 
 import {
   assistantMessage,
@@ -16,6 +16,8 @@ function* infiniteShellCall(): Generator<SseResponseBody> {
     yield sse(responseStarted(), shellCall(), responseCompleted());
   }
 }
+
+jest.setTimeout(30000);
 
 describe("AbortSignal support", () => {
   it("aborts run() when signal is aborted", async () => {

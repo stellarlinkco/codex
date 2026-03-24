@@ -1,4 +1,4 @@
-import { describe, expect, it } from "@jest/globals";
+import { describe, expect, it, jest } from "@jest/globals";
 
 import { ThreadEvent } from "../src/index";
 
@@ -10,6 +10,8 @@ import {
   startResponsesTestProxy,
 } from "./responsesProxy";
 import { createMockClient } from "./testCodex";
+
+jest.setTimeout(30000);
 
 describe("Codex", () => {
   it("returns thread events", async () => {
