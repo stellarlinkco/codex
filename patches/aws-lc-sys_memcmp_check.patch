@@ -253,3 +253,36 @@ diff --git a/builder/main.rs b/builder/main.rs
      let prefix_str = prefix_string();
      let prefix = if is_no_prefix() {
          None
+@@ -944,20 +967,28 @@ fn setup_include_paths(out_dir: &Path, manifest_dir: &Path) -> PathBuf {
+     // iterate over all the include paths and copy them into the final output
+     for path in include_paths {
+         for child in std::fs::read_dir(path).into_iter().flatten().flatten() {
+-            if child.file_type().map_or(false, |t| t.is_file()) {
++            let child_path = child.path();
++            if child_path.is_file() {
+                 std::fs::copy(
+-                    child.path(),
+-                    include_dir.join(child.path().file_name().unwrap()),
++                    &child_path,
++                    include_dir.join(child_path.file_name().unwrap()),
+                 )
+                 .expect("Failed to copy include file during build setup");
+                 continue;
+             }
++            if !child_path.is_dir() {
++                emit_warning(format!(
++                    "Skipping non-directory include path entry: {}",
++                    child_path.display()
++                ));
++                continue;
++            }
+ 
+             // prefer the earliest paths
+             let options = fs_extra::dir::CopyOptions::new()
+                 .skip_exist(true)
+                 .copy_inside(true);
+-            fs_extra::dir::copy(child.path(), &include_dir, &options)
++            fs_extra::dir::copy(&child_path, &include_dir, &options)
+                 .expect("Failed to copy include directory during build setup");
+         }
+     }
