@@ -73,7 +73,7 @@ index 95cacb048..e20591475 100644
          memcmp_compile_args.push(
              self.manifest_dir
                  .join("aws-lc")
-@@ -742,6 +769,82 @@ impl CcBuilder {
+@@ -742,4 +769,80 @@ impl CcBuilder {
          );
          let _ = fs::remove_file(exec_path);
      }
