@@ -1,24 +1,49 @@
 diff --git a/builder/cc_builder.rs b/builder/cc_builder.rs
+index 95cacb048..e20591475 100644
 --- a/builder/cc_builder.rs
 +++ b/builder/cc_builder.rs
-@@ -24,2 +24,2 @@
+@@ -21,12 +21,12 @@ use crate::nasm_builder::NasmBuilder;
+ use crate::{
+     cargo_env, disable_jitter_entropy, emit_warning, env_name_for_target, env_var_to_bool,
+     execute_command, get_crate_cc, get_crate_cflags, get_crate_cxx, is_no_asm, out_dir,
 -    requested_c_std, set_env_for_target, target, target_arch, target_env, target_os, target_vendor,
 -    test_clang_cl_command, CStdRequested, EnvGuard, OutputLibType,
 +    requested_c_std, set_env, set_env_for_target, target, target_arch, target_env, target_os,
 +    target_vendor, test_clang_cl_command, CStdRequested, EnvGuard, OutputLibType,
-@@ -29 +29 @@
+ };
+ use std::cell::Cell;
+ use std::collections::HashMap;
 -use std::path::PathBuf;
 +use std::path::{Path, PathBuf};
-@@ -365,0 +366,3 @@
+ 
+ #[non_exhaustive]
+ #[derive(PartialEq, Eq)]
+@@ -363,6 +363,10 @@ impl CcBuilder {
+         if let Some(cflags) = get_crate_cflags() {
+             set_env_for_target("CFLAGS", cflags);
+         }
 +        if let Some(execroot) = Self::bazel_execroot(self.manifest_dir.as_path()) {
 +            Self::normalize_bazel_execroot_env(execroot.as_path());
 +        }
-@@ -628,0 +632,3 @@
-+        }
-+        if let Some(execroot) = Self::bazel_execroot(self.manifest_dir.as_path()) {
-+            Self::normalize_bazel_execroot_env(execroot.as_path());
-@@ -682,0 +689,10 @@
 +
+ 
+         let mut cc_build = self.create_builder();
+         let (_, build_options) = self.collect_universal_build_options(&cc_build, false);
+@@ -627,6 +631,10 @@ impl CcBuilder {
+             emit_warning("######");
+             emit_warning("######");
+         }
++
++        if let Some(execroot) = Self::bazel_execroot(self.manifest_dir.as_path()) {
++            Self::normalize_bazel_execroot_env(execroot.as_path());
++        }
+         let mut cc_build = cc::Build::default();
+         cc_build
+             .file(source_file)
+@@ -680,6 +688,16 @@ impl CcBuilder {
+             return;
+         }
+         let mut memcmp_compile_args = Vec::from(memcmp_compiler.args());
 +        // Keep the probe self-contained and avoid invoking external debug tools
 +        // (for example `dsymutil`) that may be missing in hermetic sandboxes.
 +        memcmp_compile_args.retain(|arg| {
@@ -28,7 +53,14 @@ diff --git a/builder/cc_builder.rs b/builder/cc_builder.rs
 +            !arg_str.starts_with("-g")
 +        });
 +        memcmp_compile_args.push("-g0".into());
-@@ -694,0 +711,9 @@
++
+ 
+         // This check invokes the compiled executable and hence needs to link
+         // it. CMake handles this via LDFLAGS but `cc` doesn't. In setups with
+@@ -692,6 +710,15 @@ impl CcBuilder {
+             }
+         }
+ 
 +        if let Some(execroot) = Self::bazel_execroot(self.manifest_dir.as_path()) {
 +            // In Bazel build-script sandboxes, `cc` can pass `bazel-out/...` args
 +            // relative to the execroot while the process runs from elsewhere.
@@ -38,7 +70,13 @@ diff --git a/builder/cc_builder.rs b/builder/cc_builder.rs
 +            }
 +        }
 +
-@@ -744,0 +770,76 @@
+         memcmp_compile_args.push(
+             self.manifest_dir
+                 .join("aws-lc")
+@@ -742,6 +769,82 @@ impl CcBuilder {
+         );
+         let _ = fs::remove_file(exec_path);
+     }
 +
 +    fn rewrite_bazel_execroot_arg(execroot: &Path, arg: &mut std::ffi::OsString) {
 +        let Some(arg_str) = arg.to_str() else {
@@ -51,23 +89,23 @@ diff --git a/builder/cc_builder.rs b/builder/cc_builder.rs
 +        }
 +
 +        for flag_prefix in ["-B", "-L"] {
-+            if let Some(path) = arg_str.strip_prefix(flag_prefix)
-+                && path.starts_with("bazel-out/")
-+            {
-+                *arg = format!("{flag_prefix}{}", execroot.join(path).display()).into();
-+                return;
++            if let Some(path) = arg_str.strip_prefix(flag_prefix) {
++                if path.starts_with("bazel-out/") {
++                    *arg = format!("{flag_prefix}{}", execroot.join(path).display()).into();
++                    return;
++                }
 +            }
 +        }
 +    }
 +
 +    fn normalize_bazel_execroot_env(execroot: &Path) {
 +        for env_var in ["CFLAGS", "CXXFLAGS", "LDFLAGS"] {
-+            for env_name in CcBuilder::flag_env_names(env_var) {
++            for env_name in Self::flag_env_names(env_var) {
 +                let Ok(value) = std::env::var(&env_name) else {
 +                    continue;
 +                };
 +
-+                let rewritten = CcBuilder::rewrite_bazel_execroot_flags(execroot, &value);
++                let rewritten = Self::rewrite_bazel_execroot_flags(execroot, &value);
 +                if rewritten != value {
 +                    set_env(&env_name, &rewritten);
 +                }
@@ -79,7 +117,7 @@ diff --git a/builder/cc_builder.rs b/builder/cc_builder.rs
 +        let mut rewritten = Vec::new();
 +        for flag in flags.split_whitespace() {
 +            let mut arg = std::ffi::OsString::from(flag);
-+            CcBuilder::rewrite_bazel_execroot_arg(execroot, &mut arg);
++            Self::rewrite_bazel_execroot_arg(execroot, &mut arg);
 +            rewritten.push(arg.to_string_lossy().into_owned());
 +        }
 +        rewritten.join(" ")
@@ -115,3 +153,4 @@ diff --git a/builder/cc_builder.rs b/builder/cc_builder.rs
 +        None
 +    }
 +
+     fn run_compiler_checks(&self, cc_build: &mut cc::Build) {
