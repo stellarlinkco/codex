@@ -1,0 +1,37 @@
+diff --git a/build.rs b/build.rs
+--- a/build.rs
++++ b/build.rs
+@@ -577,7 +577,15 @@ fn static_checksum_path(path: &Path) -> PathBuf {
+   path
+ }
+ 
+ fn static_lib_dir() -> PathBuf {
++  let out_dir = env::var("OUT_DIR").map(PathBuf::from).unwrap();
++  if out_dir
++    .components()
++    .any(|component| component.as_os_str() == "bazel-out")
++  {
++    return out_dir;
++  }
++
+   build_dir().join("gn_out").join("obj")
+ }
+ 
+@@ -854,15 +862,16 @@ fn print_prebuilt_src_binding_path() {
+   let name = format!("src_binding{features}_{profile}_{target}.rs");
+ 
+   let src_binding_path = get_dirs().root.join("gen").join(name.clone());
++  let rustc_env_path = Path::new("..").join("gen").join(&name);
+ 
+   if let Ok(base) = env::var("RUSTY_V8_MIRROR") {
+     let version = env::var("CARGO_PKG_VERSION").unwrap();
+     let url = format!("{base}/v{version}/{name}");
+     download_file(&url, &src_binding_path);
+   }
+ 
+   println!(
+     "cargo:rustc-env=RUSTY_V8_SRC_BINDING_PATH={}",
+-    src_binding_path.display()
++    rustc_env_path.display()
+   );
+ }

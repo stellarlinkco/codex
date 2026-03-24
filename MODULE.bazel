@@ -80,6 +80,13 @@ crate.annotation(
         "//patches:aws-lc-sys_memcmp_check.patch",
     ],
 )
+crate.annotation(
+    crate = "v8",
+    patch_args = ["-p1"],
+    patches = [
+        "//patches:v8_prebuilt_binding_path.patch",
+    ],
+)
 
 inject_repo(crate, "zstd")
 
