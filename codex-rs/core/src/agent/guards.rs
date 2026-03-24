@@ -195,6 +195,7 @@ impl Guards {
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .agent_tree
             .values()
+            .filter(|metadata| !metadata.agent_path.as_ref().is_some_and(AgentPath::is_root))
             .filter_map(|metadata| metadata.agent_id)
             .collect()
     }
