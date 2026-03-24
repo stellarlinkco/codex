@@ -2509,257 +2509,259 @@ async fn spawn_is_rejected_for_agent_team_teammates() {
     remove_team_record(lead_thread_id, "team-1").expect("cleanup should succeed");
 }
 
-#[tokio::test]
-async fn spawn_team_wait_team_and_close_team_flow() {
-    let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
+#[test]
+fn spawn_team_wait_team_and_close_team_flow() {
+    run_with_large_stack(async {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
 
-    let spawn_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "spawn_team",
-        function_payload(json!({
-            "members": [
-                {"name": "planner", "task": "plan the work"},
-                {"name": "worker", "task": "execute the task"}
-            ]
-        })),
-    );
-    let spawn_output = MultiAgentHandler
-        .handle(spawn_invocation)
-        .await
-        .expect("spawn_team should succeed");
-    let FunctionToolOutput {
-        body: FunctionCallOutputBody::Text(spawn_content),
-        success: spawn_success,
-        ..
-    } = spawn_output
-    else {
-        panic!("expected function output");
-    };
-    let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-    let _team_id = spawn_result.team_id.clone();
-    assert_eq!(spawn_success, Some(true));
-    assert_eq!(spawn_result.members.len(), 2);
-    assert_eq!(
-        spawn_result
-            .members
-            .iter()
-            .map(|member| member.name.clone())
-            .collect::<Vec<_>>(),
-        vec!["planner".to_string(), "worker".to_string()]
-    );
-    for member in &spawn_result.members {
-        assert_eq!(member.status, AgentStatus::PendingInit);
-    }
-    let persisted_config_path =
-        team_config_path(turn.config.codex_home.as_path(), &spawn_result.team_id);
-    let persisted_config_raw = tokio::fs::read_to_string(&persisted_config_path)
-        .await
-        .expect("team config should be persisted");
-    let persisted_config: PersistedTeamConfig =
-        serde_json::from_str(&persisted_config_raw).expect("team config should be valid json");
-    assert_eq!(persisted_config.team_name, spawn_result.team_id);
-    assert_eq!(
-        persisted_config.lead_thread_id,
-        session.conversation_id.to_string()
-    );
-    assert_eq!(persisted_config.members.len(), 2);
-
-    let persisted_tasks_dir =
-        team_tasks_dir(turn.config.codex_home.as_path(), &spawn_result.team_id);
-    let mut persisted_tasks = Vec::new();
-    let mut tasks_dir = tokio::fs::read_dir(&persisted_tasks_dir)
-        .await
-        .expect("team tasks dir should exist");
-    while let Some(entry) = tasks_dir
-        .next_entry()
-        .await
-        .expect("tasks dir read should succeed")
-    {
-        let metadata = entry
-            .metadata()
-            .await
-            .expect("task metadata read should succeed");
-        if !metadata.is_file() {
-            continue;
-        }
-        let task_raw = tokio::fs::read_to_string(entry.path())
-            .await
-            .expect("task file should be readable");
-        let task: PersistedTeamTask =
-            serde_json::from_str(&task_raw).expect("task file should be json");
-        persisted_tasks.push(task);
-    }
-    assert_eq!(persisted_tasks.len(), 2);
-    let mut task_titles = persisted_tasks
-        .iter()
-        .map(|task| task.title.clone())
-        .collect::<Vec<_>>();
-    task_titles.sort();
-    assert_eq!(
-        task_titles,
-        vec!["execute the task".to_string(), "plan the work".to_string()]
-    );
-    for task in persisted_tasks {
-        assert_eq!(task.state, PersistedTaskState::Pending);
-        assert_eq!(task.depends_on.is_empty(), true);
-    }
-
-    for member in &spawn_result.members {
-        let agent_id = agent_id(&member.agent_id).expect("valid agent id");
-        let _ = manager
-            .agent_control()
-            .shutdown_agent(agent_id)
-            .await
-            .expect("shutdown spawned team member");
-    }
-
-    let wait_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "wait_team",
-        function_payload(json!({
-            "team_id": spawn_result.team_id,
-            "mode": "all",
-            "timeout_ms": 1_000
-        })),
-    );
-    let wait_output = MultiAgentHandler
-        .handle(wait_invocation)
-        .await
-        .expect("wait_team should succeed");
-    let FunctionToolOutput {
-        body: FunctionCallOutputBody::Text(wait_content),
-        success: wait_success,
-        ..
-    } = wait_output
-    else {
-        panic!("expected function output");
-    };
-    let wait_result: WaitTeamResult =
-        serde_json::from_str(&wait_content).expect("wait_team result should be json");
-    assert_eq!(wait_success, Some(true));
-    assert_eq!(wait_result.completed, true);
-    assert!(matches!(wait_result.mode, WaitTeamMode::All));
-    assert!(wait_result.triggered_member.is_none());
-    assert_eq!(wait_result.member_statuses.len(), 2);
-    for status in &wait_result.member_statuses {
-        assert!(matches!(
-            status.state,
-            AgentStatus::NotFound | AgentStatus::Shutdown
-        ));
-    }
-
-    let close_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "close_team",
-        function_payload(json!({
-            "team_id": spawn_result.team_id
-        })),
-    );
-    let close_output = MultiAgentHandler
-        .handle(close_invocation)
-        .await
-        .expect("close_team should succeed");
-    let FunctionToolOutput {
-        body: FunctionCallOutputBody::Text(close_content),
-        success: close_success,
-        ..
-    } = close_output
-    else {
-        panic!("expected function output");
-    };
-    let close_result: CloseTeamResult =
-        serde_json::from_str(&close_content).expect("close_team result should be json");
-    assert_eq!(close_success, Some(true));
-    assert_eq!(close_result.closed.len(), 2);
-    assert_eq!(
-        close_result
-            .closed
-            .iter()
-            .map(|member| member.name.clone())
-            .collect::<Vec<_>>(),
-        vec!["planner".to_string(), "worker".to_string()]
-    );
-    for member in &close_result.closed {
-        assert_eq!(member.ok, true);
-        assert_eq!(member.error, None);
-        assert!(!member.agent_id.is_empty());
-        assert!(matches!(
-            member.status,
-            AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::NotFound
-        ));
-    }
-
-    let wait_missing_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "wait_team",
-        function_payload(json!({
-            "team_id": close_result.team_id
-        })),
-    );
-    let Err(err) = MultiAgentHandler.handle(wait_missing_invocation).await else {
-        panic!("wait_team should fail after close_team removed the team");
-    };
-    assert_eq!(
-        err,
-        FunctionCallError::RespondToModel(format!("team `{}` not found", close_result.team_id))
-    );
-    assert_eq!(
-        tokio::fs::metadata(team_dir(
-            turn.config.codex_home.as_path(),
-            &close_result.team_id
-        ))
-        .await
-        .is_ok(),
-        true
-    );
-    assert_eq!(
-        tokio::fs::metadata(team_tasks_dir(
-            turn.config.codex_home.as_path(),
-            &close_result.team_id,
-        ))
-        .await
-        .is_ok(),
-        true
-    );
-
-    MultiAgentHandler
-        .handle(invocation(
-            session,
+        let spawn_invocation = invocation(
+            session.clone(),
             turn.clone(),
-            "team_cleanup",
+            "spawn_team",
+            function_payload(json!({
+                "members": [
+                    {"name": "planner", "task": "plan the work"},
+                    {"name": "worker", "task": "execute the task"}
+                ]
+            })),
+        );
+        let spawn_output = MultiAgentHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("spawn_team should succeed");
+        let FunctionToolOutput {
+            body: FunctionCallOutputBody::Text(spawn_content),
+            success: spawn_success,
+            ..
+        } = spawn_output
+        else {
+            panic!("expected function output");
+        };
+        let spawn_result: SpawnTeamResult =
+            serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
+        let _team_id = spawn_result.team_id.clone();
+        assert_eq!(spawn_success, Some(true));
+        assert_eq!(spawn_result.members.len(), 2);
+        assert_eq!(
+            spawn_result
+                .members
+                .iter()
+                .map(|member| member.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["planner".to_string(), "worker".to_string()]
+        );
+        for member in &spawn_result.members {
+            assert_eq!(member.status, AgentStatus::PendingInit);
+        }
+        let persisted_config_path =
+            team_config_path(turn.config.codex_home.as_path(), &spawn_result.team_id);
+        let persisted_config_raw = tokio::fs::read_to_string(&persisted_config_path)
+            .await
+            .expect("team config should be persisted");
+        let persisted_config: PersistedTeamConfig =
+            serde_json::from_str(&persisted_config_raw).expect("team config should be valid json");
+        assert_eq!(persisted_config.team_name, spawn_result.team_id);
+        assert_eq!(
+            persisted_config.lead_thread_id,
+            session.conversation_id.to_string()
+        );
+        assert_eq!(persisted_config.members.len(), 2);
+
+        let persisted_tasks_dir =
+            team_tasks_dir(turn.config.codex_home.as_path(), &spawn_result.team_id);
+        let mut persisted_tasks = Vec::new();
+        let mut tasks_dir = tokio::fs::read_dir(&persisted_tasks_dir)
+            .await
+            .expect("team tasks dir should exist");
+        while let Some(entry) = tasks_dir
+            .next_entry()
+            .await
+            .expect("tasks dir read should succeed")
+        {
+            let metadata = entry
+                .metadata()
+                .await
+                .expect("task metadata read should succeed");
+            if !metadata.is_file() {
+                continue;
+            }
+            let task_raw = tokio::fs::read_to_string(entry.path())
+                .await
+                .expect("task file should be readable");
+            let task: PersistedTeamTask =
+                serde_json::from_str(&task_raw).expect("task file should be json");
+            persisted_tasks.push(task);
+        }
+        assert_eq!(persisted_tasks.len(), 2);
+        let mut task_titles = persisted_tasks
+            .iter()
+            .map(|task| task.title.clone())
+            .collect::<Vec<_>>();
+        task_titles.sort();
+        assert_eq!(
+            task_titles,
+            vec!["execute the task".to_string(), "plan the work".to_string()]
+        );
+        for task in persisted_tasks {
+            assert_eq!(task.state, PersistedTaskState::Pending);
+            assert_eq!(task.depends_on.is_empty(), true);
+        }
+
+        for member in &spawn_result.members {
+            let agent_id = agent_id(&member.agent_id).expect("valid agent id");
+            let _ = manager
+                .agent_control()
+                .shutdown_agent(agent_id)
+                .await
+                .expect("shutdown spawned team member");
+        }
+
+        let wait_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "wait_team",
+            function_payload(json!({
+                "team_id": spawn_result.team_id,
+                "mode": "all",
+                "timeout_ms": 1_000
+            })),
+        );
+        let wait_output = MultiAgentHandler
+            .handle(wait_invocation)
+            .await
+            .expect("wait_team should succeed");
+        let FunctionToolOutput {
+            body: FunctionCallOutputBody::Text(wait_content),
+            success: wait_success,
+            ..
+        } = wait_output
+        else {
+            panic!("expected function output");
+        };
+        let wait_result: WaitTeamResult =
+            serde_json::from_str(&wait_content).expect("wait_team result should be json");
+        assert_eq!(wait_success, Some(true));
+        assert_eq!(wait_result.completed, true);
+        assert!(matches!(wait_result.mode, WaitTeamMode::All));
+        assert!(wait_result.triggered_member.is_none());
+        assert_eq!(wait_result.member_statuses.len(), 2);
+        for status in &wait_result.member_statuses {
+            assert!(matches!(
+                status.state,
+                AgentStatus::NotFound | AgentStatus::Shutdown
+            ));
+        }
+
+        let close_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({
+                "team_id": spawn_result.team_id
+            })),
+        );
+        let close_output = MultiAgentHandler
+            .handle(close_invocation)
+            .await
+            .expect("close_team should succeed");
+        let FunctionToolOutput {
+            body: FunctionCallOutputBody::Text(close_content),
+            success: close_success,
+            ..
+        } = close_output
+        else {
+            panic!("expected function output");
+        };
+        let close_result: CloseTeamResult =
+            serde_json::from_str(&close_content).expect("close_team result should be json");
+        assert_eq!(close_success, Some(true));
+        assert_eq!(close_result.closed.len(), 2);
+        assert_eq!(
+            close_result
+                .closed
+                .iter()
+                .map(|member| member.name.clone())
+                .collect::<Vec<_>>(),
+            vec!["planner".to_string(), "worker".to_string()]
+        );
+        for member in &close_result.closed {
+            assert_eq!(member.ok, true);
+            assert_eq!(member.error, None);
+            assert!(!member.agent_id.is_empty());
+            assert!(matches!(
+                member.status,
+                AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::NotFound
+            ));
+        }
+
+        let wait_missing_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "wait_team",
             function_payload(json!({
                 "team_id": close_result.team_id
             })),
-        ))
-        .await
-        .expect("team_cleanup should succeed");
-    assert_eq!(
-        tokio::fs::metadata(team_dir(
-            turn.config.codex_home.as_path(),
-            &close_result.team_id
-        ))
-        .await
-        .is_err(),
-        true
-    );
-    assert_eq!(
-        tokio::fs::metadata(team_tasks_dir(
-            turn.config.codex_home.as_path(),
-            &close_result.team_id,
-        ))
-        .await
-        .is_err(),
-        true
-    );
+        );
+        let Err(err) = MultiAgentHandler.handle(wait_missing_invocation).await else {
+            panic!("wait_team should fail after close_team removed the team");
+        };
+        assert_eq!(
+            err,
+            FunctionCallError::RespondToModel(format!("team `{}` not found", close_result.team_id))
+        );
+        assert_eq!(
+            tokio::fs::metadata(team_dir(
+                turn.config.codex_home.as_path(),
+                &close_result.team_id
+            ))
+            .await
+            .is_ok(),
+            true
+        );
+        assert_eq!(
+            tokio::fs::metadata(team_tasks_dir(
+                turn.config.codex_home.as_path(),
+                &close_result.team_id,
+            ))
+            .await
+            .is_ok(),
+            true
+        );
+
+        MultiAgentHandler
+            .handle(invocation(
+                session,
+                turn.clone(),
+                "team_cleanup",
+                function_payload(json!({
+                    "team_id": close_result.team_id
+                })),
+            ))
+            .await
+            .expect("team_cleanup should succeed");
+        assert_eq!(
+            tokio::fs::metadata(team_dir(
+                turn.config.codex_home.as_path(),
+                &close_result.team_id
+            ))
+            .await
+            .is_err(),
+            true
+        );
+        assert_eq!(
+            tokio::fs::metadata(team_tasks_dir(
+                turn.config.codex_home.as_path(),
+                &close_result.team_id,
+            ))
+            .await
+            .is_err(),
+            true
+        );
+    });
 }
 
 #[tokio::test]
@@ -3329,261 +3331,265 @@ async fn spawn_team_worktree_failure_cleans_already_spawned_members() {
     );
 }
 
-#[tokio::test]
-async fn close_team_cleans_worktree_leases_for_worktree_members() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let repo_dir = tempfile::tempdir().expect("temp dir");
-    turn.cwd = repo_dir.path().to_path_buf();
+#[test]
+fn close_team_cleans_worktree_leases_for_worktree_members() {
+    run_with_large_stack(async {
+        let (mut session, mut turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let repo_dir = tempfile::tempdir().expect("temp dir");
+        turn.cwd = repo_dir.path().to_path_buf();
 
-    init_git_repo(turn.cwd.as_path());
-    let lead_thread_id = session.conversation_id;
-    let codex_home = turn.config.codex_home.clone();
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-    let team_id = ThreadId::new().to_string();
+        init_git_repo(turn.cwd.as_path());
+        let lead_thread_id = session.conversation_id;
+        let codex_home = turn.config.codex_home.clone();
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+        let team_id = ThreadId::new().to_string();
 
-    let spawn_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "spawn_team",
-        function_payload(json!({
-            "team_id": team_id,
-            "members": [
-                {"name": "planner", "task": "plan", "worktree": true},
-                {"name": "worker", "task": "work", "worktree": true}
-            ]
-        })),
-    );
-    let spawn_output = MultiAgentHandler
-        .handle(spawn_invocation)
-        .await
-        .expect("spawn_team with worktree members should succeed");
-    let FunctionToolOutput {
-        body: FunctionCallOutputBody::Text(spawn_content),
-        success: spawn_success,
-        ..
-    } = spawn_output
-    else {
-        panic!("expected function output");
-    };
-    let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-    assert_eq!(spawn_result.members.len(), 2);
-    assert_eq!(spawn_success, Some(true));
-    let expected_worktree_root = codex_home
-        .join(WORKTREE_ROOT_DIR)
-        .join(lead_thread_id.to_string());
-    for member in &spawn_result.members {
-        let member_id = agent_id(&member.agent_id).expect("member agent id should be valid");
-        let snapshot = manager
-            .get_thread(member_id)
+        let spawn_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_team",
+            function_payload(json!({
+                "team_id": team_id,
+                "members": [
+                    {"name": "planner", "task": "plan", "worktree": true},
+                    {"name": "worker", "task": "work", "worktree": true}
+                ]
+            })),
+        );
+        let spawn_output = MultiAgentHandler
+            .handle(spawn_invocation)
             .await
-            .expect("spawned member should exist")
-            .config_snapshot()
-            .await;
-        assert_eq!(snapshot.cwd.starts_with(&expected_worktree_root), true);
-        assert_eq!(snapshot.cwd.exists(), true);
-    }
+            .expect("spawn_team with worktree members should succeed");
+        let FunctionToolOutput {
+            body: FunctionCallOutputBody::Text(spawn_content),
+            success: spawn_success,
+            ..
+        } = spawn_output
+        else {
+            panic!("expected function output");
+        };
+        let spawn_result: SpawnTeamResult =
+            serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
+        assert_eq!(spawn_result.members.len(), 2);
+        assert_eq!(spawn_success, Some(true));
+        let expected_worktree_root = codex_home
+            .join(WORKTREE_ROOT_DIR)
+            .join(lead_thread_id.to_string());
+        for member in &spawn_result.members {
+            let member_id = agent_id(&member.agent_id).expect("member agent id should be valid");
+            let snapshot = manager
+                .get_thread(member_id)
+                .await
+                .expect("spawned member should exist")
+                .config_snapshot()
+                .await;
+            assert_eq!(snapshot.cwd.starts_with(&expected_worktree_root), true);
+            assert_eq!(snapshot.cwd.exists(), true);
+        }
 
-    let worktree_paths = list_worktree_paths(codex_home.as_path(), lead_thread_id);
-    assert_eq!(worktree_paths.len(), 2);
-    for worktree_path in &worktree_paths {
-        assert_eq!(worktree_path.exists(), true);
-        assert_eq!(worktree_path.starts_with(&turn.cwd), false);
-    }
+        let worktree_paths = list_worktree_paths(codex_home.as_path(), lead_thread_id);
+        assert_eq!(worktree_paths.len(), 2);
+        for worktree_path in &worktree_paths {
+            assert_eq!(worktree_path.exists(), true);
+            assert_eq!(worktree_path.starts_with(&turn.cwd), false);
+        }
 
-    let close_invocation = invocation(
-        session,
-        turn,
-        "close_team",
-        function_payload(json!({
-            "team_id": spawn_result.team_id
-        })),
-    );
-    let close_output = MultiAgentHandler
-        .handle(close_invocation)
-        .await
-        .expect("close_team should succeed");
-    let FunctionToolOutput {
-        body: FunctionCallOutputBody::Text(close_content),
-        success: close_success,
-        ..
-    } = close_output
-    else {
-        panic!("expected function output");
-    };
-    let close_result: CloseTeamResult =
-        serde_json::from_str(&close_content).expect("close_team result should be json");
-    assert_eq!(close_result.closed.len(), 2);
-    assert_eq!(close_success, Some(true));
-    for member in &close_result.closed {
-        assert_eq!(member.ok, true);
-        assert_eq!(member.error, None);
-    }
-    for worktree_path in worktree_paths {
-        assert_eq!(std::fs::metadata(worktree_path).is_err(), true);
-    }
-    assert_eq!(
-        list_worktree_paths(codex_home.as_path(), lead_thread_id).is_empty(),
-        true
-    );
-}
-
-#[tokio::test]
-async fn close_team_partial_close_removes_only_selected_member_worktree() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let repo_dir = tempfile::tempdir().expect("temp dir");
-    turn.cwd = repo_dir.path().to_path_buf();
-
-    init_git_repo(turn.cwd.as_path());
-    let lead_thread_id = session.conversation_id;
-    let codex_home = turn.config.codex_home.clone();
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-    let team_id = ThreadId::new().to_string();
-
-    let spawn_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "spawn_team",
-        function_payload(json!({
-            "team_id": team_id,
-            "members": [
-                {"name": "planner", "task": "plan", "worktree": true},
-                {"name": "worker", "task": "work", "worktree": true}
-            ]
-        })),
-    );
-    let spawn_output = MultiAgentHandler
-        .handle(spawn_invocation)
-        .await
-        .expect("spawn_team with worktree members should succeed");
-    let FunctionToolOutput {
-        body: FunctionCallOutputBody::Text(spawn_content),
-        success: spawn_success,
-        ..
-    } = spawn_output
-    else {
-        panic!("expected function output");
-    };
-    let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-    assert_eq!(spawn_result.members.len(), 2);
-    assert_eq!(spawn_success, Some(true));
-    assert_eq!(
-        list_worktree_paths(codex_home.as_path(), lead_thread_id).len(),
-        2
-    );
-
-    let partial_close_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "close_team",
-        function_payload(json!({
-            "team_id": spawn_result.team_id,
-            "members": ["planner"]
-        })),
-    );
-    let partial_close_output = MultiAgentHandler
-        .handle(partial_close_invocation)
-        .await
-        .expect("close_team should close selected member");
-    let FunctionToolOutput {
-        body: FunctionCallOutputBody::Text(partial_close_content),
-        success: partial_close_success,
-        ..
-    } = partial_close_output
-    else {
-        panic!("expected function output");
-    };
-    let partial_close_result: CloseTeamResult =
-        serde_json::from_str(&partial_close_content).expect("close_team result should be json");
-    assert_eq!(partial_close_success, Some(true));
-    assert_eq!(partial_close_result.closed.len(), 1);
-    assert_eq!(partial_close_result.closed[0].name, "planner".to_string());
-    assert_eq!(partial_close_result.closed[0].ok, true);
-    assert_eq!(partial_close_result.closed[0].error, None);
-    assert_eq!(
-        list_worktree_paths(codex_home.as_path(), lead_thread_id).len(),
-        1
-    );
-
-    let persisted_config_path = team_config_path(codex_home.as_path(), &spawn_result.team_id);
-    let persisted_config_raw = tokio::fs::read_to_string(&persisted_config_path)
-        .await
-        .expect("team config should remain after partial close");
-    let persisted_config: PersistedTeamConfig =
-        serde_json::from_str(&persisted_config_raw).expect("team config should be valid json");
-    assert_eq!(persisted_config.members.len(), 1);
-    assert_eq!(persisted_config.members[0].name, "worker".to_string());
-
-    let final_close_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "close_team",
-        function_payload(json!({
-            "team_id": spawn_result.team_id
-        })),
-    );
-    let final_close_output = MultiAgentHandler
-        .handle(final_close_invocation)
-        .await
-        .expect("close remaining team member");
-    let FunctionToolOutput {
-        success: final_close_success,
-        ..
-    } = final_close_output;
-    assert_eq!(final_close_success, Some(true));
-    assert_eq!(
-        list_worktree_paths(codex_home.as_path(), lead_thread_id).is_empty(),
-        true
-    );
-    assert_eq!(
-        tokio::fs::metadata(team_config_path(
-            codex_home.as_path(),
-            &spawn_result.team_id
-        ))
-        .await
-        .is_ok(),
-        true
-    );
-    assert_eq!(
-        tokio::fs::metadata(team_tasks_dir(codex_home.as_path(), &spawn_result.team_id))
-            .await
-            .is_ok(),
-        true
-    );
-
-    MultiAgentHandler
-        .handle(invocation(
+        let close_invocation = invocation(
             session,
             turn,
-            "team_cleanup",
+            "close_team",
             function_payload(json!({
                 "team_id": spawn_result.team_id
             })),
-        ))
-        .await
-        .expect("team_cleanup should succeed");
-    assert_eq!(
-        tokio::fs::metadata(team_config_path(
-            codex_home.as_path(),
-            &spawn_result.team_id
-        ))
-        .await
-        .is_err(),
-        true
-    );
-    assert_eq!(
-        tokio::fs::metadata(team_tasks_dir(codex_home.as_path(), &spawn_result.team_id))
+        );
+        let close_output = MultiAgentHandler
+            .handle(close_invocation)
+            .await
+            .expect("close_team should succeed");
+        let FunctionToolOutput {
+            body: FunctionCallOutputBody::Text(close_content),
+            success: close_success,
+            ..
+        } = close_output
+        else {
+            panic!("expected function output");
+        };
+        let close_result: CloseTeamResult =
+            serde_json::from_str(&close_content).expect("close_team result should be json");
+        assert_eq!(close_result.closed.len(), 2);
+        assert_eq!(close_success, Some(true));
+        for member in &close_result.closed {
+            assert_eq!(member.ok, true);
+            assert_eq!(member.error, None);
+        }
+        for worktree_path in worktree_paths {
+            assert_eq!(std::fs::metadata(worktree_path).is_err(), true);
+        }
+        assert_eq!(
+            list_worktree_paths(codex_home.as_path(), lead_thread_id).is_empty(),
+            true
+        );
+    });
+}
+
+#[test]
+fn close_team_partial_close_removes_only_selected_member_worktree() {
+    run_with_large_stack(async {
+        let (mut session, mut turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let repo_dir = tempfile::tempdir().expect("temp dir");
+        turn.cwd = repo_dir.path().to_path_buf();
+
+        init_git_repo(turn.cwd.as_path());
+        let lead_thread_id = session.conversation_id;
+        let codex_home = turn.config.codex_home.clone();
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
+        let team_id = ThreadId::new().to_string();
+
+        let spawn_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_team",
+            function_payload(json!({
+                "team_id": team_id,
+                "members": [
+                    {"name": "planner", "task": "plan", "worktree": true},
+                    {"name": "worker", "task": "work", "worktree": true}
+                ]
+            })),
+        );
+        let spawn_output = MultiAgentHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("spawn_team with worktree members should succeed");
+        let FunctionToolOutput {
+            body: FunctionCallOutputBody::Text(spawn_content),
+            success: spawn_success,
+            ..
+        } = spawn_output
+        else {
+            panic!("expected function output");
+        };
+        let spawn_result: SpawnTeamResult =
+            serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
+        assert_eq!(spawn_result.members.len(), 2);
+        assert_eq!(spawn_success, Some(true));
+        assert_eq!(
+            list_worktree_paths(codex_home.as_path(), lead_thread_id).len(),
+            2
+        );
+
+        let partial_close_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({
+                "team_id": spawn_result.team_id,
+                "members": ["planner"]
+            })),
+        );
+        let partial_close_output = MultiAgentHandler
+            .handle(partial_close_invocation)
+            .await
+            .expect("close_team should close selected member");
+        let FunctionToolOutput {
+            body: FunctionCallOutputBody::Text(partial_close_content),
+            success: partial_close_success,
+            ..
+        } = partial_close_output
+        else {
+            panic!("expected function output");
+        };
+        let partial_close_result: CloseTeamResult =
+            serde_json::from_str(&partial_close_content).expect("close_team result should be json");
+        assert_eq!(partial_close_success, Some(true));
+        assert_eq!(partial_close_result.closed.len(), 1);
+        assert_eq!(partial_close_result.closed[0].name, "planner".to_string());
+        assert_eq!(partial_close_result.closed[0].ok, true);
+        assert_eq!(partial_close_result.closed[0].error, None);
+        assert_eq!(
+            list_worktree_paths(codex_home.as_path(), lead_thread_id).len(),
+            1
+        );
+
+        let persisted_config_path = team_config_path(codex_home.as_path(), &spawn_result.team_id);
+        let persisted_config_raw = tokio::fs::read_to_string(&persisted_config_path)
+            .await
+            .expect("team config should remain after partial close");
+        let persisted_config: PersistedTeamConfig =
+            serde_json::from_str(&persisted_config_raw).expect("team config should be valid json");
+        assert_eq!(persisted_config.members.len(), 1);
+        assert_eq!(persisted_config.members[0].name, "worker".to_string());
+
+        let final_close_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({
+                "team_id": spawn_result.team_id
+            })),
+        );
+        let final_close_output = MultiAgentHandler
+            .handle(final_close_invocation)
+            .await
+            .expect("close remaining team member");
+        let FunctionToolOutput {
+            success: final_close_success,
+            ..
+        } = final_close_output;
+        assert_eq!(final_close_success, Some(true));
+        assert_eq!(
+            list_worktree_paths(codex_home.as_path(), lead_thread_id).is_empty(),
+            true
+        );
+        assert_eq!(
+            tokio::fs::metadata(team_config_path(
+                codex_home.as_path(),
+                &spawn_result.team_id
+            ))
+            .await
+            .is_ok(),
+            true
+        );
+        assert_eq!(
+            tokio::fs::metadata(team_tasks_dir(codex_home.as_path(), &spawn_result.team_id))
+                .await
+                .is_ok(),
+            true
+        );
+
+        MultiAgentHandler
+            .handle(invocation(
+                session,
+                turn,
+                "team_cleanup",
+                function_payload(json!({
+                    "team_id": spawn_result.team_id
+                })),
+            ))
+            .await
+            .expect("team_cleanup should succeed");
+        assert_eq!(
+            tokio::fs::metadata(team_config_path(
+                codex_home.as_path(),
+                &spawn_result.team_id
+            ))
             .await
             .is_err(),
-        true
-    );
+            true
+        );
+        assert_eq!(
+            tokio::fs::metadata(team_tasks_dir(codex_home.as_path(), &spawn_result.team_id))
+                .await
+                .is_err(),
+            true
+        );
+    });
 }
 
 #[test]
@@ -3793,134 +3799,136 @@ async fn wait_team_any_returns_triggered_member() {
         .expect("close_team should clean up");
 }
 
-#[tokio::test]
-async fn close_team_partial_close_updates_persisted_team_config() {
-    let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
+#[test]
+fn close_team_partial_close_updates_persisted_team_config() {
+    run_with_large_stack(async {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
 
-    let spawn_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "spawn_team",
-        function_payload(json!({
-            "members": [
-                {"name": "planner", "task": "plan"},
-                {"name": "worker", "task": "work"}
-            ]
-        })),
-    );
-    let spawn_output = MultiAgentHandler
-        .handle(spawn_invocation)
-        .await
-        .expect("spawn_team should succeed");
-    let FunctionToolOutput {
-        body: FunctionCallOutputBody::Text(spawn_content),
-        ..
-    } = spawn_output
-    else {
-        panic!("expected function output");
-    };
-    let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-
-    let partial_close_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "close_team",
-        function_payload(json!({
-            "team_id": spawn_result.team_id,
-            "members": ["planner"]
-        })),
-    );
-    let partial_close_output = MultiAgentHandler
-        .handle(partial_close_invocation)
-        .await
-        .expect("close_team should succeed for selected members");
-    let FunctionToolOutput {
-        body: FunctionCallOutputBody::Text(partial_close_content),
-        ..
-    } = partial_close_output
-    else {
-        panic!("expected function output");
-    };
-    let partial_close_result: CloseTeamResult =
-        serde_json::from_str(&partial_close_content).expect("close_team result should be json");
-    assert_eq!(partial_close_result.closed.len(), 1);
-    assert_eq!(partial_close_result.closed[0].name, "planner".to_string());
-
-    let persisted_config_path =
-        team_config_path(turn.config.codex_home.as_path(), &spawn_result.team_id);
-    let persisted_config_raw = tokio::fs::read_to_string(&persisted_config_path)
-        .await
-        .expect("team config should still exist");
-    let persisted_config: PersistedTeamConfig =
-        serde_json::from_str(&persisted_config_raw).expect("team config should be valid json");
-    assert_eq!(persisted_config.members.len(), 1);
-    assert_eq!(persisted_config.members[0].name, "worker".to_string());
-    assert_eq!(
-        tokio::fs::metadata(team_tasks_dir(
-            turn.config.codex_home.as_path(),
-            &spawn_result.team_id,
-        ))
-        .await
-        .is_ok(),
-        true
-    );
-
-    let full_close_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "close_team",
-        function_payload(json!({
-            "team_id": spawn_result.team_id
-        })),
-    );
-    MultiAgentHandler
-        .handle(full_close_invocation)
-        .await
-        .expect("close remaining team member");
-    assert_eq!(
-        tokio::fs::metadata(team_config_path(
-            turn.config.codex_home.as_path(),
-            &spawn_result.team_id,
-        ))
-        .await
-        .is_ok(),
-        true
-    );
-
-    MultiAgentHandler
-        .handle(invocation(
-            session,
+        let spawn_invocation = invocation(
+            session.clone(),
             turn.clone(),
-            "team_cleanup",
+            "spawn_team",
+            function_payload(json!({
+                "members": [
+                    {"name": "planner", "task": "plan"},
+                    {"name": "worker", "task": "work"}
+                ]
+            })),
+        );
+        let spawn_output = MultiAgentHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("spawn_team should succeed");
+        let FunctionToolOutput {
+            body: FunctionCallOutputBody::Text(spawn_content),
+            ..
+        } = spawn_output
+        else {
+            panic!("expected function output");
+        };
+        let spawn_result: SpawnTeamResult =
+            serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
+
+        let partial_close_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "close_team",
+            function_payload(json!({
+                "team_id": spawn_result.team_id,
+                "members": ["planner"]
+            })),
+        );
+        let partial_close_output = MultiAgentHandler
+            .handle(partial_close_invocation)
+            .await
+            .expect("close_team should succeed for selected members");
+        let FunctionToolOutput {
+            body: FunctionCallOutputBody::Text(partial_close_content),
+            ..
+        } = partial_close_output
+        else {
+            panic!("expected function output");
+        };
+        let partial_close_result: CloseTeamResult =
+            serde_json::from_str(&partial_close_content).expect("close_team result should be json");
+        assert_eq!(partial_close_result.closed.len(), 1);
+        assert_eq!(partial_close_result.closed[0].name, "planner".to_string());
+
+        let persisted_config_path =
+            team_config_path(turn.config.codex_home.as_path(), &spawn_result.team_id);
+        let persisted_config_raw = tokio::fs::read_to_string(&persisted_config_path)
+            .await
+            .expect("team config should still exist");
+        let persisted_config: PersistedTeamConfig =
+            serde_json::from_str(&persisted_config_raw).expect("team config should be valid json");
+        assert_eq!(persisted_config.members.len(), 1);
+        assert_eq!(persisted_config.members[0].name, "worker".to_string());
+        assert_eq!(
+            tokio::fs::metadata(team_tasks_dir(
+                turn.config.codex_home.as_path(),
+                &spawn_result.team_id,
+            ))
+            .await
+            .is_ok(),
+            true
+        );
+
+        let full_close_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "close_team",
             function_payload(json!({
                 "team_id": spawn_result.team_id
             })),
-        ))
-        .await
-        .expect("team_cleanup should succeed");
-    assert_eq!(
-        tokio::fs::metadata(team_config_path(
-            turn.config.codex_home.as_path(),
-            &spawn_result.team_id,
-        ))
-        .await
-        .is_err(),
-        true
-    );
-    assert_eq!(
-        tokio::fs::metadata(team_tasks_dir(
-            turn.config.codex_home.as_path(),
-            &spawn_result.team_id,
-        ))
-        .await
-        .is_err(),
-        true
-    );
+        );
+        MultiAgentHandler
+            .handle(full_close_invocation)
+            .await
+            .expect("close remaining team member");
+        assert_eq!(
+            tokio::fs::metadata(team_config_path(
+                turn.config.codex_home.as_path(),
+                &spawn_result.team_id,
+            ))
+            .await
+            .is_ok(),
+            true
+        );
+
+        MultiAgentHandler
+            .handle(invocation(
+                session,
+                turn.clone(),
+                "team_cleanup",
+                function_payload(json!({
+                    "team_id": spawn_result.team_id
+                })),
+            ))
+            .await
+            .expect("team_cleanup should succeed");
+        assert_eq!(
+            tokio::fs::metadata(team_config_path(
+                turn.config.codex_home.as_path(),
+                &spawn_result.team_id,
+            ))
+            .await
+            .is_err(),
+            true
+        );
+        assert_eq!(
+            tokio::fs::metadata(team_tasks_dir(
+                turn.config.codex_home.as_path(),
+                &spawn_result.team_id,
+            ))
+            .await
+            .is_err(),
+            true
+        );
+    });
 }
 
 #[tokio::test]
