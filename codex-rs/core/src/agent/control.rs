@@ -309,6 +309,7 @@ impl AgentControl {
     }
 
     /// Resume an existing agent thread from a recorded rollout file.
+    #[inline(never)]
     pub(crate) async fn resume_agent_from_rollout(
         &self,
         config: crate::config::Config,
@@ -382,6 +383,7 @@ impl AgentControl {
         Ok(resumed_thread_id)
     }
 
+    #[inline(never)]
     async fn resume_single_agent_from_rollout(
         &self,
         mut config: crate::config::Config,
@@ -396,7 +398,7 @@ impl AgentControl {
         }
         let state = self.upgrade()?;
         if state.get_thread(thread_id).await.is_err() {
-            self.state.release_spawned_subtree(thread_id);
+            self.state.release_spawned_thread(thread_id);
         }
         let mut reservation = self.state.reserve_spawn_slot(config.agent_max_threads)?;
         let (session_source, agent_metadata) = match session_source {
@@ -407,21 +409,27 @@ impl AgentControl {
                 agent_role: _,
                 agent_nickname: _,
             }) => {
-                let (resumed_agent_nickname, resumed_agent_role) =
+                let (resumed_agent_nickname, resumed_agent_role, resumed_agent_path) =
                     if let Some(state_db_ctx) = state_db::get_state_db(&config).await {
                         match state_db_ctx.get_thread(thread_id).await {
-                            Ok(Some(metadata)) => (metadata.agent_nickname, metadata.agent_role),
-                            Ok(None) | Err(_) => (None, None),
+                            Ok(Some(metadata)) => (
+                                metadata.agent_nickname,
+                                metadata.agent_role,
+                                metadata
+                                    .agent_path
+                                    .and_then(|path| AgentPath::try_from(path).ok()),
+                            ),
+                            Ok(None) | Err(_) => (None, None, None),
                         }
                     } else {
-                        (None, None)
+                        (None, None, None)
                     };
                 self.prepare_thread_spawn(
                     &mut reservation,
                     &config,
                     parent_thread_id,
                     depth,
-                    agent_path,
+                    agent_path.or(resumed_agent_path),
                     resumed_agent_role,
                     resumed_agent_nickname,
                 )?
