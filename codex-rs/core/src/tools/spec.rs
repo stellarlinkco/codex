@@ -593,6 +593,77 @@ fn create_request_permissions_schema() -> JsonSchema {
                 "file_system".to_string(),
                 create_file_system_permissions_schema(),
             ),
+            (
+                "macos".to_string(),
+                JsonSchema::Object {
+                    properties: BTreeMap::from([
+                        (
+                            "macos_preferences".to_string(),
+                            JsonSchema::String {
+                                description: Some(
+                                    "macOS preferences access: none, read_only, or read_write."
+                                        .to_string(),
+                                ),
+                            },
+                        ),
+                        (
+                            "macos_automation".to_string(),
+                            JsonSchema::Array {
+                                items: Box::new(JsonSchema::String { description: None }),
+                                description: Some(
+                                    "Bundle ids to allow for macOS automation. The runtime also accepts the string values `all` or `none`."
+                                        .to_string(),
+                                ),
+                            },
+                        ),
+                        (
+                            "macos_launch_services".to_string(),
+                            JsonSchema::Boolean {
+                                description: Some(
+                                    "Set to true to request macOS Launch Services access."
+                                        .to_string(),
+                                ),
+                            },
+                        ),
+                        (
+                            "macos_accessibility".to_string(),
+                            JsonSchema::Boolean {
+                                description: Some(
+                                    "Set to true to request macOS Accessibility access."
+                                        .to_string(),
+                                ),
+                            },
+                        ),
+                        (
+                            "macos_calendar".to_string(),
+                            JsonSchema::Boolean {
+                                description: Some(
+                                    "Set to true to request macOS Calendar access.".to_string(),
+                                ),
+                            },
+                        ),
+                        (
+                            "macos_reminders".to_string(),
+                            JsonSchema::Boolean {
+                                description: Some(
+                                    "Set to true to request macOS Reminders access.".to_string(),
+                                ),
+                            },
+                        ),
+                        (
+                            "macos_contacts".to_string(),
+                            JsonSchema::String {
+                                description: Some(
+                                    "macOS Contacts access: none, read_only, or read_write."
+                                        .to_string(),
+                                ),
+                            },
+                        ),
+                    ]),
+                    required: None,
+                    additional_properties: Some(false.into()),
+                },
+            ),
         ]),
         required: None,
         additional_properties: Some(false.into()),

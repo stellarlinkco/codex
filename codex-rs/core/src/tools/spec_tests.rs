@@ -2554,7 +2554,7 @@ fn request_permissions_tool_includes_full_permission_schema() {
     assert_eq!(additional_properties, &Some(false.into()));
     assert!(permission_properties.contains_key("network"));
     assert!(permission_properties.contains_key("file_system"));
-    assert!(!permission_properties.contains_key("macos"));
+    assert!(permission_properties.contains_key("macos"));
 
     let Some(JsonSchema::Object {
         properties: network_properties,
@@ -2578,6 +2578,23 @@ fn request_permissions_tool_includes_full_permission_schema() {
     assert_eq!(additional_properties, &Some(false.into()));
     assert!(file_system_properties.contains_key("read"));
     assert!(file_system_properties.contains_key("write"));
+
+    let Some(JsonSchema::Object {
+        properties: macos_properties,
+        additional_properties,
+        ..
+    }) = permission_properties.get("macos")
+    else {
+        panic!("expected macos object");
+    };
+    assert_eq!(additional_properties, &Some(false.into()));
+    assert!(macos_properties.contains_key("macos_preferences"));
+    assert!(macos_properties.contains_key("macos_automation"));
+    assert!(macos_properties.contains_key("macos_launch_services"));
+    assert!(macos_properties.contains_key("macos_accessibility"));
+    assert!(macos_properties.contains_key("macos_calendar"));
+    assert!(macos_properties.contains_key("macos_reminders"));
+    assert!(macos_properties.contains_key("macos_contacts"));
 }
 
 #[test]

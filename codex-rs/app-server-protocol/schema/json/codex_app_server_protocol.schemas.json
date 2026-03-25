@@ -7211,6 +7211,16 @@
             }
           ]
         },
+        "macos": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AdditionalMacOsPermissions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "network": {
           "anyOf": [
             {

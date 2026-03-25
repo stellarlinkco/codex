@@ -5216,6 +5216,16 @@
             }
           ]
         },
+        "macos": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/MacOsSeatbeltProfileExtensions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "network": {
           "anyOf": [
             {

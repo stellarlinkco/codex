@@ -28,7 +28,6 @@ use core_test_support::skip_if_no_network;
 use core_test_support::skip_if_sandbox;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
-use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_with_timeout;
 use pretty_assertions::assert_eq;
 use regex_lite::Regex;
@@ -181,9 +180,10 @@ async fn submit_turn(
     prompt: &str,
     approval_policy: AskForApproval,
     sandbox_policy: SandboxPolicy,
-) -> Result<()> {
+) -> Result<String> {
     let session_model = test.session_configured.model.clone();
-    test.codex
+    let turn_id = test
+        .codex
         .submit(Op::UserTurn {
             items: vec![UserInput::Text {
                 text: prompt.into(),
@@ -201,26 +201,63 @@ async fn submit_turn(
             personality: None,
         })
         .await?;
-    Ok(())
+    Ok(turn_id)
 }
 
-async fn wait_for_completion(test: &TestCodex) {
-    wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
+async fn wait_for_turn_event<F>(
+    test: &TestCodex,
+    turn_id: &str,
+    wait_time: tokio::time::Duration,
+    mut predicate: F,
+) -> EventMsg
+where
+    F: FnMut(&EventMsg) -> bool,
+{
+    loop {
+        let event = wait_for_event_with_timeout(&test.codex, |_| true, wait_time).await;
+        let matches_turn = match &event {
+            EventMsg::TurnStarted(turn_started) => turn_started.turn_id == turn_id,
+            EventMsg::TurnComplete(turn_complete) => turn_complete.turn_id == turn_id,
+            EventMsg::ExecApprovalRequest(approval) => approval.turn_id == turn_id,
+            EventMsg::RequestPermissions(request) => request.turn_id == turn_id,
+            _ => false,
+        };
+        if matches_turn && predicate(&event) {
+            return event;
+        }
+    }
+}
+
+async fn wait_for_completion(test: &TestCodex, turn_id: &str) {
+    let event = wait_for_turn_event(
+        test,
+        turn_id,
+        tokio::time::Duration::from_secs(30),
+        |event| matches!(event, EventMsg::TurnComplete(_)),
+    )
     .await;
+    match event {
+        EventMsg::TurnComplete(_) => {}
+        other => panic!("unexpected event: {other:?}"),
+    }
 }
 
 async fn expect_exec_approval(
     test: &TestCodex,
+    turn_id: &str,
     expected_command: &str,
 ) -> ExecApprovalRequestEvent {
-    let event = wait_for_event(&test.codex, |event| {
-        matches!(
-            event,
-            EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
-        )
-    })
+    let event = wait_for_turn_event(
+        test,
+        turn_id,
+        tokio::time::Duration::from_secs(30),
+        |event| {
+            matches!(
+                event,
+                EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
+            )
+        },
+    )
     .await;
 
     match event {
@@ -240,13 +277,19 @@ async fn expect_exec_approval(
 
 async fn wait_for_exec_approval_or_completion(
     test: &TestCodex,
+    turn_id: &str,
 ) -> Option<ExecApprovalRequestEvent> {
-    let event = wait_for_event(&test.codex, |event| {
-        matches!(
-            event,
-            EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
-        )
-    })
+    let event = wait_for_turn_event(
+        test,
+        turn_id,
+        tokio::time::Duration::from_secs(30),
+        |event| {
+            matches!(
+                event,
+                EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
+            )
+        },
+    )
     .await;
 
     match event {
@@ -258,19 +301,19 @@ async fn wait_for_exec_approval_or_completion(
 
 async fn expect_request_permissions_event(
     test: &TestCodex,
+    turn_id: &str,
     expected_call_id: &str,
 ) -> PermissionProfile {
-    // Building the initial model-visible prompt can be slower on CI before the
-    // first request_permissions tool call is surfaced.
-    let event = wait_for_event_with_timeout(
-        &test.codex,
+    let event = wait_for_turn_event(
+        test,
+        turn_id,
+        tokio::time::Duration::from_secs(30),
         |event| {
             matches!(
                 event,
                 EventMsg::RequestPermissions(_) | EventMsg::TurnComplete(_)
             )
         },
-        tokio::time::Duration::from_secs(30),
     )
     .await;
 
@@ -372,8 +415,8 @@ async fn with_additional_permissions_requires_approval_under_on_request() -> Res
     )
     .await;
 
-    submit_turn(&test, call_id, approval_policy, sandbox_policy.clone()).await?;
-    let approval = expect_exec_approval(&test, command).await;
+    let turn_id = submit_turn(&test, call_id, approval_policy, sandbox_policy.clone()).await?;
+    let approval = expect_exec_approval(&test, &turn_id, command).await;
     assert_eq!(
         approval.additional_permissions,
         Some(requested_permissions.clone())
@@ -385,7 +428,7 @@ async fn with_additional_permissions_requires_approval_under_on_request() -> Res
             decision: ReviewDecision::Approved,
         })
         .await?;
-    wait_for_completion(&test).await;
+    wait_for_completion(&test, &turn_id).await;
 
     let result = parse_result(&results.single_request().function_call_output(call_id));
     assert!(
@@ -470,9 +513,9 @@ async fn relative_additional_permissions_resolve_against_tool_workdir() -> Resul
     )
     .await;
 
-    submit_turn(&test, call_id, approval_policy, sandbox_policy.clone()).await?;
+    let turn_id = submit_turn(&test, call_id, approval_policy, sandbox_policy.clone()).await?;
 
-    let approval = expect_exec_approval(&test, command).await;
+    let approval = expect_exec_approval(&test, &turn_id, command).await;
     assert_eq!(
         approval.additional_permissions,
         Some(expected_permissions.clone())
@@ -484,7 +527,7 @@ async fn relative_additional_permissions_resolve_against_tool_workdir() -> Resul
             decision: ReviewDecision::Approved,
         })
         .await?;
-    wait_for_completion(&test).await;
+    wait_for_completion(&test, &turn_id).await;
 
     let result = parse_result(&results.single_request().function_call_output(call_id));
     assert!(
@@ -564,9 +607,9 @@ async fn read_only_with_additional_permissions_does_not_widen_to_unrequested_cwd
     )
     .await;
 
-    submit_turn(&test, call_id, approval_policy, sandbox_policy.clone()).await?;
+    let turn_id = submit_turn(&test, call_id, approval_policy, sandbox_policy.clone()).await?;
 
-    let approval = expect_exec_approval(&test, &command).await;
+    let approval = expect_exec_approval(&test, &turn_id, &command).await;
     assert_eq!(
         approval.additional_permissions,
         Some(requested_permissions.clone())
@@ -578,7 +621,7 @@ async fn read_only_with_additional_permissions_does_not_widen_to_unrequested_cwd
             decision: ReviewDecision::Approved,
         })
         .await?;
-    wait_for_completion(&test).await;
+    wait_for_completion(&test, &turn_id).await;
 
     let result = parse_result(&results.single_request().function_call_output(call_id));
     assert!(
@@ -665,9 +708,9 @@ async fn read_only_with_additional_permissions_does_not_widen_to_unrequested_tmp
     )
     .await;
 
-    submit_turn(&test, call_id, approval_policy, sandbox_policy.clone()).await?;
+    let turn_id = submit_turn(&test, call_id, approval_policy, sandbox_policy.clone()).await?;
 
-    let approval = expect_exec_approval(&test, &command).await;
+    let approval = expect_exec_approval(&test, &turn_id, &command).await;
     assert_eq!(
         approval.additional_permissions,
         Some(requested_permissions.clone())
@@ -679,7 +722,7 @@ async fn read_only_with_additional_permissions_does_not_widen_to_unrequested_tmp
             decision: ReviewDecision::Approved,
         })
         .await?;
-    wait_for_completion(&test).await;
+    wait_for_completion(&test, &turn_id).await;
 
     let result = parse_result(&results.single_request().function_call_output(call_id));
     assert!(
@@ -773,9 +816,9 @@ async fn workspace_write_with_additional_permissions_can_write_outside_cwd() -> 
     )
     .await;
 
-    submit_turn(&test, call_id, approval_policy, sandbox_policy.clone()).await?;
+    let turn_id = submit_turn(&test, call_id, approval_policy, sandbox_policy.clone()).await?;
 
-    let approval = expect_exec_approval(&test, &command).await;
+    let approval = expect_exec_approval(&test, &turn_id, &command).await;
     assert_eq!(
         approval.additional_permissions,
         Some(normalized_requested_permissions)
@@ -787,7 +830,7 @@ async fn workspace_write_with_additional_permissions_can_write_outside_cwd() -> 
             decision: ReviewDecision::Approved,
         })
         .await?;
-    wait_for_completion(&test).await;
+    wait_for_completion(&test, &turn_id).await;
 
     let result = parse_result(&results.single_request().function_call_output(call_id));
     assert!(
@@ -875,9 +918,9 @@ async fn with_additional_permissions_denied_approval_blocks_execution() -> Resul
     )
     .await;
 
-    submit_turn(&test, call_id, approval_policy, sandbox_policy.clone()).await?;
+    let turn_id = submit_turn(&test, call_id, approval_policy, sandbox_policy.clone()).await?;
 
-    let approval = expect_exec_approval(&test, &command).await;
+    let approval = expect_exec_approval(&test, &turn_id, &command).await;
     assert_eq!(
         approval.additional_permissions,
         Some(normalized_requested_permissions)
@@ -889,7 +932,7 @@ async fn with_additional_permissions_denied_approval_blocks_execution() -> Resul
             decision: ReviewDecision::Denied,
         })
         .await?;
-    wait_for_completion(&test).await;
+    wait_for_completion(&test, &turn_id).await;
 
     let result = parse_result(&results.single_request().function_call_output(call_id));
     assert_ne!(
@@ -983,15 +1026,33 @@ async fn request_permissions_grants_apply_to_later_exec_command_calls() -> Resul
     )
     .await;
 
-    submit_turn(
+    let turn_id = submit_turn(
         &test,
         "write outside the workspace",
         approval_policy,
         sandbox_policy,
     )
     .await?;
-
-    let granted_permissions = expect_request_permissions_event(&test, "permissions-call").await;
+    let event = wait_for_turn_event(
+        &test,
+        &turn_id,
+        tokio::time::Duration::from_secs(30),
+        |event| {
+            matches!(
+                event,
+                EventMsg::RequestPermissions(_) | EventMsg::TurnComplete(_)
+            )
+        },
+    )
+    .await;
+    let granted_permissions: PermissionProfile = match event {
+        EventMsg::RequestPermissions(request) => {
+            assert_eq!(request.call_id, "permissions-call");
+            request.permissions.into()
+        }
+        EventMsg::TurnComplete(_) => panic!("expected request_permissions before completion"),
+        other => panic!("unexpected event: {other:?}"),
+    };
     assert_eq!(
         granted_permissions,
         normalized_requested_permissions.clone()
@@ -1006,7 +1067,7 @@ async fn request_permissions_grants_apply_to_later_exec_command_calls() -> Resul
         })
         .await?;
 
-    if let Some(approval) = wait_for_exec_approval_or_completion(&test).await {
+    if let Some(approval) = wait_for_exec_approval_or_completion(&test, &turn_id).await {
         assert_eq!(
             approval.additional_permissions,
             Some(normalized_requested_permissions.clone())
@@ -1018,7 +1079,7 @@ async fn request_permissions_grants_apply_to_later_exec_command_calls() -> Resul
                 decision: ReviewDecision::Approved,
             })
             .await?;
-        wait_for_completion(&test).await;
+        wait_for_completion(&test, &turn_id).await;
     }
 
     let exec_output = responses
@@ -1097,7 +1158,7 @@ async fn request_permissions_preapprove_explicit_exec_permissions_outside_on_req
     )
     .await;
 
-    submit_turn(
+    let turn_id = submit_turn(
         &test,
         "write outside the workspace",
         approval_policy,
@@ -1105,7 +1166,8 @@ async fn request_permissions_preapprove_explicit_exec_permissions_outside_on_req
     )
     .await?;
 
-    let granted_permissions = expect_request_permissions_event(&test, "permissions-call").await;
+    let granted_permissions =
+        expect_request_permissions_event(&test, &turn_id, "permissions-call").await;
     assert_eq!(
         granted_permissions,
         normalized_requested_permissions.clone()
@@ -1120,7 +1182,7 @@ async fn request_permissions_preapprove_explicit_exec_permissions_outside_on_req
         })
         .await?;
 
-    if let Some(approval) = wait_for_exec_approval_or_completion(&test).await {
+    if let Some(approval) = wait_for_exec_approval_or_completion(&test, &turn_id).await {
         test.codex
             .submit(Op::ExecApproval {
                 id: approval.effective_approval_id(),
@@ -1128,7 +1190,7 @@ async fn request_permissions_preapprove_explicit_exec_permissions_outside_on_req
                 decision: ReviewDecision::Approved,
             })
             .await?;
-        wait_for_completion(&test).await;
+        wait_for_completion(&test, &turn_id).await;
     }
 
     let exec_output = responses
@@ -1210,7 +1272,7 @@ async fn request_permissions_grants_apply_to_later_shell_command_calls() -> Resu
     )
     .await;
 
-    submit_turn(
+    let turn_id = submit_turn(
         &test,
         "write outside the workspace",
         approval_policy,
@@ -1218,7 +1280,26 @@ async fn request_permissions_grants_apply_to_later_shell_command_calls() -> Resu
     )
     .await?;
 
-    let granted_permissions = expect_request_permissions_event(&test, "permissions-call").await;
+    let event = wait_for_turn_event(
+        &test,
+        &turn_id,
+        tokio::time::Duration::from_secs(30),
+        |event| {
+            matches!(
+                event,
+                EventMsg::RequestPermissions(_) | EventMsg::TurnComplete(_)
+            )
+        },
+    )
+    .await;
+    let granted_permissions: PermissionProfile = match event {
+        EventMsg::RequestPermissions(request) => {
+            assert_eq!(request.call_id, "permissions-call");
+            request.permissions.into()
+        }
+        EventMsg::TurnComplete(_) => panic!("expected request_permissions before completion"),
+        other => panic!("unexpected event: {other:?}"),
+    };
     assert_eq!(
         granted_permissions,
         normalized_requested_permissions.clone()
@@ -1233,7 +1314,7 @@ async fn request_permissions_grants_apply_to_later_shell_command_calls() -> Resu
         })
         .await?;
 
-    if let Some(approval) = wait_for_exec_approval_or_completion(&test).await {
+    if let Some(approval) = wait_for_exec_approval_or_completion(&test, &turn_id).await {
         test.codex
             .submit(Op::ExecApproval {
                 id: approval.effective_approval_id(),
@@ -1241,7 +1322,7 @@ async fn request_permissions_grants_apply_to_later_shell_command_calls() -> Resu
                 decision: ReviewDecision::Approved,
             })
             .await?;
-        wait_for_completion(&test).await;
+        wait_for_completion(&test, &turn_id).await;
     }
 
     let shell_output = responses
@@ -1356,7 +1437,7 @@ async fn partial_request_permissions_grants_do_not_preapprove_new_permissions() 
     )
     .await;
 
-    submit_turn(
+    let turn_id = submit_turn(
         &test,
         "write outside the workspace",
         approval_policy,
@@ -1364,7 +1445,8 @@ async fn partial_request_permissions_grants_do_not_preapprove_new_permissions() 
     )
     .await?;
 
-    let initial_request = expect_request_permissions_event(&test, "permissions-call").await;
+    let initial_request =
+        expect_request_permissions_event(&test, &turn_id, "permissions-call").await;
     assert_eq!(initial_request, normalized_requested_permissions);
     test.codex
         .submit(Op::RequestPermissionsResponse {
@@ -1376,7 +1458,7 @@ async fn partial_request_permissions_grants_do_not_preapprove_new_permissions() 
         })
         .await?;
 
-    let approval = expect_exec_approval(&test, &command).await;
+    let approval = expect_exec_approval(&test, &turn_id, &command).await;
     let approval_permissions = approval
         .additional_permissions
         .clone()
@@ -1407,7 +1489,7 @@ async fn partial_request_permissions_grants_do_not_preapprove_new_permissions() 
             decision: ReviewDecision::Approved,
         })
         .await?;
-    wait_for_completion(&test).await;
+    wait_for_completion(&test, &turn_id).await;
 
     let exec_output = responses
         .function_call_output_text("exec-call")
@@ -1471,7 +1553,7 @@ async fn request_permissions_grants_do_not_carry_across_turns() -> Result<()> {
     )
     .await;
 
-    submit_turn(
+    let first_turn_id = submit_turn(
         &test,
         "request permissions for later use",
         approval_policy,
@@ -1479,7 +1561,8 @@ async fn request_permissions_grants_do_not_carry_across_turns() -> Result<()> {
     )
     .await?;
 
-    let granted_permissions = expect_request_permissions_event(&test, "permissions-call").await;
+    let granted_permissions =
+        expect_request_permissions_event(&test, &first_turn_id, "permissions-call").await;
     assert_eq!(
         granted_permissions,
         normalized_requested_permissions.clone()
@@ -1493,7 +1576,7 @@ async fn request_permissions_grants_do_not_carry_across_turns() -> Result<()> {
             },
         })
         .await?;
-    wait_for_completion(&test).await;
+    wait_for_completion(&test, &first_turn_id).await;
 
     let second_turn = mount_sse_sequence(
         &server,
@@ -1515,14 +1598,14 @@ async fn request_permissions_grants_do_not_carry_across_turns() -> Result<()> {
     )
     .await;
 
-    submit_turn(
+    let second_turn_id = submit_turn(
         &test,
         "try to reuse permissions in a later turn",
         approval_policy,
         sandbox_policy,
     )
     .await?;
-    wait_for_completion(&test).await;
+    wait_for_completion(&test, &second_turn_id).await;
 
     let output = second_turn
         .function_call_output_text("exec-call")
@@ -1588,7 +1671,7 @@ async fn request_permissions_session_grants_carry_across_turns() -> Result<()> {
     )
     .await;
 
-    submit_turn(
+    let first_turn_id = submit_turn(
         &test,
         "request session permissions for later use",
         approval_policy,
@@ -1596,7 +1679,8 @@ async fn request_permissions_session_grants_carry_across_turns() -> Result<()> {
     )
     .await?;
 
-    let granted_permissions = expect_request_permissions_event(&test, "permissions-call").await;
+    let granted_permissions =
+        expect_request_permissions_event(&test, &first_turn_id, "permissions-call").await;
     assert_eq!(
         granted_permissions,
         normalized_requested_permissions.clone()
@@ -1610,7 +1694,7 @@ async fn request_permissions_session_grants_carry_across_turns() -> Result<()> {
             },
         })
         .await?;
-    wait_for_completion(&test).await;
+    wait_for_completion(&test, &first_turn_id).await;
 
     let second_turn = mount_sse_sequence(
         &server,
@@ -1629,7 +1713,7 @@ async fn request_permissions_session_grants_carry_across_turns() -> Result<()> {
     )
     .await;
 
-    submit_turn(
+    let second_turn_id = submit_turn(
         &test,
         "reuse session permissions in a later turn",
         approval_policy,
@@ -1637,12 +1721,17 @@ async fn request_permissions_session_grants_carry_across_turns() -> Result<()> {
     )
     .await?;
 
-    let completion_event = wait_for_event(&test.codex, |event| {
-        matches!(
-            event,
-            EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
-        )
-    })
+    let completion_event = wait_for_turn_event(
+        &test,
+        &second_turn_id,
+        tokio::time::Duration::from_secs(30),
+        |event| {
+            matches!(
+                event,
+                EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
+            )
+        },
+    )
     .await;
     if let EventMsg::ExecApprovalRequest(approval) = completion_event {
         test.codex
@@ -1652,7 +1741,7 @@ async fn request_permissions_session_grants_carry_across_turns() -> Result<()> {
                 decision: ReviewDecision::Approved,
             })
             .await?;
-        wait_for_completion(&test).await;
+        wait_for_completion(&test, &second_turn_id).await;
     }
 
     let exec_output = second_turn

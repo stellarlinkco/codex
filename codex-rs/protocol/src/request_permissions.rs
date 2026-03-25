@@ -1,4 +1,5 @@
 use crate::models::FileSystemPermissions;
+use crate::models::MacOsSeatbeltProfileExtensions;
 use crate::models::NetworkPermissions;
 use crate::models::PermissionProfile;
 use schemars::JsonSchema;
@@ -19,11 +20,12 @@ pub enum PermissionGrantScope {
 pub struct RequestPermissionProfile {
     pub network: Option<NetworkPermissions>,
     pub file_system: Option<FileSystemPermissions>,
+    pub macos: Option<MacOsSeatbeltProfileExtensions>,
 }
 
 impl RequestPermissionProfile {
     pub fn is_empty(&self) -> bool {
-        self.network.is_none() && self.file_system.is_none()
+        self.network.is_none() && self.file_system.is_none() && self.macos.is_none()
     }
 }
 
@@ -32,7 +34,7 @@ impl From<RequestPermissionProfile> for PermissionProfile {
         Self {
             network: value.network,
             file_system: value.file_system,
-            macos: None,
+            macos: value.macos,
         }
     }
 }
@@ -42,7 +44,39 @@ impl From<PermissionProfile> for RequestPermissionProfile {
         Self {
             network: value.network,
             file_system: value.file_system,
+            macos: value.macos,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::MacOsAutomationPermission;
+    use crate::models::MacOsPreferencesPermission;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn request_permission_profile_round_trips_macos_permissions() {
+        let profile = RequestPermissionProfile {
+            macos: Some(MacOsSeatbeltProfileExtensions {
+                macos_preferences: MacOsPreferencesPermission::ReadWrite,
+                macos_automation: MacOsAutomationPermission::BundleIds(vec![
+                    "com.apple.Notes".to_string(),
+                ]),
+                macos_launch_services: true,
+                macos_accessibility: true,
+                macos_calendar: false,
+                macos_reminders: false,
+                macos_contacts: Default::default(),
+            }),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            RequestPermissionProfile::from(PermissionProfile::from(profile.clone())),
+            profile
+        );
     }
 }
 

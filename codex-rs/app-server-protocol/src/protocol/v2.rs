@@ -1148,6 +1148,7 @@ impl From<AdditionalNetworkPermissions> for CoreNetworkPermissions {
 pub struct RequestPermissionProfile {
     pub network: Option<AdditionalNetworkPermissions>,
     pub file_system: Option<AdditionalFileSystemPermissions>,
+    pub macos: Option<AdditionalMacOsPermissions>,
 }
 
 impl From<CoreRequestPermissionProfile> for RequestPermissionProfile {
@@ -1155,6 +1156,7 @@ impl From<CoreRequestPermissionProfile> for RequestPermissionProfile {
         Self {
             network: value.network.map(AdditionalNetworkPermissions::from),
             file_system: value.file_system.map(AdditionalFileSystemPermissions::from),
+            macos: value.macos.map(AdditionalMacOsPermissions::from),
         }
     }
 }
@@ -1164,6 +1166,7 @@ impl From<RequestPermissionProfile> for CoreRequestPermissionProfile {
         Self {
             network: value.network.map(CoreNetworkPermissions::from),
             file_system: value.file_system.map(CoreFileSystemPermissions::from),
+            macos: value.macos.map(CoreMacOsSeatbeltProfileExtensions::from),
         }
     }
 }
@@ -6250,6 +6253,7 @@ mod tests {
                             .expect("path must be absolute"),
                     ]),
                 }),
+                macos: None,
             }
         );
 
@@ -6269,13 +6273,14 @@ mod tests {
                             .expect("path must be absolute"),
                     ]),
                 }),
+                macos: None,
             }
         );
     }
 
     #[test]
-    fn permissions_request_approval_rejects_macos_permissions() {
-        let err = serde_json::from_value::<PermissionsRequestApprovalParams>(json!({
+    fn permissions_request_approval_accepts_macos_permissions() {
+        let params = serde_json::from_value::<PermissionsRequestApprovalParams>(json!({
             "threadId": "thr_123",
             "turnId": "turn_123",
             "itemId": "call_123",
@@ -6294,11 +6299,23 @@ mod tests {
                 },
             },
         }))
-        .expect_err("permissions request should reject macos permissions");
+        .expect("permissions request should deserialize");
 
         assert!(
-            err.to_string().contains("unknown field `macos`"),
-            "unexpected error: {err}"
+            params.permissions.macos.is_some(),
+            "expected macos permissions to be preserved"
+        );
+        assert_eq!(
+            CoreRequestPermissionProfile::from(params.permissions).macos,
+            Some(CoreMacOsSeatbeltProfileExtensions {
+                macos_preferences: CoreMacOsPreferencesPermission::ReadOnly,
+                macos_automation: CoreMacOsAutomationPermission::None,
+                macos_launch_services: false,
+                macos_accessibility: false,
+                macos_calendar: false,
+                macos_reminders: false,
+                macos_contacts: CoreMacOsContactsPermission::None,
+            })
         );
     }
 
