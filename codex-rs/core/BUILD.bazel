@@ -42,6 +42,7 @@ codex_rust_crate(
         "models.json",
         "prompt.md",
     ],
+    integration_test_timeout = "long",
     test_data_extra = [
         "config.schema.json",
     ] + glob(

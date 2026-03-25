@@ -101,6 +101,7 @@ def codex_rust_crate(
         rustc_env = {},
         deps_extra = [],
         integration_compile_data_extra = [],
+        integration_test_timeout = None,
         test_data_extra = [],
         unit_tests = True,
         test_tags = [],
@@ -245,6 +246,10 @@ def codex_rust_crate(
         if not test_name.endswith("-test"):
             test_name += "-test"
 
+        integration_test_kwargs = {}
+        if integration_test_timeout != None:
+            integration_test_kwargs["timeout"] = integration_test_timeout
+
         rust_test(
             name = test_name,
             crate_name = test_crate_name,
@@ -266,4 +271,5 @@ def codex_rust_crate(
             # execute from the repo root and can misplace integration snapshots.
             env = cargo_env,
             tags = test_tags,
+            **integration_test_kwargs
         )

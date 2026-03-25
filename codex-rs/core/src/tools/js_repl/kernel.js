@@ -1237,11 +1237,29 @@ function normalizeEmitImageUrl(value) {
   if (typeof value !== "string" || !value) {
     throw new Error("codex.emitImage expected a non-empty image_url");
   }
+  if (!/^data:/i.test(value)) {
+    throw new Error("codex.emitImage only accepts data URLs");
+  }
   return value;
 }
 
 function parseInputImageItem(value) {
   if (!isPlainObject(value) || value.type !== "input_image") {
+    return null;
+  }
+  return {
+    images: [
+      {
+        image_url: normalizeEmitImageUrl(value.image_url),
+        detail: parseImageDetail(value.detail),
+      },
+    ],
+    textCount: 0,
+  };
+}
+
+function parseImageObject(value) {
+  if (!isPlainObject(value) || !("image_url" in value)) {
     return null;
   }
   return {
@@ -1392,6 +1410,11 @@ function normalizeEmitImageValue(value) {
   const directItem = parseInputImageItem(value);
   if (directItem) {
     return requireSingleImage(directItem);
+  }
+
+  const imageObject = parseImageObject(value);
+  if (imageObject) {
+    return requireSingleImage(imageObject);
   }
 
   const byteImage = parseByteImageValue(value);

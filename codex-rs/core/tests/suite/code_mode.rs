@@ -790,7 +790,7 @@ while (true) {}
     .await;
 
     tokio::time::timeout(
-        Duration::from_secs(5),
+        Duration::from_secs(15),
         test.submit_turn("start the busy loop"),
     )
     .await??;

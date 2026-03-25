@@ -11,6 +11,7 @@ use std::time::Duration;
 use codex_features::Feature;
 use codex_protocol::ThreadId;
 use codex_protocol::models::ContentItem;
+use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::FunctionCallOutputContentItem;
 use codex_protocol::models::FunctionCallOutputPayload;
 use codex_protocol::models::ImageDetail;
@@ -44,6 +45,8 @@ use crate::sandboxing::SandboxManager;
 use crate::sandboxing::SandboxPermissions;
 use crate::tools::ToolRouter;
 use crate::tools::context::SharedTurnDiffTracker;
+use crate::tools::context::ToolOutput;
+use crate::tools::context::ToolPayload;
 use crate::tools::sandboxing::SandboxablePreference;
 use crate::truncate::TruncationPolicy;
 use crate::truncate::truncate_text;
@@ -1422,7 +1425,11 @@ impl JsReplManager {
                     .result
                     .to_response_item(&response.call_id, &response.payload);
                 let summary = Self::summarize_tool_call_response(&response_item);
-                let value = response.result.code_mode_result(&response.payload);
+                let value = Self::js_repl_tool_result_value(
+                    &response_item,
+                    response.result.as_ref(),
+                    &response.payload,
+                );
                 Self::log_tool_call_response(
                     &req,
                     /*ok*/ true,
@@ -1487,6 +1494,41 @@ impl JsReplManager {
                 }
                 warn!("js_repl stderr: {bounded_line}");
             }
+        }
+    }
+
+    fn js_repl_tool_result_value(
+        response_item: &ResponseInputItem,
+        result: &dyn ToolOutput,
+        payload: &ToolPayload,
+    ) -> JsonValue {
+        match response_item {
+            ResponseInputItem::FunctionCallOutput { call_id, output } => serde_json::json!({
+                "type": "function_call_output",
+                "call_id": call_id,
+                "output": Self::function_output_body_value(output),
+            }),
+            ResponseInputItem::CustomToolCallOutput {
+                call_id,
+                name,
+                output,
+            } => serde_json::json!({
+                "type": "custom_tool_call_output",
+                "call_id": call_id,
+                "name": name,
+                "output": Self::function_output_body_value(output),
+            }),
+            _ => result.code_mode_result(payload),
+        }
+    }
+
+    fn function_output_body_value(output: &FunctionCallOutputPayload) -> JsonValue {
+        match &output.body {
+            FunctionCallOutputBody::Text(text) => JsonValue::String(text.clone()),
+            FunctionCallOutputBody::ContentItems(items) => serde_json::to_value(items)
+                .unwrap_or_else(|err| {
+                    JsonValue::String(format!("failed to serialize content items: {err}"))
+                }),
         }
     }
 }
@@ -2985,7 +3027,10 @@ await codex.emitImage({ bytes: png, mimeType: "image/png", detail: "ultra" });
             )
             .await
             .expect_err("invalid detail should fail");
-        assert!(err.to_string().contains("expected detail to be one of"));
+        assert!(
+            err.to_string()
+                .contains("only supports detail \"original\"")
+        );
         assert!(session.get_pending_input().await.is_empty());
 
         Ok(())

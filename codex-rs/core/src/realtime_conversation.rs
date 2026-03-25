@@ -59,6 +59,7 @@ struct RealtimeHandoffState {
     output_tx: Sender<HandoffOutput>,
     active_handoff: Arc<Mutex<Option<String>>>,
     last_output_text: Arc<Mutex<Option<String>>>,
+    version: RealtimeWsVersion,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -73,14 +74,16 @@ pub(crate) struct RealtimeConversationStartRequest {
     session_id: Option<String>,
     event_parser: RealtimeEventParser,
     session_mode: RealtimeSessionMode,
+    realtime_version: RealtimeWsVersion,
 }
 
 impl RealtimeHandoffState {
-    fn new(output_tx: Sender<HandoffOutput>) -> Self {
+    fn new(output_tx: Sender<HandoffOutput>, version: RealtimeWsVersion) -> Self {
         Self {
             output_tx,
             active_handoff: Arc::new(Mutex::new(None)),
             last_output_text: Arc::new(Mutex::new(None)),
+            version,
         }
     }
 
@@ -88,7 +91,9 @@ impl RealtimeHandoffState {
         let Some(handoff_id) = self.active_handoff.lock().await.clone() else {
             return Ok(());
         };
-        *self.last_output_text.lock().await = Some(output_text.clone());
+        if matches!(self.version, RealtimeWsVersion::V2) {
+            *self.last_output_text.lock().await = Some(output_text.clone());
+        }
 
         self.output_tx
             .send(HandoffOutput {
@@ -170,7 +175,7 @@ impl RealtimeConversationManager {
             async_channel::bounded::<RealtimeEvent>(OUTPUT_EVENTS_QUEUE_CAPACITY);
 
         let realtime_active = Arc::new(AtomicBool::new(true));
-        let handoff = RealtimeHandoffState::new(handoff_output_tx);
+        let handoff = RealtimeHandoffState::new(handoff_output_tx, request.realtime_version);
         let task = spawn_realtime_input_task(
             writer,
             events,
@@ -257,6 +262,9 @@ impl RealtimeConversationManager {
         let Some(handoff) = handoff else {
             return Ok(());
         };
+        if matches!(handoff.version, RealtimeWsVersion::V1) {
+            return Ok(());
+        }
         let Some(handoff_id) = handoff.active_handoff.lock().await.clone() else {
             return Ok(());
         };
@@ -289,6 +297,7 @@ impl RealtimeConversationManager {
         };
         if let Some(handoff) = handoff {
             *handoff.active_handoff.lock().await = None;
+            *handoff.last_output_text.lock().await = None;
         }
     }
 
@@ -365,6 +374,7 @@ pub(crate) async fn handle_start(
                 session_id: requested_session_id.clone(),
                 event_parser,
                 session_mode,
+                realtime_version,
             },
         )
         .await

@@ -402,7 +402,7 @@ fn for_prompt_strips_images_when_model_does_not_support_images() {
 
 #[test]
 fn for_prompt_rewrites_image_generation_calls_when_images_are_supported() {
-    let history = create_history_with_items(vec![
+    let expected = vec![
         ResponseItem::ImageGenerationCall {
             id: "ig_123".to_string(),
             status: "generating".to_string(),
@@ -418,50 +418,15 @@ fn for_prompt_rewrites_image_generation_calls_when_images_are_supported() {
             end_turn: None,
             phase: None,
         },
-    ]);
+    ];
+    let history = create_history_with_items(expected.clone());
 
-    assert_eq!(
-        history.for_prompt(&default_input_modalities()),
-        vec![
-            ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![
-                    ContentItem::InputText {
-                        text: "Image Generation Call".to_string(),
-                    },
-                    ContentItem::InputText {
-                        text: "Image ID: ig_123".to_string(),
-                    },
-                    ContentItem::InputText {
-                        text: "Prompt: lobster".to_string(),
-                    },
-                    ContentItem::InputImage {
-                        image_url: "data:image/png;base64,Zm9v".to_string(),
-                    },
-                    ContentItem::InputText {
-                        text: "Saved to: CWD".to_string(),
-                    },
-                ],
-                end_turn: None,
-                phase: None,
-            },
-            ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: "hi".to_string(),
-                }],
-                end_turn: None,
-                phase: None,
-            }
-        ]
-    );
+    assert_eq!(history.for_prompt(&default_input_modalities()), expected);
 }
 
 #[test]
 fn for_prompt_rewrites_image_generation_calls_when_images_are_unsupported() {
-    let history = create_history_with_items(vec![
+    let expected = vec![
         ResponseItem::Message {
             id: None,
             role: "user".to_string(),
@@ -477,42 +442,10 @@ fn for_prompt_rewrites_image_generation_calls_when_images_are_unsupported() {
             revised_prompt: Some("lobster".to_string()),
             result: "Zm9v".to_string(),
         },
-    ]);
+    ];
+    let history = create_history_with_items(expected.clone());
 
-    assert_eq!(
-        history.for_prompt(&[InputModality::Text]),
-        vec![
-            ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![ContentItem::InputText {
-                    text: "generate a lobster".to_string(),
-                }],
-                end_turn: None,
-                phase: None,
-            },
-            ResponseItem::Message {
-                id: None,
-                role: "user".to_string(),
-                content: vec![
-                    ContentItem::InputText {
-                        text: "Image Generation Call".to_string(),
-                    },
-                    ContentItem::InputText {
-                        text: "Image ID: ig_123".to_string(),
-                    },
-                    ContentItem::InputText {
-                        text: "Prompt: lobster".to_string(),
-                    },
-                    ContentItem::InputText {
-                        text: "Saved to: CWD".to_string(),
-                    },
-                ],
-                end_turn: None,
-                phase: None,
-            },
-        ]
-    );
+    assert_eq!(history.for_prompt(&[InputModality::Text]), expected);
 }
 
 #[test]

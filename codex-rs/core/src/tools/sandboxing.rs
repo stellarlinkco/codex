@@ -522,8 +522,9 @@ mod tests {
     #[test]
     fn matching_write_roots_accepts_descendant_paths() {
         let tmp = tempdir().expect("tmp");
-        let root = AbsolutePathBuf::try_from(tmp.path().to_path_buf()).expect("abs");
-        let child = AbsolutePathBuf::try_from(tmp.path().join("nested/file.txt")).expect("abs");
+        let canonical_root = std::fs::canonicalize(tmp.path()).expect("canonicalize tmp");
+        let root = AbsolutePathBuf::try_from(canonical_root.clone()).expect("abs");
+        let child = AbsolutePathBuf::try_from(canonical_root.join("nested/file.txt")).expect("abs");
         let mut store = ApprovalStore::default();
         store.approve_write_roots(vec![root.clone()]);
 

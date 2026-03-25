@@ -119,8 +119,13 @@ jobs:
           print_failed_bazel_test_logs() {
             local console_log="$1"
             local testlogs_dir
+            local startup_args=()
 
-            testlogs_dir="$(bazel $BAZEL_STARTUP_ARGS info bazel-testlogs 2>/dev/null || echo bazel-testlogs)"
+            if [[ -n "${BAZEL_STARTUP_ARGS:-}" ]]; then
+              read -r -a startup_args <<<"${BAZEL_STARTUP_ARGS}"
+            fi
+
+            testlogs_dir="$(bazel "${startup_args[@]}" info bazel-testlogs 2>/dev/null || echo bazel-testlogs)"
 
             local failed_targets=()
             while IFS= read -r target; do

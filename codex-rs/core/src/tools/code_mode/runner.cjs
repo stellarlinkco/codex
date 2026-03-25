@@ -740,6 +740,8 @@ function startSession(protocol, sessions, start) {
       });
     }
   });
+
+  scheduleInitialYield(protocol, session, session.initial_yield_time_ms);
 }
 
 async function handleWorkerMessage(protocol, sessions, session, message) {

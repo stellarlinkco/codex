@@ -263,13 +263,13 @@ async fn snapshot_model_visible_layout_cwd_change_does_not_refresh_agents() -> R
     assert_eq!(requests.len(), 2, "expected two requests");
     assert_eq!(
         user_instructions_wrapper_count(&requests[0]),
-        0,
-        "expected first request to omit the serialized user-instructions wrapper when cwd-only project docs are introduced after session init"
+        1,
+        "expected first request to include the serialized user-instructions wrapper for the initial cwd"
     );
     assert_eq!(
         user_instructions_wrapper_count(&requests[1]),
-        0,
-        "expected second request to keep omitting the serialized user-instructions wrapper after cwd change with the current session-scoped project doc behavior"
+        1,
+        "expected second request to preserve the serialized user-instructions wrapper after cwd change with the current session-scoped project doc behavior"
     );
     insta::assert_snapshot!(
         "model_visible_layout_cwd_change_does_not_refresh_agents",

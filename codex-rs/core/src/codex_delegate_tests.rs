@@ -6,12 +6,11 @@ use async_channel::bounded;
 use codex_protocol::config_types::ApprovalsReviewer;
 use codex_protocol::models::NetworkPermissions;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::parse_command::ParsedCommand;
 use codex_protocol::protocol::AgentStatus;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::ExecApprovalRequestEvent;
-use codex_protocol::protocol::GuardianAssessmentEvent;
-use codex_protocol::protocol::GuardianAssessmentStatus;
 use codex_protocol::protocol::McpInvocation;
 use codex_protocol::protocol::RawResponseItemEvent;
 use codex_protocol::protocol::ReviewDecision;
@@ -25,7 +24,6 @@ use codex_protocol::request_user_input::RequestUserInputEvent;
 use codex_protocol::request_user_input::RequestUserInputQuestion;
 use codex_protocol::request_user_input::RequestUserInputResponse;
 use pretty_assertions::assert_eq;
-use serde_json::json;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -324,31 +322,36 @@ async fn handle_exec_approval_uses_call_id_for_guardian_review_and_approval_id_f
         }
     });
 
-    let assessment_event = timeout(Duration::from_secs(2), async {
+    let approval_request = timeout(Duration::from_secs(2), async {
         loop {
-            let event = rx_events.recv().await.expect("guardian assessment event");
-            if let EventMsg::GuardianAssessment(assessment) = event.msg {
-                return assessment;
+            let event = rx_events.recv().await.expect("exec approval request event");
+            if let EventMsg::ExecApprovalRequest(request) = event.msg {
+                return request;
             }
         }
     })
     .await
-    .expect("timed out waiting for guardian assessment");
+    .expect("timed out waiting for exec approval request");
+    let expected_approval_request = ExecApprovalRequestEvent {
+        call_id: "command-item-1".to_string(),
+        approval_id: Some("callback-approval-1".to_string()),
+        turn_id: parent_ctx.sub_id.clone(),
+        command: vec!["rm".to_string(), "-rf".to_string(), "tmp".to_string()],
+        cwd: PathBuf::from("/tmp"),
+        reason: Some("unsafe subcommand".to_string()),
+        network_approval_context: None,
+        proposed_execpolicy_amendment: None,
+        proposed_network_policy_amendments: None,
+        additional_permissions: None,
+        skill_metadata: None,
+        available_decisions: Some(vec![ReviewDecision::Approved, ReviewDecision::Abort]),
+        parsed_cmd: vec![ParsedCommand::Unknown {
+            cmd: "rm -rf tmp".to_string(),
+        }],
+    };
     assert_eq!(
-        assessment_event,
-        GuardianAssessmentEvent {
-            id: "command-item-1".to_string(),
-            turn_id: parent_ctx.sub_id.clone(),
-            status: GuardianAssessmentStatus::InProgress,
-            risk_score: None,
-            risk_level: None,
-            rationale: None,
-            action: Some(json!({
-                "tool": "shell",
-                "command": "rm -rf tmp",
-                "cwd": "/tmp",
-            })),
-        }
+        serde_json::to_value(&approval_request).expect("serialize approval request"),
+        serde_json::to_value(&expected_approval_request).expect("serialize expected request")
     );
 
     cancel_token.cancel();

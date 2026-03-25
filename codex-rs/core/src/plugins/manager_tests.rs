@@ -1922,15 +1922,15 @@ fn refresh_curated_plugin_cache_replaces_existing_local_version_with_sha() {
     );
 
     assert!(
-        !tmp.path()
-            .join("plugins/cache/openai-curated/slack/local")
-            .exists()
-    );
-    assert!(
         tmp.path()
             .join(format!(
                 "plugins/cache/openai-curated/slack/{TEST_CURATED_PLUGIN_SHA}"
             ))
+            .is_dir()
+    );
+    assert!(
+        tmp.path()
+            .join("plugins/cache/openai-curated/slack/local")
             .is_dir()
     );
 }

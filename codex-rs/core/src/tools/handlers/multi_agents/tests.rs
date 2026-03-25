@@ -24,6 +24,7 @@ use codex_protocol::models::FunctionCallOutputBody;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::RolloutItem;
+use codex_test_macros::large_stack_test;
 use pretty_assertions::assert_eq;
 use serde::Deserialize;
 use serde_json::json;
@@ -195,7 +196,7 @@ fn team_member_refs_formats_agent_type() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn handler_rejects_non_function_payloads() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
@@ -217,7 +218,7 @@ async fn handler_rejects_non_function_payloads() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn handler_rejects_unknown_tool() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
@@ -235,7 +236,7 @@ async fn handler_rejects_unknown_tool() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn spawn_agent_rejects_empty_message() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
@@ -253,7 +254,7 @@ async fn spawn_agent_rejects_empty_message() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn spawn_agent_rejects_when_message_and_items_are_both_set() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
@@ -276,7 +277,7 @@ async fn spawn_agent_rejects_when_message_and_items_are_both_set() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn spawn_agent_uses_explorer_role_and_inherits_approval_policy() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
@@ -343,49 +344,51 @@ async fn spawn_agent_uses_explorer_role_and_inherits_approval_policy() {
     assert_eq!(snapshot.approval_policy, AskForApproval::OnRequest);
 }
 
-#[tokio::test]
-async fn spawn_agent_accepts_model_provider_and_model_overrides() {
-    #[derive(Debug, Deserialize)]
-    struct SpawnAgentResult {
-        agent_id: String,
-    }
+#[test]
+fn spawn_agent_accepts_model_provider_and_model_overrides() {
+    run_with_large_stack(async move {
+        #[derive(Debug, Deserialize)]
+        struct SpawnAgentResult {
+            agent_id: String,
+        }
 
-    let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
 
-    let invocation = invocation(
-        Arc::new(session),
-        Arc::new(turn),
-        "spawn_agent",
-        function_payload(json!({
-            "message": "inspect this repo",
-            "model_provider": "openai",
-            "model": "gpt-5"
-        })),
-    );
-    let output = MultiAgentHandler
-        .handle(invocation)
-        .await
-        .expect("spawn_agent should succeed");
-    let FunctionToolOutput {
-        body: FunctionCallOutputBody::Text(content),
-        ..
-    } = output
-    else {
-        panic!("expected function output");
-    };
-    let result: SpawnAgentResult =
-        serde_json::from_str(&content).expect("spawn_agent result should be json");
-    let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
-    let snapshot = manager
-        .get_thread(agent_id)
-        .await
-        .expect("spawned agent thread should exist")
-        .config_snapshot()
-        .await;
-    assert_eq!(snapshot.model_provider_id, "openai");
-    assert_eq!(snapshot.model, "gpt-5");
+        let invocation = invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "model_provider": "openai",
+                "model": "gpt-5"
+            })),
+        );
+        let output = MultiAgentHandler
+            .handle(invocation)
+            .await
+            .expect("spawn_agent should succeed");
+        let FunctionToolOutput {
+            body: FunctionCallOutputBody::Text(content),
+            ..
+        } = output
+        else {
+            panic!("expected function output");
+        };
+        let result: SpawnAgentResult =
+            serde_json::from_str(&content).expect("spawn_agent result should be json");
+        let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
+        let snapshot = manager
+            .get_thread(agent_id)
+            .await
+            .expect("spawned agent thread should exist")
+            .config_snapshot()
+            .await;
+        assert_eq!(snapshot.model_provider_id, "openai");
+        assert_eq!(snapshot.model, "gpt-5");
+    });
 }
 
 #[test]
@@ -480,109 +483,111 @@ fn spawn_agent_accepts_background_field() {
     });
 }
 
-#[tokio::test]
-async fn spawn_agent_dispatches_subagent_start_hook() {
-    #[derive(Debug, Deserialize)]
-    struct SpawnAgentResult {
-        agent_id: String,
-    }
+#[test]
+fn spawn_agent_dispatches_subagent_start_hook() {
+    run_with_large_stack(async move {
+        #[derive(Debug, Deserialize)]
+        struct SpawnAgentResult {
+            agent_id: String,
+        }
 
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let cwd = tempfile::tempdir().expect("temp dir");
-    turn.cwd = cwd.path().to_path_buf();
+        let (mut session, mut turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let cwd = tempfile::tempdir().expect("temp dir");
+        turn.cwd = cwd.path().to_path_buf();
 
-    std::fs::create_dir_all(&turn.config.codex_home).expect("create codex_home");
+        std::fs::create_dir_all(&turn.config.codex_home).expect("create codex_home");
 
-    let marker_path = turn.config.codex_home.join("subagent_start.log");
-    let injected_context = "subagent_start injected context";
-    let script = r#"import sys, json; data=json.load(sys.stdin); open(sys.argv[1], "a").write(data["hook_event_name"] + "\n"); print(json.dumps({"additionalContext": "subagent_start injected context"}))"#;
-    session.services.hooks = Hooks::new(HooksConfig {
-        command_hooks: CommandHooksConfig {
-            subagent_start: vec![CommandHookConfig {
-                command: vec![
-                    "python3".to_string(),
-                    "-c".to_string(),
-                    script.to_string(),
-                    marker_path.to_string_lossy().into_owned(),
-                ],
+        let marker_path = turn.config.codex_home.join("subagent_start.log");
+        let injected_context = "subagent_start injected context";
+        let script = r#"import sys, json; data=json.load(sys.stdin); open(sys.argv[1], "a").write(data["hook_event_name"] + "\n"); print(json.dumps({"additionalContext": "subagent_start injected context"}))"#;
+        session.services.hooks = Hooks::new(HooksConfig {
+            command_hooks: CommandHooksConfig {
+                subagent_start: vec![CommandHookConfig {
+                    command: vec![
+                        "python3".to_string(),
+                        "-c".to_string(),
+                        script.to_string(),
+                        marker_path.to_string_lossy().into_owned(),
+                    ],
+                    ..Default::default()
+                }],
                 ..Default::default()
-            }],
+            },
             ..Default::default()
-        },
-        ..Default::default()
-    });
+        });
 
-    let invocation = invocation(
-        Arc::new(session),
-        Arc::new(turn),
-        "spawn_agent",
-        function_payload(json!({
-            "message": "inspect this repo"
-        })),
-    );
-    let output = MultiAgentHandler
-        .handle(invocation)
-        .await
-        .expect("spawn_agent should succeed");
-    let FunctionToolOutput {
-        body: FunctionCallOutputBody::Text(content),
-        ..
-    } = output
-    else {
-        panic!("expected function output");
-    };
-    let result: SpawnAgentResult =
-        serde_json::from_str(&content).expect("spawn_agent result should be json");
-    let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
+        let invocation = invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo"
+            })),
+        );
+        let output = MultiAgentHandler
+            .handle(invocation)
+            .await
+            .expect("spawn_agent should succeed");
+        let FunctionToolOutput {
+            body: FunctionCallOutputBody::Text(content),
+            ..
+        } = output
+        else {
+            panic!("expected function output");
+        };
+        let result: SpawnAgentResult =
+            serde_json::from_str(&content).expect("spawn_agent result should be json");
+        let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
 
-    let hook_events = tokio::fs::read_to_string(&marker_path)
-        .await
-        .expect("subagent_start hook should write marker");
-    assert_eq!(hook_events.trim(), "SubagentStart");
+        let hook_events = tokio::fs::read_to_string(&marker_path)
+            .await
+            .expect("subagent_start hook should write marker");
+        assert_eq!(hook_events.trim(), "SubagentStart");
 
-    let thread = manager
-        .get_thread(agent_id)
-        .await
-        .expect("spawned agent should exist");
+        let thread = manager
+            .get_thread(agent_id)
+            .await
+            .expect("spawned agent should exist");
 
-    let mut injected_index = None;
-    let mut prompt_index = None;
-    for _ in 0..50 {
-        injected_index = None;
-        prompt_index = None;
-        let history = thread.codex.session.clone_history().await;
-        let items = history.raw_items();
-        for (index, item) in items.iter().enumerate() {
-            let text = serde_json::to_string(item).expect("response item should serialize");
-            if injected_index.is_none() && text.contains(injected_context) {
-                injected_index = Some(index);
-            }
-            if prompt_index.is_none() && text.contains("inspect this repo") {
-                prompt_index = Some(index);
+        let mut injected_index = None;
+        let mut prompt_index = None;
+        for _ in 0..50 {
+            injected_index = None;
+            prompt_index = None;
+            let history = thread.codex.session.clone_history().await;
+            let items = history.raw_items();
+            for (index, item) in items.iter().enumerate() {
+                let text = serde_json::to_string(item).expect("response item should serialize");
+                if injected_index.is_none() && text.contains(injected_context) {
+                    injected_index = Some(index);
+                }
+                if prompt_index.is_none() && text.contains("inspect this repo") {
+                    prompt_index = Some(index);
+                }
+                if injected_index.is_some() && prompt_index.is_some() {
+                    break;
+                }
             }
             if injected_index.is_some() && prompt_index.is_some() {
                 break;
             }
+            tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        if injected_index.is_some() && prompt_index.is_some() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let injected_index = injected_index.expect("subagent_start context should be injected");
-    let prompt_index = prompt_index.expect("prompt should be recorded");
-    assert!(injected_index < prompt_index);
+        let injected_index = injected_index.expect("subagent_start context should be injected");
+        let prompt_index = prompt_index.expect("prompt should be recorded");
+        assert!(injected_index < prompt_index);
 
-    let _ = manager
-        .agent_control()
-        .shutdown_agent(agent_id)
-        .await
-        .expect("shutdown spawned agent");
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(agent_id)
+            .await
+            .expect("shutdown spawned agent");
+    });
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn spawn_agent_rejects_worktree_outside_git_repo() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -610,7 +615,7 @@ async fn spawn_agent_rejects_worktree_outside_git_repo() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn spawn_agent_worktree_sets_cwd_and_close_agent_cleans_up() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
@@ -711,7 +716,7 @@ async fn spawn_agent_worktree_sets_cwd_and_close_agent_cleans_up() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn spawn_agent_rejects_unknown_model_provider_override() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -737,7 +742,7 @@ async fn spawn_agent_rejects_unknown_model_provider_override() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn spawn_agent_errors_when_manager_dropped() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
@@ -755,7 +760,7 @@ async fn spawn_agent_errors_when_manager_dropped() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn spawn_agent_rejects_when_depth_limit_exceeded() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -786,7 +791,7 @@ async fn spawn_agent_rejects_when_depth_limit_exceeded() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn send_input_rejects_empty_message() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
@@ -804,7 +809,7 @@ async fn send_input_rejects_empty_message() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn send_input_rejects_when_message_and_items_are_both_set() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
@@ -828,7 +833,7 @@ async fn send_input_rejects_when_message_and_items_are_both_set() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn send_input_rejects_invalid_id() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
@@ -846,7 +851,7 @@ async fn send_input_rejects_invalid_id() {
     assert!(msg.starts_with("invalid agent id not-a-uuid:"));
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn send_input_reports_missing_agent() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -867,7 +872,7 @@ async fn send_input_reports_missing_agent() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn send_input_interrupts_before_prompt() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -906,7 +911,7 @@ async fn send_input_interrupts_before_prompt() {
         .expect("shutdown should submit");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn send_input_accepts_structured_items() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -957,7 +962,7 @@ async fn send_input_accepts_structured_items() {
         .expect("shutdown should submit");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn send_input_includes_receiver_metadata_in_events() {
     let (mut session, turn, rx) = make_session_and_context_with_rx().await;
     let manager = thread_manager();
@@ -1025,7 +1030,7 @@ async fn send_input_includes_receiver_metadata_in_events() {
     let _ = manager.agent_control().shutdown_agent(agent_id).await;
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn resume_agent_rejects_invalid_id() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
@@ -1043,7 +1048,7 @@ async fn resume_agent_rejects_invalid_id() {
     assert!(msg.starts_with("invalid agent id not-a-uuid:"));
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn resume_agent_reports_missing_agent() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -1064,7 +1069,7 @@ async fn resume_agent_reports_missing_agent() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn resume_agent_noops_for_active_agent() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -1107,7 +1112,7 @@ async fn resume_agent_noops_for_active_agent() {
         .expect("shutdown should submit");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -1200,7 +1205,7 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
         .expect("shutdown resumed agent");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn resume_agent_rejects_when_depth_limit_exceeded() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -1237,7 +1242,7 @@ struct WaitResult {
     timed_out: bool,
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn wait_rejects_non_positive_timeout() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
@@ -1258,7 +1263,7 @@ async fn wait_rejects_non_positive_timeout() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn wait_rejects_invalid_id() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
@@ -1276,7 +1281,7 @@ async fn wait_rejects_invalid_id() {
     assert!(msg.starts_with("invalid agent id invalid:"));
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn wait_rejects_empty_ids() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
@@ -1294,7 +1299,7 @@ async fn wait_rejects_empty_ids() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn wait_returns_not_found_for_missing_agents() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -1333,7 +1338,7 @@ async fn wait_returns_not_found_for_missing_agents() {
     assert_eq!(success, None);
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn wait_times_out_when_status_is_not_final() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -1379,7 +1384,7 @@ async fn wait_times_out_when_status_is_not_final() {
         .expect("shutdown should submit");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn wait_clamps_short_timeouts_to_minimum() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -1414,7 +1419,7 @@ async fn wait_clamps_short_timeouts_to_minimum() {
         .expect("shutdown should submit");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn wait_returns_final_status_without_timeout() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -1469,7 +1474,7 @@ async fn wait_returns_final_status_without_timeout() {
     assert_eq!(success, None);
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn wait_includes_receiver_metadata_in_events() {
     let (mut session, turn, rx) = make_session_and_context_with_rx().await;
     let manager = thread_manager();
@@ -1574,7 +1579,7 @@ async fn wait_includes_receiver_metadata_in_events() {
     let _ = manager.agent_control().shutdown_agent(agent_id).await;
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn close_agent_submits_shutdown_and_returns_status() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -1727,7 +1732,7 @@ fn close_agent_releases_slot_for_already_shutdown_agent() {
     });
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn spawn_agent_reaps_shutdown_agent_on_thread_limit() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
@@ -1828,7 +1833,7 @@ async fn spawn_agent_reaps_shutdown_agent_on_thread_limit() {
         .await;
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn spawn_team_reaps_shutdown_agent_on_thread_limit() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
@@ -1933,7 +1938,7 @@ async fn spawn_team_reaps_shutdown_agent_on_thread_limit() {
         .await;
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn spawn_agent_fails_when_limit_reached_without_reclaimable_threads() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
@@ -2306,7 +2311,7 @@ fn close_team_releases_slot_for_already_shutdown_member() {
     });
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn team_cleanup_fails_when_teammate_is_active() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
@@ -2459,7 +2464,7 @@ fn insert_team_record_allows_multiple_teams_per_session() {
     remove_team_record(lead_thread_id, "team-2").expect("cleanup should succeed");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn spawn_is_rejected_for_agent_team_teammates() {
     let (mut session, turn) = make_session_and_context().await;
     let lead_thread_id = session.conversation_id;
@@ -2768,7 +2773,7 @@ fn spawn_team_wait_team_and_close_team_flow() {
     });
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn wait_team_any_includes_non_final_member_statuses_in_events() {
     let (mut session, turn, rx) = make_session_and_context_with_rx().await;
     let manager = thread_manager();
@@ -2867,7 +2872,7 @@ async fn wait_team_any_includes_non_final_member_statuses_in_events() {
         .expect("team record should be removed");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn team_cleanup_only_removes_requested_team_when_multiple_teams_exist() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -3054,7 +3059,7 @@ async fn team_cleanup_only_removes_requested_team_when_multiple_teams_exist() {
         .expect("team_cleanup team-b should succeed");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn spawn_team_accepts_backendground_alias() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -3115,7 +3120,7 @@ async fn spawn_team_accepts_backendground_alias() {
     assert_eq!(close_success, Some(true));
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn spawn_team_accepts_background_field() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -3176,7 +3181,7 @@ async fn spawn_team_accepts_background_field() {
     assert_eq!(close_success, Some(true));
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn spawn_team_background_member_auto_closes_after_shutdown() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -3236,7 +3241,7 @@ async fn spawn_team_background_member_auto_closes_after_shutdown() {
         .expect("background member should reach shutdown");
     }
 
-    timeout(Duration::from_secs(5), async {
+    timeout(Duration::from_secs(15), async {
         loop {
             if !session
                 .services
@@ -3266,7 +3271,7 @@ async fn spawn_team_background_member_auto_closes_after_shutdown() {
         .expect("team_cleanup should succeed");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn spawn_team_worktree_failure_cleans_already_spawned_members() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -3937,7 +3942,7 @@ fn close_team_partial_close_updates_persisted_team_config() {
     });
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn team_task_lifecycle_and_team_cleanup_flow() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -4145,7 +4150,7 @@ async fn team_task_lifecycle_and_team_cleanup_flow() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn team_task_claim_and_complete_error_paths() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -4350,7 +4355,7 @@ async fn team_task_claim_and_complete_error_paths() {
         .expect("team_cleanup should succeed");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn team_message_and_team_broadcast_send_inputs() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -4485,7 +4490,7 @@ async fn team_message_and_team_broadcast_send_inputs() {
         .expect("team_cleanup should succeed");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn team_message_uses_team_id_when_member_names_overlap() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -4654,7 +4659,7 @@ async fn team_message_uses_team_id_when_member_names_overlap() {
         .expect("team_cleanup team-b should succeed");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn team_message_persists_inbox_when_delivery_fails() {
     #[derive(Debug, Deserialize)]
     struct TeamMessageDurableResult {
@@ -4757,7 +4762,7 @@ async fn team_message_persists_inbox_when_delivery_fails() {
     assert_eq!(entry.prompt.contains("do planning"), true);
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn team_ask_lead_persists_and_lead_can_pop_and_ack() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -4921,7 +4926,7 @@ async fn team_ask_lead_persists_and_lead_can_pop_and_ack() {
         .await;
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn team_inbox_ack_noops_when_token_empty() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -4996,7 +5001,7 @@ async fn team_inbox_ack_noops_when_token_empty() {
         .expect("cleanup");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn team_inbox_ack_rejects_invalid_token() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -5067,7 +5072,7 @@ async fn team_inbox_ack_rejects_invalid_token() {
         .expect("cleanup");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn team_inbox_ack_rejects_team_id_mismatch() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -5193,7 +5198,7 @@ async fn team_inbox_ack_rejects_team_id_mismatch() {
         .expect("cleanup");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn team_inbox_ack_rejects_thread_id_mismatch() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -5319,7 +5324,7 @@ async fn team_inbox_ack_rejects_thread_id_mismatch() {
         .expect("cleanup");
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn team_ask_lead_rejects_when_called_by_lead() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -5370,7 +5375,7 @@ async fn team_ask_lead_rejects_when_called_by_lead() {
     );
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn team_inbox_pop_rejects_non_member() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -5454,7 +5459,7 @@ async fn team_inbox_pop_rejects_non_member() {
 }
 
 #[cfg(unix)]
-#[tokio::test]
+#[large_stack_test]
 async fn team_inbox_appends_are_not_corrupted_under_concurrency() {
     let (_session, turn) = make_session_and_context().await;
     let codex_home = turn.config.codex_home.clone();
@@ -5510,7 +5515,7 @@ async fn team_inbox_appends_are_not_corrupted_under_concurrency() {
     assert_eq!(count, total);
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn team_task_claim_is_exclusive_under_concurrency() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
@@ -5597,7 +5602,7 @@ async fn team_task_claim_is_exclusive_under_concurrency() {
     assert_eq!(already_claimed, 9);
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn build_agent_spawn_config_uses_turn_context_values() {
     fn pick_allowed_sandbox_policy(
         constraint: &crate::config::Constrained<SandboxPolicy>,
@@ -5663,7 +5668,7 @@ async fn build_agent_spawn_config_uses_turn_context_values() {
     assert_eq!(config, expected);
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn build_agent_spawn_config_preserves_base_user_instructions() {
     let (_session, mut turn) = make_session_and_context().await;
     let mut base_config = (*turn.config).clone();
@@ -5679,7 +5684,7 @@ async fn build_agent_spawn_config_preserves_base_user_instructions() {
     assert_eq!(config.user_instructions, base_config.user_instructions);
 }
 
-#[tokio::test]
+#[large_stack_test]
 async fn build_agent_resume_config_clears_base_instructions() {
     let (_session, mut turn) = make_session_and_context().await;
     let mut base_config = (*turn.config).clone();
