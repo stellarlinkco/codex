@@ -178,12 +178,21 @@ pub(super) async fn apply_granted_turn_permissions(
 
     let granted_session_permissions = session.granted_session_permissions().await;
     let granted_turn_permissions = session.granted_turn_permissions().await;
+    let normalized_additional_permissions = match additional_permissions {
+        Some(permissions) => {
+            match crate::sandboxing::normalize_additional_permissions(permissions.clone()) {
+                Ok(normalized) => Some(normalized),
+                Err(_) => Some(permissions),
+            }
+        }
+        None => None,
+    };
     let granted_permissions = merge_permission_profiles(
         granted_session_permissions.as_ref(),
         granted_turn_permissions.as_ref(),
     );
     let effective_permissions = merge_permission_profiles(
-        additional_permissions.as_ref(),
+        normalized_additional_permissions.as_ref(),
         granted_permissions.as_ref(),
     );
     let permissions_preapproved = match (effective_permissions.as_ref(), granted_permissions) {

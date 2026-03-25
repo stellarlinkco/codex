@@ -29,6 +29,7 @@ use core_test_support::skip_if_sandbox;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_with_timeout;
 use pretty_assertions::assert_eq;
 use regex_lite::Regex;
 use serde_json::Value;
@@ -259,12 +260,18 @@ async fn expect_request_permissions_event(
     test: &TestCodex,
     expected_call_id: &str,
 ) -> PermissionProfile {
-    let event = wait_for_event(&test.codex, |event| {
-        matches!(
-            event,
-            EventMsg::RequestPermissions(_) | EventMsg::TurnComplete(_)
-        )
-    })
+    // Building the initial model-visible prompt can be slower on CI before the
+    // first request_permissions tool call is surfaced.
+    let event = wait_for_event_with_timeout(
+        &test.codex,
+        |event| {
+            matches!(
+                event,
+                EventMsg::RequestPermissions(_) | EventMsg::TurnComplete(_)
+            )
+        },
+        tokio::time::Duration::from_secs(30),
+    )
     .await;
 
     match event {
