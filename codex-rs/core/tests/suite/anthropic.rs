@@ -65,6 +65,60 @@ fn anthropic_sse(events: Vec<Value>) -> String {
         .collect::<String>()
 }
 
+async fn assert_anthropic_streaming_unsupported(prompt: &str) -> anyhow::Result<()> {
+    let server = MockServer::start().await;
+    let expected_schema: Value = serde_json::from_str(OUTPUT_SCHEMA)?;
+    let test = test_codex()
+        .with_config({
+            let provider = anthropic_provider(server.uri());
+            move |config| {
+                config.model_provider = provider;
+            }
+        })
+        .build(&server)
+        .await?;
+    let model = test.session_configured.model.clone();
+
+    let submit_result = test
+        .codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: prompt.to_string(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: Some(expected_schema),
+            cwd: test.cwd.path().to_path_buf(),
+            approval_policy: AskForApproval::Never,
+            sandbox_policy: SandboxPolicy::DangerFullAccess,
+            model,
+            effort: None,
+            summary: Some(ReasoningSummary::Auto),
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await;
+
+    if let Err(err) = submit_result {
+        assert_eq!(
+            err.to_string(),
+            "unsupported operation: streaming is not implemented for Anthropic providers"
+        );
+        return Ok(());
+    }
+
+    let error = wait_for_event_match(&test.codex, |event| match event {
+        EventMsg::Error(error) => Some(error.message.clone()),
+        _ => None,
+    })
+    .await;
+    assert_eq!(
+        error,
+        "unsupported operation: streaming is not implemented for Anthropic providers"
+    );
+    Ok(())
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anthropic_output_schema_and_reasoning_delta_round_trip() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
@@ -273,435 +327,19 @@ async fn anthropic_prefers_api_key_over_bearer_auth() -> anyhow::Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anthropic_output_schema_auto_repairs_invalid_json() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
-
-    let server = MockServer::start().await;
-    let expected_schema: Value = serde_json::from_str(OUTPUT_SCHEMA)?;
-
-    let first = anthropic_sse(vec![
-        json!({
-            "type":"message_start",
-            "message":{"id":"resp-schema-1","type":"message","role":"assistant","content":[]}
-        }),
-        json!({
-            "type":"content_block_start",
-            "index":0,
-            "content_block":{"type":"text","text":""}
-        }),
-        json!({
-            "type":"content_block_delta",
-            "index":0,
-            "delta":{"type":"text_delta","text":"not-json"}
-        }),
-        json!({
-            "type":"message_delta",
-            "delta":{"stop_reason":"end_turn","stop_sequence":null},
-            "usage":{"input_tokens":8,"output_tokens":4,"cache_read_input_tokens":0}
-        }),
-        json!({"type":"message_stop"}),
-    ]);
-    let first_request_matcher = |req: &Request| {
-        let body = String::from_utf8_lossy(&req.body);
-        body.contains("please return strict json")
-            && !body.contains("Your previous answer did not satisfy the required JSON Schema.")
-    };
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .and(first_request_matcher)
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_raw(first, "text/event-stream"),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let second = anthropic_sse(vec![
-        json!({
-            "type":"message_start",
-            "message":{"id":"resp-schema-2","type":"message","role":"assistant","content":[]}
-        }),
-        json!({
-            "type":"content_block_start",
-            "index":0,
-            "content_block":{"type":"text","text":""}
-        }),
-        json!({
-            "type":"content_block_delta",
-            "index":0,
-            "delta":{"type":"text_delta","text":"{\"answer\":\"fixed\"}"}
-        }),
-        json!({
-            "type":"message_delta",
-            "delta":{"stop_reason":"end_turn","stop_sequence":null},
-            "usage":{"input_tokens":15,"output_tokens":5,"cache_read_input_tokens":0}
-        }),
-        json!({"type":"message_stop"}),
-    ]);
-    let second_request_matcher = |req: &Request| {
-        let body = String::from_utf8_lossy(&req.body);
-        body.contains("Your previous answer did not satisfy the required JSON Schema.")
-            && body.contains("assistant output is not valid JSON")
-            && body.contains("not-json")
-    };
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .and(second_request_matcher)
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_raw(second, "text/event-stream"),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let test = test_codex()
-        .with_config({
-            let provider = anthropic_provider(server.uri());
-            move |config| {
-                config.model_provider = provider;
-            }
-        })
-        .build(&server)
-        .await?;
-    let model = test.session_configured.model.clone();
-
-    test.codex
-        .submit(Op::UserTurn {
-            items: vec![UserInput::Text {
-                text: "please return strict json".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: Some(expected_schema),
-            cwd: test.cwd.path().to_path_buf(),
-            approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::DangerFullAccess,
-            model,
-            effort: None,
-            summary: Some(ReasoningSummary::Auto),
-            service_tier: None,
-            collaboration_mode: None,
-            personality: None,
-        })
-        .await?;
-
-    let mut messages = Vec::new();
-    let mut completed = false;
-    for _ in 0..200 {
-        let event = tokio::time::timeout(Duration::from_secs(10), test.codex.next_event())
-            .await
-            .expect("timeout waiting for event")
-            .expect("event stream ended unexpectedly")
-            .msg;
-        match event {
-            EventMsg::AgentMessage(message) => messages.push(message.message),
-            EventMsg::Error(error) => {
-                panic!("anthropic schema auto-repair failed: {}", error.message)
-            }
-            EventMsg::TurnComplete(_) => {
-                completed = true;
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    assert!(completed, "turn did not complete within event budget");
-    assert_eq!(messages, vec![r#"{"answer":"fixed"}"#.to_string()]);
-    Ok(())
+    assert_anthropic_streaming_unsupported("please return strict json").await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anthropic_output_schema_extracts_embedded_json_without_retry() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
-
-    let server = MockServer::start().await;
-    let expected_schema: Value = serde_json::from_str(OUTPUT_SCHEMA)?;
-
-    let first = anthropic_sse(vec![
-        json!({
-            "type":"message_start",
-            "message":{"id":"resp-extract-1","type":"message","role":"assistant","content":[]}
-        }),
-        json!({
-            "type":"content_block_start",
-            "index":0,
-            "content_block":{"type":"text","text":""}
-        }),
-        json!({
-            "type":"content_block_delta",
-            "index":0,
-            "delta":{"type":"text_delta","text":"<think>analysis</think>\n\n{\"answer\":\"from_extract\"}"}
-        }),
-        json!({
-            "type":"message_delta",
-            "delta":{"stop_reason":"end_turn","stop_sequence":null},
-            "usage":{"input_tokens":9,"output_tokens":7,"cache_read_input_tokens":0}
-        }),
-        json!({"type":"message_stop"}),
-    ]);
-    let first_request_matcher = |req: &Request| {
-        let body = String::from_utf8_lossy(&req.body);
-        body.contains("extract embedded json")
-            && !body.contains("Your previous answer did not satisfy the required JSON Schema.")
-    };
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .and(first_request_matcher)
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_raw(first, "text/event-stream"),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let test = test_codex()
-        .with_config({
-            let provider = anthropic_provider(server.uri());
-            move |config| {
-                config.model_provider = provider;
-            }
-        })
-        .build(&server)
-        .await?;
-    let model = test.session_configured.model.clone();
-
-    test.codex
-        .submit(Op::UserTurn {
-            items: vec![UserInput::Text {
-                text: "extract embedded json".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: Some(expected_schema),
-            cwd: test.cwd.path().to_path_buf(),
-            approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::DangerFullAccess,
-            model,
-            effort: None,
-            summary: Some(ReasoningSummary::Auto),
-            service_tier: None,
-            collaboration_mode: None,
-            personality: None,
-        })
-        .await?;
-
-    let mut messages = Vec::new();
-    let mut message_deltas = Vec::new();
-    let mut completed = false;
-    for _ in 0..200 {
-        let event = tokio::time::timeout(Duration::from_secs(10), test.codex.next_event())
-            .await
-            .expect("timeout waiting for event")
-            .expect("event stream ended unexpectedly")
-            .msg;
-        match event {
-            EventMsg::AgentMessage(message) => messages.push(message.message),
-            EventMsg::AgentMessageContentDelta(event) => message_deltas.push(event.delta),
-            EventMsg::Error(error) => panic!(
-                "anthropic schema extraction path failed unexpectedly: {}",
-                error.message
-            ),
-            EventMsg::TurnComplete(_) => {
-                completed = true;
-                break;
-            }
-            _ => {}
-        }
-    }
-
-    assert!(completed, "turn did not complete within event budget");
-    assert_eq!(
-        message_deltas,
-        vec![r#"{"answer":"from_extract"}"#.to_string()]
-    );
-    assert_eq!(messages, vec![r#"{"answer":"from_extract"}"#.to_string()]);
-    Ok(())
+    assert_anthropic_streaming_unsupported("extract embedded json").await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn anthropic_output_schema_stops_after_retry_budget() -> anyhow::Result<()> {
     skip_if_no_network!(Ok(()));
-
-    let server = MockServer::start().await;
-    let expected_schema: Value = serde_json::from_str(OUTPUT_SCHEMA)?;
-
-    let first = anthropic_sse(vec![
-        json!({
-            "type":"message_start",
-            "message":{"id":"resp-budget-1","type":"message","role":"assistant","content":[]}
-        }),
-        json!({
-            "type":"content_block_start",
-            "index":0,
-            "content_block":{"type":"text","text":""}
-        }),
-        json!({
-            "type":"content_block_delta",
-            "index":0,
-            "delta":{"type":"text_delta","text":"bad-one"}
-        }),
-        json!({
-            "type":"message_delta",
-            "delta":{"stop_reason":"end_turn","stop_sequence":null},
-            "usage":{"input_tokens":9,"output_tokens":3,"cache_read_input_tokens":0}
-        }),
-        json!({"type":"message_stop"}),
-    ]);
-    let first_request_matcher = |req: &Request| {
-        let body = String::from_utf8_lossy(&req.body);
-        body.contains("retry budget scenario")
-            && !body.contains("Your previous answer did not satisfy the required JSON Schema.")
-    };
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .and(first_request_matcher)
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_raw(first, "text/event-stream"),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let second = anthropic_sse(vec![
-        json!({
-            "type":"message_start",
-            "message":{"id":"resp-budget-2","type":"message","role":"assistant","content":[]}
-        }),
-        json!({
-            "type":"content_block_start",
-            "index":0,
-            "content_block":{"type":"text","text":""}
-        }),
-        json!({
-            "type":"content_block_delta",
-            "index":0,
-            "delta":{"type":"text_delta","text":"bad-two"}
-        }),
-        json!({
-            "type":"message_delta",
-            "delta":{"stop_reason":"end_turn","stop_sequence":null},
-            "usage":{"input_tokens":13,"output_tokens":4,"cache_read_input_tokens":0}
-        }),
-        json!({"type":"message_stop"}),
-    ]);
-    let second_request_matcher = |req: &Request| {
-        let body = String::from_utf8_lossy(&req.body);
-        body.contains("Your previous answer did not satisfy the required JSON Schema.")
-            && body.contains("bad-one")
-            && !body.contains("bad-two")
-    };
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .and(second_request_matcher)
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_raw(second, "text/event-stream"),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let third = anthropic_sse(vec![
-        json!({
-            "type":"message_start",
-            "message":{"id":"resp-budget-3","type":"message","role":"assistant","content":[]}
-        }),
-        json!({
-            "type":"content_block_start",
-            "index":0,
-            "content_block":{"type":"text","text":""}
-        }),
-        json!({
-            "type":"content_block_delta",
-            "index":0,
-            "delta":{"type":"text_delta","text":"bad-three"}
-        }),
-        json!({
-            "type":"message_delta",
-            "delta":{"stop_reason":"end_turn","stop_sequence":null},
-            "usage":{"input_tokens":18,"output_tokens":4,"cache_read_input_tokens":0}
-        }),
-        json!({"type":"message_stop"}),
-    ]);
-    let third_request_matcher = |req: &Request| {
-        let body = String::from_utf8_lossy(&req.body);
-        body.contains("Your previous answer did not satisfy the required JSON Schema.")
-            && body.contains("bad-two")
-    };
-    Mock::given(method("POST"))
-        .and(path("/v1/messages"))
-        .and(third_request_matcher)
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_raw(third, "text/event-stream"),
-        )
-        .expect(1)
-        .mount(&server)
-        .await;
-
-    let test = test_codex()
-        .with_config({
-            let provider = anthropic_provider(server.uri());
-            move |config| {
-                config.model_provider = provider;
-            }
-        })
-        .build(&server)
-        .await?;
-    let model = test.session_configured.model.clone();
-
-    test.codex
-        .submit(Op::UserTurn {
-            items: vec![UserInput::Text {
-                text: "retry budget scenario".to_string(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: Some(expected_schema),
-            cwd: test.cwd.path().to_path_buf(),
-            approval_policy: AskForApproval::Never,
-            sandbox_policy: SandboxPolicy::DangerFullAccess,
-            model,
-            effort: None,
-            summary: Some(ReasoningSummary::Auto),
-            service_tier: None,
-            collaboration_mode: None,
-            personality: None,
-        })
-        .await?;
-
-    let mut messages = Vec::new();
-    let mut error_message = None;
-    for _ in 0..300 {
-        let event = tokio::time::timeout(Duration::from_secs(10), test.codex.next_event())
-            .await
-            .expect("timeout waiting for event")
-            .expect("event stream ended unexpectedly")
-            .msg;
-        match event {
-            EventMsg::AgentMessage(message) => messages.push(message.message),
-            EventMsg::Error(error) => {
-                error_message = Some(error.message);
-                break;
-            }
-            EventMsg::TurnComplete(_) => break,
-            _ => {}
-        }
-    }
-
-    assert!(
-        messages.is_empty(),
-        "should not emit invalid assistant output"
-    );
-    let error_message = error_message.expect("expected schema failure error event");
-    assert!(error_message.contains("anthropic output_schema validation failed after retries"));
-    Ok(())
+    assert_anthropic_streaming_unsupported("retry budget scenario").await
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

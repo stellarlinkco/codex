@@ -1940,7 +1940,7 @@ fn search_tool_requires_model_capability_only() {
         windows_sandbox_level: WindowsSandboxLevel::Disabled,
     });
     let (tools, _) = build_specs(&tools_config, None, app_tools.clone(), &[]).build();
-    assert_lacks_tool_name(&tools, TOOL_SEARCH_TOOL_NAME);
+    assert_contains_tool_names(&tools, &[TOOL_SEARCH_TOOL_NAME]);
     let available_models = Vec::new();
     let tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_info: &model_info,

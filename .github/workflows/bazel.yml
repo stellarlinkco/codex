@@ -172,6 +172,7 @@ jobs:
           # (for example aws-lc-sys invoking cmake/compiler toolchain helpers) to
           # resolve the runner's standard PATH.
           bazel_args+=("--action_env=PATH=${PATH}")
+          bazel_args+=("--test_env=RUST_MIN_STACK=67108864")
 
           if [[ "${RUNNER_OS:-}" != "Windows" ]]; then
             # Bazel test sandboxes on macOS may resolve an older Homebrew `node`

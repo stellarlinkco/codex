@@ -3716,91 +3716,93 @@ fn team_cleanup_removes_worktrees_when_members_are_already_shutdown() {
     });
 }
 
-#[tokio::test]
-async fn wait_team_any_returns_triggered_member() {
-    let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
+#[test]
+fn wait_team_any_returns_triggered_member() {
+    run_with_large_stack(async {
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
+        let session = Arc::new(session);
+        let turn = Arc::new(turn);
 
-    let spawn_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "spawn_team",
-        function_payload(json!({
-            "members": [
-                {"name": "worker", "task": "do work"}
-            ]
-        })),
-    );
-    let spawn_output = MultiAgentHandler
-        .handle(spawn_invocation)
-        .await
-        .expect("spawn_team should succeed");
-    let FunctionToolOutput {
-        body: FunctionCallOutputBody::Text(spawn_content),
-        ..
-    } = spawn_output
-    else {
-        panic!("expected function output");
-    };
-    let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-    let member = &spawn_result.members[0];
-    let member_id = agent_id(&member.agent_id).expect("valid agent id");
-    let _ = manager
-        .agent_control()
-        .shutdown_agent(member_id)
-        .await
-        .expect("shutdown spawned team member");
+        let spawn_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "spawn_team",
+            function_payload(json!({
+                "members": [
+                    {"name": "worker", "task": "do work"}
+                ]
+            })),
+        );
+        let spawn_output = MultiAgentHandler
+            .handle(spawn_invocation)
+            .await
+            .expect("spawn_team should succeed");
+        let FunctionToolOutput {
+            body: FunctionCallOutputBody::Text(spawn_content),
+            ..
+        } = spawn_output
+        else {
+            panic!("expected function output");
+        };
+        let spawn_result: SpawnTeamResult =
+            serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
+        let member = &spawn_result.members[0];
+        let member_id = agent_id(&member.agent_id).expect("valid agent id");
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(member_id)
+            .await
+            .expect("shutdown spawned team member");
 
-    let wait_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "wait_team",
-        function_payload(json!({
-            "team_id": spawn_result.team_id,
-            "mode": "any",
-            "timeout_ms": 1_000
-        })),
-    );
-    let wait_output = MultiAgentHandler
-        .handle(wait_invocation)
-        .await
-        .expect("wait_team should succeed");
-    let FunctionToolOutput {
-        body: FunctionCallOutputBody::Text(wait_content),
-        ..
-    } = wait_output
-    else {
-        panic!("expected function output");
-    };
-    let wait_result: WaitTeamResult =
-        serde_json::from_str(&wait_content).expect("wait_team result should be json");
-    assert_eq!(wait_result.completed, true);
-    assert!(matches!(wait_result.mode, WaitTeamMode::Any));
-    let triggered = wait_result
-        .triggered_member
-        .expect("any mode should set triggered_member");
-    assert_eq!(triggered.name, "worker".to_string());
-    assert_eq!(triggered.agent_id, member.agent_id);
-    assert_eq!(wait_result.member_statuses.len(), 1);
-    assert_eq!(wait_result.member_statuses[0].name, "worker".to_string());
-    assert_eq!(wait_result.member_statuses[0].agent_id, member.agent_id);
+        let wait_invocation = invocation(
+            session.clone(),
+            turn.clone(),
+            "wait_team",
+            function_payload(json!({
+                "team_id": spawn_result.team_id,
+                "mode": "any",
+                "timeout_ms": 1_000
+            })),
+        );
+        let wait_output = MultiAgentHandler
+            .handle(wait_invocation)
+            .await
+            .expect("wait_team should succeed");
+        let FunctionToolOutput {
+            body: FunctionCallOutputBody::Text(wait_content),
+            ..
+        } = wait_output
+        else {
+            panic!("expected function output");
+        };
+        let wait_result: WaitTeamResult =
+            serde_json::from_str(&wait_content).expect("wait_team result should be json");
+        assert_eq!(wait_result.completed, true);
+        assert!(matches!(wait_result.mode, WaitTeamMode::Any));
+        let triggered = wait_result
+            .triggered_member
+            .expect("any mode should set triggered_member");
+        assert_eq!(triggered.name, "worker".to_string());
+        assert_eq!(triggered.agent_id, member.agent_id);
+        assert_eq!(wait_result.member_statuses.len(), 1);
+        assert_eq!(wait_result.member_statuses[0].name, "worker".to_string());
+        assert_eq!(wait_result.member_statuses[0].agent_id, member.agent_id);
 
-    let close_invocation = invocation(
-        session,
-        turn,
-        "close_team",
-        function_payload(json!({
-            "team_id": spawn_result.team_id
-        })),
-    );
-    MultiAgentHandler
-        .handle(close_invocation)
-        .await
-        .expect("close_team should clean up");
+        let close_invocation = invocation(
+            session,
+            turn,
+            "close_team",
+            function_payload(json!({
+                "team_id": spawn_result.team_id
+            })),
+        );
+        MultiAgentHandler
+            .handle(close_invocation)
+            .await
+            .expect("close_team should clean up");
+    });
 }
 
 #[test]

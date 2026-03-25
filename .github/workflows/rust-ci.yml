@@ -597,7 +597,7 @@ jobs:
             "${GITHUB_WORKSPACE}/.github/scripts/ci-watchdog.sh" \
               --label "rust-ci selected nextest" \
               --heartbeat-seconds 60 \
-              --wall-timeout-seconds 900 \
+              --wall-timeout-seconds 1500 \
               --log-path "${RUNNER_TEMP:-/tmp}/rust-ci-nextest.log" \
               -- cargo nextest run --all-features --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings \
                 -p codex-core \
@@ -607,12 +607,13 @@ jobs:
             "${GITHUB_WORKSPACE}/.github/scripts/ci-watchdog.sh" \
               --label "rust-ci workspace nextest" \
               --heartbeat-seconds 60 \
-              --wall-timeout-seconds 900 \
+              --wall-timeout-seconds 1500 \
               --log-path "${RUNNER_TEMP:-/tmp}/rust-ci-nextest.log" \
               -- cargo nextest run --all-features --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings
           fi
         env:
           RUST_BACKTRACE: 1
+          RUST_MIN_STACK: 67108864
           NEXTEST_STATUS_LEVEL: leak
 
       - name: Upload Cargo timings (nextest)

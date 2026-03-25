@@ -94,7 +94,7 @@ fn wait_for_file_source(path: &Path) -> Result<String> {
     let quoted_path = shlex::try_join([path.to_string_lossy().as_ref()])?;
     let command = format!("if [ -f {quoted_path} ]; then printf ready; fi");
     Ok(format!(
-        r#"while ((await tools.exec_command({{ cmd: {command:?} }})).output !== "ready") {{
+        r#"while (!(await tools.exec_command({{ cmd: {command:?} }})).includes("ready")) {{
 }}"#
     ))
 }
@@ -249,7 +249,7 @@ async fn code_mode_can_return_exec_command_output() -> Result<()> {
         &server,
         "use exec to run exec_command",
         r#"
-text(JSON.stringify(await tools.exec_command({ cmd: "printf code_mode_exec_marker" })));
+text(await tools.exec_command({ cmd: "printf code_mode_exec_marker" }));
 "#,
         false,
     )
@@ -265,20 +265,18 @@ text(JSON.stringify(await tools.exec_command({ cmd: "printf code_mode_exec_marke
         ),
         text_item(&items, 0),
     );
-    let parsed: Value = serde_json::from_str(text_item(&items, 1))?;
-    assert!(
-        parsed
-            .get("chunk_id")
-            .and_then(Value::as_str)
-            .is_some_and(|chunk_id| !chunk_id.is_empty())
+    assert_regex_match(
+        concat!(
+            r"(?s)\A",
+            r"Chunk ID: .+\n",
+            r"Wall time: \d+\.\d{4} seconds\n",
+            r"Process exited with code 0\n",
+            r"Original token count: \d+\n",
+            r"Output:\n",
+            r"code_mode_exec_marker\z"
+        ),
+        text_item(&items, 1),
     );
-    assert_eq!(
-        parsed.get("output").and_then(Value::as_str),
-        Some("code_mode_exec_marker"),
-    );
-    assert_eq!(parsed.get("exit_code").and_then(Value::as_i64), Some(0));
-    assert!(parsed.get("wall_time_seconds").is_some());
-    assert!(parsed.get("session_id").is_none());
 
     Ok(())
 }
@@ -328,7 +326,7 @@ async fn code_mode_only_can_call_nested_tools() -> Result<()> {
                 "exec",
                 r#"
 const output = await tools.exec_command({ cmd: "printf code_mode_only_nested_tool_marker" });
-text(output.output);
+text(output);
 "#,
             ),
             ev_completed("resp-1"),
@@ -358,7 +356,7 @@ text(output.output);
         Some(false),
         "code_mode_only nested tool call failed unexpectedly: {output}"
     );
-    assert_eq!(output, "code_mode_only_nested_tool_marker");
+    assert!(output.contains("code_mode_only_nested_tool_marker"));
 
     Ok(())
 }
