@@ -666,6 +666,7 @@ mod tests {
     use super::HandoffOutput;
     use super::RealtimeHandoffState;
     use super::realtime_text_from_handoff_request;
+    use crate::config::RealtimeWsVersion;
     use async_channel::bounded;
     use codex_protocol::protocol::RealtimeHandoffMessage;
     use codex_protocol::protocol::RealtimeHandoffRequested;
@@ -722,7 +723,7 @@ mod tests {
     #[tokio::test]
     async fn clears_active_handoff_explicitly() {
         let (tx, _rx) = bounded(1);
-        let state = RealtimeHandoffState::new(tx);
+        let state = RealtimeHandoffState::new(tx, RealtimeWsVersion::V1);
 
         *state.active_handoff.lock().await = Some("handoff_1".to_string());
         assert_eq!(
@@ -737,7 +738,7 @@ mod tests {
     #[tokio::test]
     async fn sends_multiple_handoff_outputs_until_cleared() {
         let (tx, rx) = bounded(4);
-        let state = RealtimeHandoffState::new(tx);
+        let state = RealtimeHandoffState::new(tx, RealtimeWsVersion::V1);
 
         state
             .send_output("ignored".to_string())
