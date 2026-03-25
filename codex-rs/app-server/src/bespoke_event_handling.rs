@@ -2760,7 +2760,13 @@ mod tests {
             ..Default::default()
         };
         let cases = vec![
-            (serde_json::json!({}), CorePermissionProfile::default()),
+            (
+                serde_json::json!({}),
+                CorePermissionProfile {
+                    macos: Some(MacOsSeatbeltProfileExtensions::default()),
+                    ..Default::default()
+                },
+            ),
             (
                 serde_json::json!({
                     "preferences": "read_only",
@@ -2784,7 +2790,7 @@ mod tests {
                 }),
                 CorePermissionProfile {
                     macos: Some(MacOsSeatbeltProfileExtensions {
-                        macos_preferences: MacOsPreferencesPermission::None,
+                        macos_preferences: MacOsPreferencesPermission::ReadOnly,
                         macos_automation: MacOsAutomationPermission::BundleIds(vec![
                             "com.apple.Notes".to_string(),
                         ]),
@@ -2801,7 +2807,7 @@ mod tests {
                 }),
                 CorePermissionProfile {
                     macos: Some(MacOsSeatbeltProfileExtensions {
-                        macos_preferences: MacOsPreferencesPermission::None,
+                        macos_preferences: MacOsPreferencesPermission::ReadOnly,
                         macos_automation: MacOsAutomationPermission::None,
                         macos_accessibility: true,
                         macos_calendar: false,
@@ -2816,7 +2822,7 @@ mod tests {
                 }),
                 CorePermissionProfile {
                     macos: Some(MacOsSeatbeltProfileExtensions {
-                        macos_preferences: MacOsPreferencesPermission::None,
+                        macos_preferences: MacOsPreferencesPermission::ReadOnly,
                         macos_automation: MacOsAutomationPermission::None,
                         macos_accessibility: false,
                         macos_calendar: true,

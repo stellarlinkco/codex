@@ -1077,8 +1077,8 @@ impl From<AdditionalFileSystemPermissions> for CoreFileSystemPermissions {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, Eq, JsonSchema, TS)]
-#[serde(rename_all = "camelCase")]
+#[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema, TS)]
+#[serde(default, rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct AdditionalMacOsPermissions {
     pub preferences: CoreMacOsPreferencesPermission,
@@ -1210,6 +1210,9 @@ pub struct GrantedPermissionProfile {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub file_system: Option<AdditionalFileSystemPermissions>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub macos: Option<AdditionalMacOsPermissions>,
 }
 
 impl From<GrantedPermissionProfile> for CorePermissionProfile {
@@ -1217,7 +1220,7 @@ impl From<GrantedPermissionProfile> for CorePermissionProfile {
         Self {
             network: value.network.map(CoreNetworkPermissions::from),
             file_system: value.file_system.map(CoreFileSystemPermissions::from),
-            macos: None,
+            macos: value.macos.map(CoreMacOsSeatbeltProfileExtensions::from),
         }
     }
 }
@@ -6320,7 +6323,7 @@ mod tests {
     }
 
     #[test]
-    fn permissions_request_approval_response_uses_granted_permission_profile_without_macos() {
+    fn permissions_request_approval_response_uses_granted_permission_profile_with_macos() {
         let read_only_path = if cfg!(windows) {
             r"C:\tmp\read-only"
         } else {
@@ -6339,6 +6342,15 @@ mod tests {
                 "fileSystem": {
                     "read": [read_only_path],
                     "write": [read_write_path],
+                },
+                "macos": {
+                    "preferences": "read_only",
+                    "automations": "none",
+                    "launchServices": false,
+                    "accessibility": false,
+                    "calendar": false,
+                    "reminders": false,
+                    "contacts": "none",
                 },
             },
         }))
@@ -6360,6 +6372,15 @@ mod tests {
                             .expect("path must be absolute"),
                     ]),
                 }),
+                macos: Some(AdditionalMacOsPermissions {
+                    preferences: CoreMacOsPreferencesPermission::ReadOnly,
+                    automations: CoreMacOsAutomationPermission::None,
+                    launch_services: false,
+                    accessibility: false,
+                    calendar: false,
+                    reminders: false,
+                    contacts: CoreMacOsContactsPermission::None,
+                }),
             }
         );
 
@@ -6379,7 +6400,15 @@ mod tests {
                             .expect("path must be absolute"),
                     ]),
                 }),
-                macos: None,
+                macos: Some(CoreMacOsSeatbeltProfileExtensions {
+                    macos_preferences: CoreMacOsPreferencesPermission::ReadOnly,
+                    macos_automation: CoreMacOsAutomationPermission::None,
+                    macos_launch_services: false,
+                    macos_accessibility: false,
+                    macos_calendar: false,
+                    macos_reminders: false,
+                    macos_contacts: CoreMacOsContactsPermission::None,
+                }),
             }
         );
     }
@@ -6392,6 +6421,35 @@ mod tests {
         .expect("response should deserialize");
 
         assert_eq!(response.scope, PermissionGrantScope::Turn);
+    }
+
+    #[test]
+    fn permissions_request_approval_response_accepts_partial_macos_permissions() {
+        let response = serde_json::from_value::<PermissionsRequestApprovalResponse>(json!({
+            "permissions": {
+                "macos": {
+                    "preferences": "read_only",
+                },
+            },
+        }))
+        .expect("response should deserialize");
+
+        assert_eq!(
+            response.permissions,
+            GrantedPermissionProfile {
+                network: None,
+                file_system: None,
+                macos: Some(AdditionalMacOsPermissions {
+                    preferences: CoreMacOsPreferencesPermission::ReadOnly,
+                    automations: CoreMacOsAutomationPermission::None,
+                    launch_services: false,
+                    accessibility: false,
+                    calendar: false,
+                    reminders: false,
+                    contacts: CoreMacOsContactsPermission::None,
+                }),
+            }
+        );
     }
 
     #[test]

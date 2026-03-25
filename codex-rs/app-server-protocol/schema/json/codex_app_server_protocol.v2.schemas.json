@@ -140,36 +140,46 @@
     "AdditionalMacOsPermissions": {
       "properties": {
         "accessibility": {
+          "default": false,
           "type": "boolean"
         },
         "automations": {
-          "$ref": "#/definitions/MacOsAutomationPermission"
+          "allOf": [
+            {
+              "$ref": "#/definitions/MacOsAutomationPermission"
+            }
+          ],
+          "default": "none"
         },
         "calendar": {
+          "default": false,
           "type": "boolean"
         },
         "contacts": {
-          "$ref": "#/definitions/MacOsContactsPermission"
+          "allOf": [
+            {
+              "$ref": "#/definitions/MacOsContactsPermission"
+            }
+          ],
+          "default": "none"
         },
         "launchServices": {
+          "default": false,
           "type": "boolean"
         },
         "preferences": {
-          "$ref": "#/definitions/MacOsPreferencesPermission"
+          "allOf": [
+            {
+              "$ref": "#/definitions/MacOsPreferencesPermission"
+            }
+          ],
+          "default": "read_only"
         },
         "reminders": {
+          "default": false,
           "type": "boolean"
         }
       },
-      "required": [
-        "accessibility",
-        "automations",
-        "calendar",
-        "contacts",
-        "launchServices",
-        "preferences",
-        "reminders"
-      ],
       "type": "object"
     },
     "AdditionalNetworkPermissions": {

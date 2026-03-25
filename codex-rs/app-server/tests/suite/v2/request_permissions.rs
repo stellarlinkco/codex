@@ -94,6 +94,7 @@ async fn request_permissions_round_trip() -> Result<()> {
                     read: None,
                     write: Some(vec![requested_writes[0].clone()]),
                 }),
+                macos: None,
             },
             scope: PermissionGrantScope::Turn,
         })?,

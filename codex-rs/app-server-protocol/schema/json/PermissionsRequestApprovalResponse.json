@@ -28,6 +28,51 @@
       },
       "type": "object"
     },
+    "AdditionalMacOsPermissions": {
+      "properties": {
+        "accessibility": {
+          "default": false,
+          "type": "boolean"
+        },
+        "automations": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MacOsAutomationPermission"
+            }
+          ],
+          "default": "none"
+        },
+        "calendar": {
+          "default": false,
+          "type": "boolean"
+        },
+        "contacts": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MacOsContactsPermission"
+            }
+          ],
+          "default": "none"
+        },
+        "launchServices": {
+          "default": false,
+          "type": "boolean"
+        },
+        "preferences": {
+          "allOf": [
+            {
+              "$ref": "#/definitions/MacOsPreferencesPermission"
+            }
+          ],
+          "default": "read_only"
+        },
+        "reminders": {
+          "default": false,
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
     "AdditionalNetworkPermissions": {
       "properties": {
         "enabled": {
@@ -51,6 +96,16 @@
             }
           ]
         },
+        "macos": {
+          "anyOf": [
+            {
+              "$ref": "#/definitions/AdditionalMacOsPermissions"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
         "network": {
           "anyOf": [
             {
@@ -63,6 +118,49 @@
         }
       },
       "type": "object"
+    },
+    "MacOsAutomationPermission": {
+      "oneOf": [
+        {
+          "enum": [
+            "none",
+            "all"
+          ],
+          "type": "string"
+        },
+        {
+          "additionalProperties": false,
+          "properties": {
+            "bundle_ids": {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            }
+          },
+          "required": [
+            "bundle_ids"
+          ],
+          "title": "BundleIdsMacOsAutomationPermission",
+          "type": "object"
+        }
+      ]
+    },
+    "MacOsContactsPermission": {
+      "enum": [
+        "none",
+        "read_only",
+        "read_write"
+      ],
+      "type": "string"
+    },
+    "MacOsPreferencesPermission": {
+      "enum": [
+        "none",
+        "read_only",
+        "read_write"
+      ],
+      "type": "string"
     },
     "PermissionGrantScope": {
       "enum": [

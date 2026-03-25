@@ -962,6 +962,7 @@ mod tests {
                     read: Some(vec![absolute_path("/tmp/readme.txt")]),
                     write: Some(vec![absolute_path("/tmp/out.txt")]),
                 }),
+                macos: None,
             },
         }
     }
