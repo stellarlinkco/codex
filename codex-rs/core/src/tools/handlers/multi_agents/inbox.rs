@@ -10,7 +10,6 @@ use std::io::ErrorKind;
 use std::path::Path;
 use std::path::PathBuf;
 use tokio::io::AsyncBufReadExt;
-use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 
 const TEAM_INBOX_DIR: &str = "inbox";
@@ -131,15 +130,22 @@ pub(super) async fn append_inbox_entry(
     let mut serialized = serde_json::to_string(&entry)
         .map_err(|err| inbox_error("serialize", team_id, receiver_thread_id, err))?;
     serialized.push('\n');
-    let mut file = tokio::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(inbox_path(codex_home, team_id, receiver_thread_id))
-        .await
-        .map_err(|err| inbox_error("open", team_id, receiver_thread_id, err))?;
-    file.write_all(serialized.as_bytes())
-        .await
-        .map_err(|err| inbox_error("append", team_id, receiver_thread_id, err))?;
+    let inbox_path = inbox_path(codex_home, team_id, receiver_thread_id);
+    tokio::task::spawn_blocking(move || -> Result<(), std::io::Error> {
+        use std::io::Write as _;
+
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&inbox_path)?;
+        file.write_all(serialized.as_bytes())?;
+        file.flush()?;
+        file.sync_data()?;
+        Ok(())
+    })
+    .await
+    .map_err(|err| inbox_error("append", team_id, receiver_thread_id, err))?
+    .map_err(|err| inbox_error("append", team_id, receiver_thread_id, err))?;
 
     Ok(entry.id)
 }
