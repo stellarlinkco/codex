@@ -231,10 +231,10 @@ where
                 .thread_stack_size(64 * 1024 * 1024)
                 .enable_all()
                 .build()
-                .expect("build multi-thread runtime");
+                .unwrap_or_else(|err| panic!("build multi-thread runtime: {err}"));
             runtime.block_on(future)
         })
-        .expect("spawn large-stack test thread");
+        .unwrap_or_else(|err| panic!("spawn large-stack test thread: {err}"));
 
     match thread.join() {
         Ok(result) => result,
