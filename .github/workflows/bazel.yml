@@ -28,6 +28,7 @@ jobs:
           #- os: windows-latest
           #  target: x86_64-pc-windows-gnullvm
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
 
     # Configure a human readable name for each job
     name: Local Bazel build on ${{ matrix.os }} for ${{ matrix.target }}
@@ -111,9 +112,9 @@ jobs:
           BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
         shell: bash
         run: |
-          set -o pipefail
+          set -euo pipefail
 
-          bazel_console_log="$(mktemp)"
+          bazel_console_log="${RUNNER_TEMP:-/tmp}/bazel-test-console.log"
 
           print_failed_bazel_test_logs() {
             local console_log="$1"
@@ -179,6 +180,11 @@ jobs:
             bazel_args+=("--test_env=CODEX_JS_REPL_NODE_PATH=${node_bin}")
           fi
 
+          bazel_startup_args=()
+          if [[ -n "${BAZEL_STARTUP_ARGS:-}" ]]; then
+            read -r -a bazel_startup_args <<<"${BAZEL_STARTUP_ARGS}"
+          fi
+
           if [[ -n "${BUILDBUDDY_API_KEY:-}" ]]; then
             echo "BuildBuddy API key is available; using remote Bazel configuration."
             # Work around Bazel 9 remote repo contents cache / overlay materialization failures
@@ -186,13 +192,17 @@ jobs:
             # materializing external repos such as rules_perl). We still use BuildBuddy for
             # remote execution/cache; this only disables the startup-level repo contents cache.
             set +e
-            bazel $BAZEL_STARTUP_ARGS \
-              --noexperimental_remote_repo_contents_cache \
-              --bazelrc=.github/workflows/ci.bazelrc \
-              "${bazel_args[@]}" \
-              "--remote_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY" \
-              2>&1 | tee "$bazel_console_log"
-            bazel_status=${PIPESTATUS[0]}
+            "${GITHUB_WORKSPACE}/.github/scripts/ci-watchdog.sh" \
+              --label "bazel test //..." \
+              --heartbeat-seconds 60 \
+              --wall-timeout-seconds 1920 \
+              --log-path "$bazel_console_log" \
+              -- bazel "${bazel_startup_args[@]}" \
+                --noexperimental_remote_repo_contents_cache \
+                --bazelrc=.github/workflows/ci.bazelrc \
+                "${bazel_args[@]}" \
+                "--remote_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY"
+            bazel_status=$?
             set -e
           else
             echo "BuildBuddy API key is not available; using local Bazel configuration."
@@ -213,13 +223,17 @@ jobs:
             #   https://bazel.build/reference/command-line-reference#common_options-flag--remote_cache
             #   https://bazel.build/reference/command-line-reference#common_options-flag--remote_executor
             set +e
-            bazel $BAZEL_STARTUP_ARGS \
-              --noexperimental_remote_repo_contents_cache \
-              "${bazel_args[@]}" \
-              --remote_cache= \
-              --remote_executor= \
-              2>&1 | tee "$bazel_console_log"
-            bazel_status=${PIPESTATUS[0]}
+            "${GITHUB_WORKSPACE}/.github/scripts/ci-watchdog.sh" \
+              --label "bazel test //..." \
+              --heartbeat-seconds 60 \
+              --wall-timeout-seconds 1920 \
+              --log-path "$bazel_console_log" \
+              -- bazel "${bazel_startup_args[@]}" \
+                --noexperimental_remote_repo_contents_cache \
+                "${bazel_args[@]}" \
+                --remote_cache= \
+                --remote_executor=
+            bazel_status=$?
             set -e
           fi
 

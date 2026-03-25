@@ -388,92 +388,96 @@ async fn spawn_agent_accepts_model_provider_and_model_overrides() {
     assert_eq!(snapshot.model, "gpt-5");
 }
 
-#[tokio::test]
-async fn spawn_agent_accepts_backendground_alias() {
-    #[derive(Debug, Deserialize)]
-    struct SpawnAgentResult {
-        agent_id: String,
-    }
+#[test]
+fn spawn_agent_accepts_backendground_alias() {
+    run_with_large_stack(async move {
+        #[derive(Debug, Deserialize)]
+        struct SpawnAgentResult {
+            agent_id: String,
+        }
 
-    let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
 
-    let invocation = invocation(
-        Arc::new(session),
-        Arc::new(turn),
-        "spawn_agent",
-        function_payload(json!({
-            "message": "inspect this repo",
-            "backendground": true
-        })),
-    );
-    let output = MultiAgentHandler
-        .handle(invocation)
-        .await
-        .expect("spawn_agent should accept backendground alias");
-    let FunctionToolOutput {
-        body: FunctionCallOutputBody::Text(content),
-        ..
-    } = output
-    else {
-        panic!("expected function output");
-    };
-    let result: SpawnAgentResult =
-        serde_json::from_str(&content).expect("spawn_agent result should be json");
-    let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
-    let status = manager.agent_control().get_status(agent_id).await;
-    assert_ne!(status, AgentStatus::NotFound);
+        let invocation = invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "backendground": true
+            })),
+        );
+        let output = MultiAgentHandler
+            .handle(invocation)
+            .await
+            .expect("spawn_agent should accept backendground alias");
+        let FunctionToolOutput {
+            body: FunctionCallOutputBody::Text(content),
+            ..
+        } = output
+        else {
+            panic!("expected function output");
+        };
+        let result: SpawnAgentResult =
+            serde_json::from_str(&content).expect("spawn_agent result should be json");
+        let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
+        let status = manager.agent_control().get_status(agent_id).await;
+        assert_ne!(status, AgentStatus::NotFound);
 
-    let _ = manager
-        .agent_control()
-        .shutdown_agent(agent_id)
-        .await
-        .expect("shutdown spawned agent");
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(agent_id)
+            .await
+            .expect("shutdown spawned agent");
+    });
 }
 
-#[tokio::test]
-async fn spawn_agent_accepts_background_field() {
-    #[derive(Debug, Deserialize)]
-    struct SpawnAgentResult {
-        agent_id: String,
-    }
+#[test]
+fn spawn_agent_accepts_background_field() {
+    run_with_large_stack(async move {
+        #[derive(Debug, Deserialize)]
+        struct SpawnAgentResult {
+            agent_id: String,
+        }
 
-    let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
+        let (mut session, turn) = make_session_and_context().await;
+        let manager = thread_manager();
+        session.services.agent_control = manager.agent_control();
 
-    let invocation = invocation(
-        Arc::new(session),
-        Arc::new(turn),
-        "spawn_agent",
-        function_payload(json!({
-            "message": "inspect this repo",
-            "background": true
-        })),
-    );
-    let output = MultiAgentHandler
-        .handle(invocation)
-        .await
-        .expect("spawn_agent should accept background field");
-    let FunctionToolOutput {
-        body: FunctionCallOutputBody::Text(content),
-        ..
-    } = output
-    else {
-        panic!("expected function output");
-    };
-    let result: SpawnAgentResult =
-        serde_json::from_str(&content).expect("spawn_agent result should be json");
-    let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
-    let status = manager.agent_control().get_status(agent_id).await;
-    assert_ne!(status, AgentStatus::NotFound);
+        let invocation = invocation(
+            Arc::new(session),
+            Arc::new(turn),
+            "spawn_agent",
+            function_payload(json!({
+                "message": "inspect this repo",
+                "background": true
+            })),
+        );
+        let output = MultiAgentHandler
+            .handle(invocation)
+            .await
+            .expect("spawn_agent should accept background field");
+        let FunctionToolOutput {
+            body: FunctionCallOutputBody::Text(content),
+            ..
+        } = output
+        else {
+            panic!("expected function output");
+        };
+        let result: SpawnAgentResult =
+            serde_json::from_str(&content).expect("spawn_agent result should be json");
+        let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
+        let status = manager.agent_control().get_status(agent_id).await;
+        assert_ne!(status, AgentStatus::NotFound);
 
-    let _ = manager
-        .agent_control()
-        .shutdown_agent(agent_id)
-        .await
-        .expect("shutdown spawned agent");
+        let _ = manager
+            .agent_control()
+            .shutdown_agent(agent_id)
+            .await
+            .expect("shutdown spawned agent");
+    });
 }
 
 #[tokio::test]
