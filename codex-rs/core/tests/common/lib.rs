@@ -215,12 +215,17 @@ pub fn fetch_dotslash_file(
 /// temporary directory. Using a per-test directory keeps tests hermetic and
 /// avoids clobbering a developer’s real `~/.codex`.
 pub async fn load_default_config_for_test(codex_home: &TempDir) -> Config {
-    ConfigBuilder::default()
+    let mut config = ConfigBuilder::default()
         .codex_home(codex_home.path().to_path_buf())
         .harness_overrides(default_test_overrides())
         .build()
         .await
-        .expect("defaults for test should always succeed")
+        .expect("defaults for test should always succeed");
+    // The default wiremock/streaming SSE test servers only speak HTTP responses.
+    // Keep websocket transport opt-in so tool/suite tests do not burn retry
+    // backoff waiting for a websocket endpoint that does not exist.
+    config.model_provider.supports_websockets = false;
+    config
 }
 
 #[cfg(target_os = "linux")]

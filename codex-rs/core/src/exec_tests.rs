@@ -225,6 +225,14 @@ fn aggregate_output_keeps_all_bytes_when_uncapped() {
 
 #[test]
 fn full_buffer_capture_policy_disables_caps_and_exec_expiration() {
+    assert_eq!(
+        ExecCapturePolicy::ShellTool.shell_tool_io_drain_timeout(false),
+        Duration::from_millis(SHELL_TOOL_IO_DRAIN_TIMEOUT_MS)
+    );
+    assert_eq!(
+        ExecCapturePolicy::ShellTool.shell_tool_io_drain_timeout(true),
+        Duration::ZERO
+    );
     assert_eq!(ExecCapturePolicy::FullBuffer.retained_bytes_cap(), None);
     assert_eq!(
         ExecCapturePolicy::FullBuffer.io_drain_timeout(),
@@ -316,6 +324,57 @@ async fn exec_full_buffer_capture_keeps_io_drain_timeout_when_descendant_holds_p
     .expect("full-buffer exec should return once the I/O drain guard fires")?;
 
     assert!(!output.timed_out);
+
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn exec_shell_capture_returns_after_timeout_when_detached_descendant_holds_pipe_open()
+-> Result<()> {
+    let temp_dir = tempfile::TempDir::new()?;
+    let script_path = temp_dir.path().join("spawn_detached.py");
+    std::fs::write(
+        &script_path,
+        r#"import subprocess
+import time
+
+subprocess.Popen(["/bin/sh", "-c", "sleep 60"], start_new_session=True)
+time.sleep(60)
+"#,
+    )?;
+
+    let output = tokio::time::timeout(
+        Duration::from_secs(5),
+        exec(
+            ExecParams {
+                command: vec![
+                    "python3".to_string(),
+                    script_path.to_string_lossy().to_string(),
+                ],
+                cwd: temp_dir.path().to_path_buf(),
+                expiration: 200.into(),
+                capture_policy: ExecCapturePolicy::ShellTool,
+                env: std::env::vars().collect(),
+                network: None,
+                sandbox_permissions: SandboxPermissions::UseDefault,
+                windows_sandbox_level: WindowsSandboxLevel::Disabled,
+                windows_sandbox_private_desktop: false,
+                justification: None,
+                arg0: None,
+            },
+            SandboxType::None,
+            &SandboxPolicy::DangerFullAccess,
+            &FileSystemSandboxPolicy::unrestricted(),
+            NetworkSandboxPolicy::Enabled,
+            /*stdout_stream*/ None,
+            /*after_spawn*/ None,
+        ),
+    )
+    .await
+    .expect("shell capture should not hang when a detached descendant holds stdout open")?;
+
+    assert!(output.timed_out);
 
     Ok(())
 }

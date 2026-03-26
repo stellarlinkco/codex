@@ -68,10 +68,11 @@ pub(crate) const MAX_EXEC_OUTPUT_DELTAS_PER_CALL: usize = 10_000;
 // hanging forever. In the normal case, both pipes are closed once the child
 // terminates so the tasks exit quickly. However, if the child process
 // spawned grandchildren that inherited its stdout/stderr file descriptors
-// those pipes may stay open after we `kill` the direct child on timeout.
-// That would cause the `read_capped` tasks to block on `read()`
+// those pipes may stay open after the direct child exits or after we kill it
+// on timeout. That would cause the `read_capped` tasks to block on `read()`
 // indefinitely, effectively hanging the whole agent.
-pub const IO_DRAIN_TIMEOUT_MS: u64 = 2_000; // 2 s should be plenty for local pipes
+pub const IO_DRAIN_TIMEOUT_MS: u64 = 2_000; // full-buffer capture can afford a longer grace window
+const SHELL_TOOL_IO_DRAIN_TIMEOUT_MS: u64 = 250; // shell tools prioritize responsiveness over tail completeness
 
 #[derive(Debug)]
 pub struct ExecParams {
@@ -168,6 +169,14 @@ impl ExecCapturePolicy {
 
     fn io_drain_timeout(self) -> Duration {
         Duration::from_millis(IO_DRAIN_TIMEOUT_MS)
+    }
+
+    fn shell_tool_io_drain_timeout(self, timed_out: bool) -> Duration {
+        match self {
+            Self::ShellTool if timed_out => Duration::ZERO,
+            Self::ShellTool => Duration::from_millis(SHELL_TOOL_IO_DRAIN_TIMEOUT_MS),
+            Self::FullBuffer => self.io_drain_timeout(),
+        }
     }
 
     fn uses_expiration(self) -> bool {
@@ -1014,8 +1023,13 @@ async fn consume_output(
     let mut stdout_handle = stdout_handle;
     let mut stderr_handle = stderr_handle;
 
-    let stdout = await_output(&mut stdout_handle, capture_policy.io_drain_timeout()).await?;
-    let stderr = await_output(&mut stderr_handle, capture_policy.io_drain_timeout()).await?;
+    let io_drain_timeout = capture_policy.shell_tool_io_drain_timeout(timed_out);
+    let (stdout, stderr) = tokio::join!(
+        await_output(&mut stdout_handle, io_drain_timeout),
+        await_output(&mut stderr_handle, io_drain_timeout),
+    );
+    let stdout = stdout?;
+    let stderr = stderr?;
     let aggregated_output = aggregate_output(&stdout, &stderr, retained_bytes_cap);
 
     Ok(RawExecToolCallOutput {

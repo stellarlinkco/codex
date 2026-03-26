@@ -4,6 +4,7 @@ use codex_core::config::AgentRoleConfig;
 use codex_features::Feature;
 use codex_protocol::ThreadId;
 use codex_protocol::openai_models::ReasoningEffort;
+use codex_protocol::protocol::AgentStatus;
 use core_test_support::responses::ResponsesRequest;
 use core_test_support::responses::ev_assistant_message;
 use core_test_support::responses::ev_completed;
@@ -219,18 +220,19 @@ async fn setup_turn_one_with_custom_spawned_child(
     }));
     let test = builder.build(server).await?;
     test.submit_turn(TURN_1_PROMPT).await?;
+    let spawned_id = wait_for_spawned_thread_id(&test).await?;
     if child_response_delay.is_none() && wait_for_parent_notification {
         let _ = wait_for_requests(&child_request_log).await?;
-        let rollout_path = test
-            .codex
-            .rollout_path()
-            .ok_or_else(|| anyhow::anyhow!("expected parent rollout path"))?;
+        let child_thread = test
+            .thread_manager
+            .get_thread(ThreadId::from_string(&spawned_id)?)
+            .await?;
         let deadline = Instant::now() + Duration::from_secs(6);
         loop {
-            let has_notification = tokio::fs::read_to_string(&rollout_path)
-                .await
-                .is_ok_and(|rollout| rollout.contains("<subagent_notification>"));
-            if has_notification {
+            if matches!(
+                child_thread.agent_status().await,
+                AgentStatus::Completed(_) | AgentStatus::Errored(_) | AgentStatus::Shutdown
+            ) {
                 break;
             }
             if Instant::now() >= deadline {
@@ -240,8 +242,8 @@ async fn setup_turn_one_with_custom_spawned_child(
             }
             sleep(Duration::from_millis(10)).await;
         }
+        sleep(Duration::from_millis(50)).await;
     }
-    let spawned_id = wait_for_spawned_thread_id(&test).await?;
 
     Ok((test, spawned_id))
 }

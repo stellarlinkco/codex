@@ -1,38 +1,69 @@
+use std::sync::Arc;
+
 use anyhow::Result;
-use core_test_support::fs_wait;
+use codex_hooks::Hooks;
+use codex_hooks::HooksConfig;
+use codex_hooks::SessionStartRequest;
+use codex_hooks::SessionStartSource;
 use core_test_support::responses::start_mock_server;
 use core_test_support::test_codex::test_codex;
-use std::sync::Arc;
-use std::time::Duration;
+use serde_json::json;
 use tempfile::TempDir;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn config_toml_hooks_loaded_into_session() -> Result<()> {
     let server = start_mock_server().await;
     let home = Arc::new(TempDir::new()?);
-    let marker_path = home.path().join("session_start.marker");
-    let marker_path = marker_path.to_string_lossy();
+    std::fs::write(home.path().join("config.toml"), "")?;
+    std::fs::write(
+        home.path().join("hooks.json"),
+        serde_json::to_vec_pretty(&json!({
+            "hooks": {
+                "SessionStart": [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": "echo loaded"
+                            }
+                        ]
+                    }
+                ]
+            }
+        }))?,
+    )?;
 
-    let config_toml = if cfg!(windows) {
-        format!(
-            "[hooks]\n\n[[hooks.session_start]]\ncommand = ['cmd', '/C', 'echo loaded>>\"{marker_path}\"']\n"
-        )
-    } else {
-        format!(
-            "[hooks]\n\n[[hooks.session_start]]\ncommand = ['sh', '-c', 'echo loaded >> \"{marker_path}\"']\n"
-        )
-    };
-    std::fs::write(home.path().join("config.toml"), config_toml)?;
+    let test = test_codex()
+        .with_home(Arc::clone(&home))
+        .build(&server)
+        .await?;
+    let hooks = Hooks::new(HooksConfig {
+        feature_enabled: true,
+        config_layer_stack: Some(test.config.config_layer_stack.clone()),
+        ..HooksConfig::default()
+    });
 
-    let mut builder = test_codex().with_home(Arc::clone(&home));
-    builder.build(&server).await?;
+    let previews = hooks.preview_session_start(&SessionStartRequest {
+        session_id: test.session_configured.session_id,
+        cwd: test.config.cwd.clone(),
+        transcript_path: None,
+        model: test.session_configured.model,
+        permission_mode: "default".to_string(),
+        source: SessionStartSource::Startup,
+    });
 
-    fs_wait::wait_for_path_exists(
-        home.path().join("session_start.marker"),
-        Duration::from_secs(2),
-    )
-    .await?;
-    let contents = std::fs::read_to_string(home.path().join("session_start.marker"))?;
-    assert!(contents.contains("loaded"));
+    assert_eq!(
+        previews.len(),
+        1,
+        "expected hooks.json session_start hook to be loaded"
+    );
+    assert_eq!(
+        previews[0]
+            .source_path
+            .file_name()
+            .and_then(|name| name.to_str()),
+        Some("hooks.json")
+    );
+
     Ok(())
 }

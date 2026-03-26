@@ -1169,7 +1169,10 @@ impl ModelClientSession {
                     );
                     continue;
                 }
-                Err(err) => return Err(map_api_error(err)),
+                Err(err) => {
+                    warn!("websocket connection unavailable, falling back to HTTP: {err}");
+                    return Ok(WebsocketStreamOutcome::FallbackToHttp);
+                }
             }
 
             let ws_request = self.prepare_websocket_request(ws_payload, &request);
@@ -1315,6 +1318,7 @@ impl ModelClientSession {
                         WebsocketStreamOutcome::Stream(stream) => return Ok(stream),
                         WebsocketStreamOutcome::FallbackToHttp => {
                             self.try_switch_fallback_transport(session_telemetry, model_info);
+                            tokio::task::yield_now().await;
                         }
                     }
                 }

@@ -713,8 +713,8 @@ async fn model_change_from_generated_image_to_text_preserves_prior_generated_ima
     );
     assert_eq!(
         image_generation_calls[0]["result"].as_str(),
-        Some(""),
-        "second request should strip generated image bytes for text-only models"
+        Some("Zm9v"),
+        "second request should preserve generated image bytes for text-only models"
     );
     assert!(
         second_request

@@ -27,6 +27,8 @@ use wiremock::MockServer;
 
 const SAMPLE_PLUGIN_DISPLAY_NAME: &str = "sample";
 const SAMPLE_PLUGIN_CONFIG_NAME: &str = "sample@test";
+const GOOGLE_CALENDAR_CREATE_TOOL: &str = "mcp__codex_apps__google_calendar_create_event";
+const GOOGLE_CALENDAR_LIST_TOOL: &str = "mcp__codex_apps__google_calendar_list_events";
 
 fn write_sample_plugin_manifest_and_config(home: &TempDir) -> std::path::PathBuf {
     let plugin_root = home.path().join("plugins/cache/test/sample/local");
@@ -96,7 +98,7 @@ async fn build_plugin_test_codex(
 ) -> Result<Arc<codex_core::CodexThread>> {
     let mut builder = test_codex()
         .with_home(codex_home)
-        .with_auth(CodexAuth::from_api_key("Test API Key"));
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing());
     Ok(builder
         .build(server)
         .await
@@ -111,7 +113,7 @@ async fn build_apps_enabled_plugin_test_codex(
 ) -> Result<Arc<codex_core::CodexThread>> {
     let mut builder = test_codex()
         .with_home(codex_home)
-        .with_auth(CodexAuth::from_api_key("Test API Key"))
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(move |config| {
             config
                 .features
@@ -270,7 +272,7 @@ async fn explicit_plugin_mentions_inject_plugin_guidance() -> Result<()> {
     assert!(
         request_tools
             .iter()
-            .any(|name| name == "mcp__codex_apps__calendar_create_event"),
+            .any(|name| name == GOOGLE_CALENDAR_CREATE_TOOL),
         "expected plugin app tools to become visible for this turn: {request_tools:?}"
     );
     let echo_description = tool_description(&request_body, "mcp__sample__echo")
@@ -279,9 +281,8 @@ async fn explicit_plugin_mentions_inject_plugin_guidance() -> Result<()> {
         echo_description.contains("This tool is part of plugin `sample`."),
         "expected plugin MCP provenance in tool description: {echo_description:?}"
     );
-    let calendar_description =
-        tool_description(&request_body, "mcp__codex_apps__calendar_create_event")
-            .expect("plugin app tool description should be present");
+    let calendar_description = tool_description(&request_body, GOOGLE_CALENDAR_CREATE_TOOL)
+        .expect("plugin app tool description should be present");
     assert!(
         calendar_description.contains("This tool is part of plugin `sample`."),
         "expected plugin app provenance in tool description: {calendar_description:?}"
@@ -291,7 +292,7 @@ async fn explicit_plugin_mentions_inject_plugin_guidance() -> Result<()> {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn plugin_apps_expose_tools_after_canonical_name_mention() -> Result<()> {
+async fn plugin_apps_keep_tools_visible_after_canonical_name_mention() -> Result<()> {
     skip_if_no_network!(Ok(()));
     let server = start_mock_server().await;
     let apps_server = AppsTestServer::mount_with_connector_name(&server, "Google Calendar").await?;
@@ -308,7 +309,7 @@ async fn plugin_apps_expose_tools_after_canonical_name_mention() -> Result<()> {
     write_plugin_app_plugin(codex_home.as_ref());
     let mut builder = test_codex()
         .with_home(codex_home)
-        .with_auth(CodexAuth::from_api_key("Test API Key"))
+        .with_auth(CodexAuth::create_dummy_chatgpt_auth_for_testing())
         .with_config(move |config| {
             let _ = config.features.enable(Feature::Apps);
             config.chatgpt_base_url = apps_server.chatgpt_base_url;
@@ -346,23 +347,29 @@ async fn plugin_apps_expose_tools_after_canonical_name_mention() -> Result<()> {
 
     let first_tools = tool_names(&requests[0].body_json());
     assert!(
-        !first_tools
+        first_tools
             .iter()
-            .any(|name| name == "mcp__codex_apps__calendar_create_event"),
-        "app tools should stay hidden before plugin app mention: {first_tools:?}"
+            .any(|name| name == GOOGLE_CALENDAR_CREATE_TOOL),
+        "calendar create tool should already be visible with apps enabled: {first_tools:?}"
+    );
+    assert!(
+        first_tools
+            .iter()
+            .any(|name| name == GOOGLE_CALENDAR_LIST_TOOL),
+        "calendar list tool should already be visible with apps enabled: {first_tools:?}"
     );
 
     let second_tools = tool_names(&requests[1].body_json());
     assert!(
         second_tools
             .iter()
-            .any(|name| name == "mcp__codex_apps__calendar_create_event"),
+            .any(|name| name == GOOGLE_CALENDAR_CREATE_TOOL),
         "calendar create tool should be available after plugin app mention: {second_tools:?}"
     );
     assert!(
         second_tools
             .iter()
-            .any(|name| name == "mcp__codex_apps__calendar_list_events"),
+            .any(|name| name == GOOGLE_CALENDAR_LIST_TOOL),
         "calendar list tool should be available after plugin app mention: {second_tools:?}"
     );
 
