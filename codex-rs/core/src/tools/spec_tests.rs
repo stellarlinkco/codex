@@ -455,6 +455,9 @@ fn test_full_toolset_specs_for_gpt5_codex_unified_exec_web_search() {
         create_write_stdin_tool(),
         PLAN_TOOL.clone(),
         create_request_user_input_tool(CollaborationModesConfig::default()),
+        create_cron_create_tool(),
+        create_cron_list_tool(),
+        create_cron_delete_tool(),
         create_apply_patch_freeform_tool(),
         ToolSpec::WebSearch {
             external_web_access: Some(true),
@@ -1310,6 +1313,9 @@ fn test_build_specs_gpt51_codex_default() {
         &[
             "update_plan",
             "request_user_input",
+            "CronCreate",
+            "CronList",
+            "CronDelete",
             "apply_patch",
             "web_search",
             "view_image",
@@ -1415,6 +1421,9 @@ fn test_codex_5_1_mini_defaults() {
         &[
             "update_plan",
             "request_user_input",
+            "CronCreate",
+            "CronList",
+            "CronDelete",
             "apply_patch",
             "web_search",
             "view_image",
