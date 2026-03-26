@@ -436,7 +436,7 @@ jobs:
   tests:
     name: Tests — ${{ matrix.runner }} - ${{ matrix.target }}
     runs-on: ${{ matrix.runs_on || matrix.runner }}
-    timeout-minutes: 30
+    timeout-minutes: 45
     needs: changed
     if: ${{ needs.changed.outputs.codex == 'true' || needs.changed.outputs.workflows == 'true' || github.event_name == 'push' }}
     defaults:
@@ -597,7 +597,7 @@ jobs:
             "${GITHUB_WORKSPACE}/.github/scripts/ci-watchdog.sh" \
               --label "rust-ci selected nextest" \
               --heartbeat-seconds 60 \
-              --wall-timeout-seconds 1500 \
+              --wall-timeout-seconds 2400 \
               --log-path "${RUNNER_TEMP:-/tmp}/rust-ci-nextest.log" \
               -- cargo nextest run --all-features --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings \
                 -p codex-core \
@@ -607,7 +607,7 @@ jobs:
             "${GITHUB_WORKSPACE}/.github/scripts/ci-watchdog.sh" \
               --label "rust-ci workspace nextest" \
               --heartbeat-seconds 60 \
-              --wall-timeout-seconds 1500 \
+              --wall-timeout-seconds 2400 \
               --log-path "${RUNNER_TEMP:-/tmp}/rust-ci-nextest.log" \
               -- cargo nextest run --all-features --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings
           fi

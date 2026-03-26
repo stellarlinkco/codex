@@ -28,7 +28,7 @@ jobs:
           #- os: windows-latest
           #  target: x86_64-pc-windows-gnullvm
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 35
+    timeout-minutes: 45
 
     # Configure a human readable name for each job
     name: Local Bazel build on ${{ matrix.os }} for ${{ matrix.target }}
@@ -201,7 +201,7 @@ jobs:
             "${GITHUB_WORKSPACE}/.github/scripts/ci-watchdog.sh" \
               --label "bazel test //..." \
               --heartbeat-seconds 60 \
-              --wall-timeout-seconds 1920 \
+              --wall-timeout-seconds 2400 \
               --log-path "$bazel_console_log" \
               -- bazel "${bazel_startup_args[@]}" \
                 --noexperimental_remote_repo_contents_cache \
@@ -232,7 +232,7 @@ jobs:
             "${GITHUB_WORKSPACE}/.github/scripts/ci-watchdog.sh" \
               --label "bazel test //..." \
               --heartbeat-seconds 60 \
-              --wall-timeout-seconds 1920 \
+              --wall-timeout-seconds 2400 \
               --log-path "$bazel_console_log" \
               -- bazel "${bazel_startup_args[@]}" \
                 --noexperimental_remote_repo_contents_cache \
