@@ -25,6 +25,7 @@ use codex_hooks::HookPayload;
 use codex_hooks::HookResultControl;
 use codex_protocol::ThreadId;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::CollabAgentInteractionBeginEvent;
 use codex_protocol::protocol::CollabAgentInteractionEndEvent;
@@ -894,6 +895,7 @@ fn apply_member_model_overrides(
     config: &mut Config,
     model_provider_id: Option<&str>,
     model: Option<&str>,
+    reasoning_effort: Option<ReasoningEffortConfig>,
 ) -> Result<(), FunctionCallError> {
     if let Some(provider_id) = model_provider_id {
         let provider = config
@@ -911,6 +913,10 @@ fn apply_member_model_overrides(
 
     if let Some(model) = model {
         config.model = Some(model.to_string());
+    }
+
+    if let Some(reasoning_effort) = reasoning_effort {
+        config.model_reasoning_effort = Some(reasoning_effort);
     }
 
     Ok(())

@@ -110,9 +110,9 @@ async fn websocket_fallback_switches_to_http_after_retries_exhausted() -> Result
         .count();
 
     // Deferred request prewarm is attempted at startup.
-    // The first turn then makes 3 websocket stream attempts (initial try + 2 retries),
-    // after which fallback activates and the request is replayed over HTTP.
-    assert_eq!(websocket_attempts, 4);
+    // The failed websocket connect now activates HTTP fallback immediately, so the first turn
+    // runs entirely over HTTP with no additional websocket retries.
+    assert_eq!(websocket_attempts, 1);
     assert_eq!(http_attempts, 1);
     assert_eq!(response_mock.requests().len(), 1);
 
@@ -180,11 +180,7 @@ async fn websocket_fallback_hides_first_websocket_retry_stream_error() -> Result
         }
     }
 
-    let expected_stream_errors = if cfg!(debug_assertions) {
-        vec!["Reconnecting... 1/2", "Reconnecting... 2/2"]
-    } else {
-        vec!["Reconnecting... 2/2"]
-    };
+    let expected_stream_errors: Vec<&str> = Vec::new();
     assert_eq!(stream_error_messages, expected_stream_errors);
     assert_eq!(response_mock.requests().len(), 1);
 
@@ -230,11 +226,9 @@ async fn websocket_fallback_is_sticky_across_turns() -> Result<()> {
         .filter(|req| req.method == Method::POST && req.url.path().ends_with("/responses"))
         .count();
 
-    // WebSocket attempts all happen on the first turn:
-    // 1 deferred request prewarm attempt (startup) + 3 stream attempts
-    // (initial try + 2 retries) before fallback.
-    // Fallback is sticky, so the second turn stays on HTTP and adds no websocket attempts.
-    assert_eq!(websocket_attempts, 4);
+    // The startup websocket prewarm failure flips the session into sticky HTTP fallback.
+    // Both turns therefore run over HTTP after the initial prewarm attempt.
+    assert_eq!(websocket_attempts, 1);
     assert_eq!(http_attempts, 2);
     assert_eq!(response_mock.requests().len(), 2);
 

@@ -14,6 +14,7 @@ struct SpawnAgentArgs {
     agent_type: Option<String>,
     model_provider: Option<String>,
     model: Option<String>,
+    reasoning_effort: Option<ReasoningEffortConfig>,
     #[serde(default)]
     fork_context: bool,
     #[serde(default)]
@@ -46,6 +47,7 @@ pub async fn handle(
         .filter(|role| !role.is_empty());
     let model_provider = optional_non_empty(&args.model_provider, "model_provider")?;
     let model = optional_non_empty(&args.model, "model")?;
+    let reasoning_effort = args.reasoning_effort;
     let use_worktree = args.worktree;
     let background = args.background;
     let input_items = parse_collab_input(args.message, args.items)?;
@@ -67,10 +69,10 @@ pub async fn handle(
         turn.as_ref(),
         child_depth,
     )?;
+    apply_member_model_overrides(&mut config, model_provider, model, reasoning_effort)?;
     apply_role_to_config(&mut config, role_name)
         .await
         .map_err(FunctionCallError::RespondToModel)?;
-    apply_member_model_overrides(&mut config, model_provider, model)?;
     apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
     apply_spawn_agent_overrides(&mut config, child_depth);
     let spawn_model = config

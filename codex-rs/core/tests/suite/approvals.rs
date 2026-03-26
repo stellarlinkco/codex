@@ -1326,7 +1326,7 @@ fn scenarios() -> Vec<ScenarioSpec> {
             expectation: Expectation::FileNotCreated {
                 target: TargetPath::Workspace("ro_never.txt"),
                 message_contains: if cfg!(target_os = "linux") {
-                    &["Permission denied"]
+                    &["Permission denied|Read-only file system"]
                 } else {
                     &[
                         "Permission denied|Operation not permitted|operation not permitted|\
@@ -1473,7 +1473,7 @@ fn scenarios() -> Vec<ScenarioSpec> {
             expectation: Expectation::FileNotCreated {
                 target: TargetPath::OutsideWorkspace("ww_never.txt"),
                 message_contains: if cfg!(target_os = "linux") {
-                    &["Permission denied"]
+                    &["Permission denied|Read-only file system"]
                 } else {
                     &[
                         "Permission denied|Operation not permitted|operation not permitted|\
@@ -2364,9 +2364,7 @@ allow_local_binding = true
         .await;
         match event {
             EventMsg::ExecApprovalRequest(approval) => {
-                if approval.command.first().map(std::string::String::as_str)
-                    == Some("network-access")
-                {
+                if approval.network_approval_context.is_some() {
                     break approval;
                 }
                 test.codex
@@ -2504,9 +2502,7 @@ allow_local_binding = true
         .await;
         match event {
             EventMsg::ExecApprovalRequest(approval) => {
-                if approval.command.first().map(std::string::String::as_str)
-                    == Some("network-access")
-                {
+                if approval.network_approval_context.is_some() {
                     panic!(
                         "unexpected network approval request: {:?}",
                         approval.command
