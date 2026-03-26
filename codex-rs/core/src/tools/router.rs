@@ -107,10 +107,12 @@ impl ToolRouter {
     }
 
     pub fn tool_supports_parallel(&self, tool_name: &str) -> bool {
-        self.specs
-            .iter()
-            .filter(|config| config.supports_parallel_tool_calls)
-            .any(|config| config.spec.name() == tool_name)
+        self.specs.iter().any(|config| {
+            config.supports_parallel_tool_calls
+                && (config.spec.name() == tool_name
+                    || (is_shell_parallel_tool_name(tool_name)
+                        && is_shell_parallel_spec_name(config.spec.name())))
+        })
     }
 
     #[instrument(level = "trace", skip_all, err)]
@@ -249,6 +251,20 @@ impl ToolRouter {
 
         self.registry.dispatch_any(invocation).await
     }
+}
+
+fn is_shell_parallel_tool_name(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "shell" | "container.exec" | "local_shell" | "shell_command" | "exec_command"
+    )
+}
+
+fn is_shell_parallel_spec_name(spec_name: &str) -> bool {
+    matches!(
+        spec_name,
+        "shell" | "local_shell" | "shell_command" | "exec_command"
+    )
 }
 #[cfg(test)]
 #[path = "router_tests.rs"]

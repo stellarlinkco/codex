@@ -19,6 +19,9 @@ use crate::tools::discoverable::DiscoverablePluginInfo;
 use crate::tools::discoverable::DiscoverableTool;
 use crate::tools::discoverable::DiscoverableToolAction;
 use crate::tools::discoverable::DiscoverableToolType;
+use crate::tools::handlers::CRON_CREATE_TOOL_NAME;
+use crate::tools::handlers::CRON_DELETE_TOOL_NAME;
+use crate::tools::handlers::CRON_LIST_TOOL_NAME;
 use crate::tools::handlers::PLAN_TOOL;
 use crate::tools::handlers::TOOL_SEARCH_DEFAULT_LIMIT;
 use crate::tools::handlers::TOOL_SEARCH_TOOL_NAME;
@@ -288,6 +291,7 @@ pub(crate) struct ToolsConfig {
     pub multi_agent_v2: bool,
     pub artifact_tools: bool,
     pub request_user_input: bool,
+    pub scheduled_tasks_enabled: bool,
     pub default_mode_request_user_input: bool,
     pub experimental_supported_tools: Vec<String>,
     pub agent_jobs_tools: bool,
@@ -422,6 +426,7 @@ impl ToolsConfig {
             multi_agent_v2: include_multi_agent_v2,
             artifact_tools: include_artifact_tools,
             request_user_input: include_request_user_input,
+            scheduled_tasks_enabled: true,
             default_mode_request_user_input: include_default_mode_request_user_input,
             experimental_supported_tools: model_info.experimental_supported_tools.clone(),
             agent_jobs_tools: include_agent_jobs,
@@ -1795,6 +1800,85 @@ fn create_grep_files_tool() -> ToolSpec {
     })
 }
 
+fn create_cron_create_tool() -> ToolSpec {
+    let properties = BTreeMap::from([
+        (
+            "schedule".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional recurring schedule as a 5-field numeric cron expression in the local timezone: minute hour day-of-month month day-of-week. Example: `0 17 * * 1-5`. Provide either `schedule` or `run_at`.".to_string(),
+                ),
+            },
+        ),
+        (
+            "run_at".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "Optional one-shot run time as an RFC3339 timestamp. Provide either `schedule` or `run_at`.".to_string(),
+                ),
+            },
+        ),
+        (
+            "prompt".to_string(),
+            JsonSchema::String {
+                description: Some(
+                    "The prompt text to enqueue when the scheduled task fires. Scheduled tasks are session-scoped and do not survive process exit.".to_string(),
+                ),
+            },
+        ),
+    ]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: CRON_CREATE_TOOL_NAME.to_string(),
+        description: "Create a session-scoped scheduled task. The scheduler checks roughly once per second, only fires between turns, skips missed backlogs instead of replaying every missed run, and drops runs that are more than three days overdue.".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["prompt".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+        output_schema: None,
+    })
+}
+
+fn create_cron_list_tool() -> ToolSpec {
+    ToolSpec::Function(ResponsesApiTool {
+        name: CRON_LIST_TOOL_NAME.to_string(),
+        description: "List session-scoped scheduled tasks that are still active.".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::Object {
+            properties: BTreeMap::new(),
+            required: Some(Vec::new()),
+            additional_properties: Some(false.into()),
+        },
+        output_schema: None,
+    })
+}
+
+fn create_cron_delete_tool() -> ToolSpec {
+    let properties = BTreeMap::from([(
+        "id".to_string(),
+        JsonSchema::String {
+            description: Some("Identifier returned by CronCreate or CronList.".to_string()),
+        },
+    )]);
+
+    ToolSpec::Function(ResponsesApiTool {
+        name: CRON_DELETE_TOOL_NAME.to_string(),
+        description: "Delete a session-scoped scheduled task by id.".to_string(),
+        strict: false,
+        defer_loading: None,
+        parameters: JsonSchema::Object {
+            properties,
+            required: Some(vec!["id".to_string()]),
+            additional_properties: Some(false.into()),
+        },
+        output_schema: None,
+    })
+}
+
 fn create_tool_search_tool(app_tools: &HashMap<String, ToolInfo>) -> ToolSpec {
     let properties = BTreeMap::from([
         (
@@ -2650,6 +2734,9 @@ pub(crate) fn build_specs_with_discoverable_tools(
     use crate::tools::handlers::ArtifactsHandler;
     use crate::tools::handlers::CodeModeExecuteHandler;
     use crate::tools::handlers::CodeModeWaitHandler;
+    use crate::tools::handlers::CronCreateHandler;
+    use crate::tools::handlers::CronDeleteHandler;
+    use crate::tools::handlers::CronListHandler;
     use crate::tools::handlers::DynamicToolHandler;
     use crate::tools::handlers::GrepFilesHandler;
     use crate::tools::handlers::JsReplHandler;
@@ -2681,6 +2768,9 @@ pub(crate) fn build_specs_with_discoverable_tools(
     let unified_exec_handler = Arc::new(UnifiedExecHandler);
     let plan_handler = Arc::new(PlanHandler);
     let apply_patch_handler = Arc::new(ApplyPatchHandler);
+    let cron_create_handler = Arc::new(CronCreateHandler);
+    let cron_list_handler = Arc::new(CronListHandler);
+    let cron_delete_handler = Arc::new(CronDeleteHandler);
     let dynamic_tool_handler = Arc::new(DynamicToolHandler);
     let view_image_handler = Arc::new(ViewImageHandler);
     let mcp_handler = Arc::new(McpHandler);
@@ -2858,6 +2948,30 @@ pub(crate) fn build_specs_with_discoverable_tools(
             config.code_mode_enabled,
         );
         builder.register_handler("request_user_input", request_user_input_handler);
+    }
+
+    if config.scheduled_tasks_enabled {
+        push_tool_spec(
+            &mut builder,
+            create_cron_create_tool(),
+            /*supports_parallel_tool_calls*/ false,
+            config.code_mode_enabled,
+        );
+        push_tool_spec(
+            &mut builder,
+            create_cron_list_tool(),
+            /*supports_parallel_tool_calls*/ false,
+            config.code_mode_enabled,
+        );
+        push_tool_spec(
+            &mut builder,
+            create_cron_delete_tool(),
+            /*supports_parallel_tool_calls*/ false,
+            config.code_mode_enabled,
+        );
+        builder.register_handler(CRON_CREATE_TOOL_NAME, cron_create_handler);
+        builder.register_handler(CRON_LIST_TOOL_NAME, cron_list_handler);
+        builder.register_handler(CRON_DELETE_TOOL_NAME, cron_delete_handler);
     }
 
     if config.request_permissions_tool_enabled {

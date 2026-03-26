@@ -277,6 +277,7 @@ use crate::rollout::RolloutRecorderParams;
 use crate::rollout::map_session_init_error;
 use crate::rollout::metadata;
 use crate::rollout::policy::EventPersistenceMode;
+use crate::scheduled_tasks::cron_tools_enabled;
 use crate::session_startup_prewarm::SessionStartupPrewarmHandle;
 use crate::shell;
 use crate::shell_snapshot::ShellSnapshot;
@@ -886,7 +887,7 @@ impl TurnContext {
             /*developer_instructions*/ None,
         );
         let features = self.features.clone();
-        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
             model_info: &model_info,
             available_models: &models_manager
                 .list_models(RefreshStrategy::OnlineIfUncached)
@@ -896,11 +897,13 @@ impl TurnContext {
             session_source: self.session_source.clone(),
             sandbox_policy: self.sandbox_policy.get(),
             windows_sandbox_level: self.windows_sandbox_level,
-        })
-        .with_unified_exec_shell_mode(self.tools_config.unified_exec_shell_mode.clone())
-        .with_web_search_config(self.tools_config.web_search_config.clone())
-        .with_allow_login_shell(self.tools_config.allow_login_shell)
-        .with_agent_roles(config.agent_roles.clone());
+        });
+        tools_config.scheduled_tasks_enabled = cron_tools_enabled(&config);
+        let tools_config = tools_config
+            .with_unified_exec_shell_mode(self.tools_config.unified_exec_shell_mode.clone())
+            .with_web_search_config(self.tools_config.web_search_config.clone())
+            .with_allow_login_shell(self.tools_config.allow_login_shell)
+            .with_agent_roles(config.agent_roles.clone());
 
         Self {
             sub_id: self.sub_id.clone(),
@@ -1320,7 +1323,7 @@ impl Session {
         let session_telemetry_for_context = session_telemetry;
         let per_turn_config = Arc::new(per_turn_config);
 
-        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+        let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
             model_info: &model_info,
             available_models: &models_manager.try_list_models().unwrap_or_default(),
             features: &per_turn_config.features,
@@ -1328,15 +1331,17 @@ impl Session {
             session_source: session_source.clone(),
             sandbox_policy: session_configuration.sandbox_policy.get(),
             windows_sandbox_level: session_configuration.windows_sandbox_level,
-        })
-        .with_unified_exec_shell_mode_for_session(
-            user_shell,
-            shell_zsh_path,
-            main_execve_wrapper_exe,
-        )
-        .with_web_search_config(per_turn_config.web_search_config.clone())
-        .with_allow_login_shell(per_turn_config.permissions.allow_login_shell)
-        .with_agent_roles(per_turn_config.agent_roles.clone());
+        });
+        tools_config.scheduled_tasks_enabled = cron_tools_enabled(per_turn_config.as_ref());
+        let tools_config = tools_config
+            .with_unified_exec_shell_mode_for_session(
+                user_shell,
+                shell_zsh_path,
+                main_execve_wrapper_exe,
+            )
+            .with_web_search_config(per_turn_config.web_search_config.clone())
+            .with_allow_login_shell(per_turn_config.permissions.allow_login_shell)
+            .with_agent_roles(per_turn_config.agent_roles.clone());
 
         let cwd = session_configuration.cwd.clone();
         let turn_metadata_state = Arc::new(TurnMetadataState::new(
@@ -5297,7 +5302,7 @@ async fn spawn_review_thread(
     let _ = review_features.disable(Feature::WebSearchRequest);
     let _ = review_features.disable(Feature::WebSearchCached);
     let review_web_search_mode = WebSearchMode::Disabled;
-    let tools_config = ToolsConfig::new(&ToolsConfigParams {
+    let mut tools_config = ToolsConfig::new(&ToolsConfigParams {
         model_info: &review_model_info,
         available_models: &sess
             .services
@@ -5309,15 +5314,17 @@ async fn spawn_review_thread(
         session_source: parent_turn_context.session_source.clone(),
         sandbox_policy: parent_turn_context.sandbox_policy.get(),
         windows_sandbox_level: parent_turn_context.windows_sandbox_level,
-    })
-    .with_unified_exec_shell_mode_for_session(
-        sess.services.user_shell.as_ref(),
-        sess.services.shell_zsh_path.as_ref(),
-        sess.services.main_execve_wrapper_exe.as_ref(),
-    )
-    .with_web_search_config(/*web_search_config*/ None)
-    .with_allow_login_shell(config.permissions.allow_login_shell)
-    .with_agent_roles(config.agent_roles.clone());
+    });
+    tools_config.scheduled_tasks_enabled = cron_tools_enabled(config.as_ref());
+    let tools_config = tools_config
+        .with_unified_exec_shell_mode_for_session(
+            sess.services.user_shell.as_ref(),
+            sess.services.shell_zsh_path.as_ref(),
+            sess.services.main_execve_wrapper_exe.as_ref(),
+        )
+        .with_web_search_config(/*web_search_config*/ None)
+        .with_allow_login_shell(config.permissions.allow_login_shell)
+        .with_agent_roles(config.agent_roles.clone());
 
     let review_prompt = resolved.prompt.clone();
     let provider = parent_turn_context.provider.clone();

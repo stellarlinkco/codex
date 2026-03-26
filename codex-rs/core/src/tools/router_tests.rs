@@ -5,6 +5,7 @@ use crate::function_tool::FunctionCallError;
 use crate::tools::context::ToolPayload;
 use crate::turn_diff_tracker::TurnDiffTracker;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::openai_models::ConfigShellToolType;
 
 use super::ToolCall;
 use super::ToolCallSource;
@@ -159,6 +160,30 @@ async fn build_tool_call_uses_namespace_for_registry_name() -> anyhow::Result<()
         }
         other => panic!("expected function payload, got {other:?}"),
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn shell_aliases_inherit_parallel_support_from_active_shell_tool() -> anyhow::Result<()> {
+    let (_session, mut turn) = make_session_and_context().await;
+    turn.tools_config.shell_type = ConfigShellToolType::UnifiedExec;
+    let router = ToolRouter::from_config(
+        &turn.tools_config,
+        ToolRouterParams {
+            mcp_tools: None,
+            app_tools: None,
+            discoverable_tools: None,
+            dynamic_tools: turn.dynamic_tools.as_slice(),
+        },
+    );
+
+    assert!(router.tool_supports_parallel("shell"));
+    assert!(router.tool_supports_parallel("container.exec"));
+    assert!(router.tool_supports_parallel("local_shell"));
+    assert!(router.tool_supports_parallel("shell_command"));
+    assert!(router.tool_supports_parallel("exec_command"));
+    assert!(!router.tool_supports_parallel("write_stdin"));
 
     Ok(())
 }
