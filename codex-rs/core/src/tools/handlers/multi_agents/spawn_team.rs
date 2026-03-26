@@ -128,7 +128,12 @@ pub async fn handle(
                 return Err(FunctionCallError::RespondToModel(err));
             }
         }
-        apply_member_model_overrides(&mut config, model_provider, model, None)?;
+        apply_member_model_overrides(
+            &mut config,
+            model_provider,
+            model,
+            /*reasoning_effort*/ None,
+        )?;
         apply_spawn_agent_runtime_overrides(&mut config, turn.as_ref())?;
         apply_spawn_agent_overrides(&mut config, child_depth);
         let worktree_lease = if use_worktree {
