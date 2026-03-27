@@ -698,6 +698,17 @@ where
     }
 }
 
+async fn next_event_before_deadline(test: &TestCodex, deadline: std::time::Instant) -> EventMsg {
+    let remaining = deadline
+        .checked_duration_since(std::time::Instant::now())
+        .expect("timeout waiting for event");
+    tokio::time::timeout(remaining, test.codex.next_event())
+        .await
+        .expect("timeout waiting for event")
+        .expect("stream ended unexpectedly")
+        .msg
+}
+
 async fn wait_for_completion(test: &TestCodex) {
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))
@@ -2384,17 +2395,15 @@ allow_local_binding = true
     let mut first_turn_id: Option<String> = None;
     let mut first_turn_completed_before_network_prompt = false;
     let approval = loop {
-        let remaining = deadline
-            .checked_duration_since(std::time::Instant::now())
-            .unwrap_or_else(|| {
-                let completion_hint = if first_turn_completed_before_network_prompt {
-                    " after observing completion first"
-                } else {
-                    ""
-                };
-                panic!("timed out waiting for network approval request{completion_hint}");
-            });
-        let event = wait_for_event_with_timeout(&test.codex, |_| true, remaining).await;
+        if std::time::Instant::now() >= deadline {
+            let completion_hint = if first_turn_completed_before_network_prompt {
+                " after observing completion first"
+            } else {
+                ""
+            };
+            panic!("timed out waiting for network approval request{completion_hint}");
+        }
+        let event = next_event_before_deadline(&test, deadline).await;
         match event {
             EventMsg::TurnStarted(turn_started) => {
                 first_turn_id.get_or_insert(turn_started.turn_id);
@@ -2532,10 +2541,7 @@ allow_local_binding = true
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut second_turn_id: Option<String> = None;
     loop {
-        let remaining = deadline
-            .checked_duration_since(std::time::Instant::now())
-            .expect("timed out waiting for second turn completion");
-        let event = wait_for_event_with_timeout(&test.codex, |_| true, remaining).await;
+        let event = next_event_before_deadline(&test, deadline).await;
         match event {
             EventMsg::TurnStarted(turn_started) => {
                 second_turn_id.get_or_insert(turn_started.turn_id);
