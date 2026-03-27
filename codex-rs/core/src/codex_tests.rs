@@ -372,6 +372,42 @@ fn validated_network_policy_amendment_host_rejects_mismatch() {
 }
 
 #[tokio::test]
+async fn persist_network_policy_amendment_writes_deny_rule() {
+    let (session, _turn_context) = make_session_and_context().await;
+    let amendment = NetworkPolicyAmendment {
+        host: "example.com".to_string(),
+        action: NetworkPolicyRuleAction::Deny,
+    };
+    let context = NetworkApprovalContext {
+        host: "example.com".to_string(),
+        protocol: NetworkApprovalProtocol::Http,
+    };
+
+    let codex_home = {
+        session
+            .state
+            .lock()
+            .await
+            .session_configuration
+            .codex_home()
+            .clone()
+    };
+    tokio::fs::create_dir_all(&codex_home)
+        .await
+        .expect("recreate codex home for test");
+    session
+        .persist_network_policy_amendment(&amendment, &context)
+        .await
+        .expect("persist deny network policy amendment");
+    let policy_contents = tokio::fs::read_to_string(codex_home.join("rules").join("default.rules"))
+        .await
+        .expect("read persisted policy file");
+    assert!(policy_contents.contains(
+        r#"network_rule(host="example.com", protocol="http", decision="deny", justification="Deny http access to example.com")"#
+    ));
+}
+
+#[tokio::test]
 async fn get_base_instructions_no_user_content() {
     let prompt_with_apply_patch_instructions =
         include_str!("../prompt_with_apply_patch_instructions.md");

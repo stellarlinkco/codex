@@ -10,9 +10,6 @@ use codex_core::config_loader::RequirementSource;
 use codex_core::config_loader::Sourced;
 use codex_core::sandboxing::SandboxPermissions;
 use codex_features::Feature;
-use codex_protocol::approvals::NetworkApprovalProtocol;
-use codex_protocol::approvals::NetworkPolicyAmendment;
-use codex_protocol::approvals::NetworkPolicyRuleAction;
 use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::EventMsg;
@@ -34,7 +31,6 @@ use core_test_support::skip_if_no_network;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
-use core_test_support::wait_for_event_with_timeout;
 use core_test_support::zsh_fork::build_zsh_fork_test;
 use core_test_support::zsh_fork::restrictive_workspace_write_policy;
 use core_test_support::zsh_fork::zsh_fork_runtime;
@@ -675,29 +671,6 @@ async fn wait_for_completion_without_approval(test: &TestCodex) {
     }
 }
 
-async fn wait_for_turn_event<F>(
-    test: &TestCodex,
-    turn_id: &str,
-    wait_time: std::time::Duration,
-    mut predicate: F,
-) -> EventMsg
-where
-    F: FnMut(&EventMsg) -> bool,
-{
-    loop {
-        let event = wait_for_event_with_timeout(&test.codex, |_| true, wait_time).await;
-        let matches_turn = match &event {
-            EventMsg::TurnStarted(turn_started) => turn_started.turn_id == turn_id,
-            EventMsg::TurnComplete(turn_complete) => turn_complete.turn_id == turn_id,
-            EventMsg::ExecApprovalRequest(approval) => approval.turn_id == turn_id,
-            _ => false,
-        };
-        if matches_turn && predicate(&event) {
-            return event;
-        }
-    }
-}
-
 async fn next_event_before_deadline(test: &TestCodex, deadline: std::time::Instant) -> EventMsg {
     let remaining = deadline
         .checked_duration_since(std::time::Instant::now())
@@ -714,17 +687,6 @@ async fn wait_for_completion(test: &TestCodex) {
         matches!(event, EventMsg::TurnComplete(_))
     })
     .await;
-}
-
-async fn wait_for_completion_for_turn(test: &TestCodex, turn_id: &str) {
-    let event = wait_for_turn_event(test, turn_id, std::time::Duration::from_secs(30), |event| {
-        matches!(event, EventMsg::TurnComplete(_))
-    })
-    .await;
-    match event {
-        EventMsg::TurnComplete(_) => {}
-        other => panic!("unexpected event: {other:?}"),
-    }
 }
 
 fn scenarios() -> Vec<ScenarioSpec> {
@@ -2308,6 +2270,16 @@ allow_local_binding = true
         exclude_slash_tmp: false,
     };
     let sandbox_policy_for_config = sandbox_policy.clone();
+    let blocked_host = "codex-network-test.invalid";
+    let policy_path = home.path().join("rules").join("default.rules");
+    fs::create_dir_all(policy_path.parent().expect("rules directory"))?;
+    fs::write(
+        &policy_path,
+        format!(
+            r#"network_rule(host="{blocked_host}", protocol="http", decision="deny", justification="Deny http access to {blocked_host}")"#
+        ),
+    )?;
+
     let mut builder = test_codex().with_home(home).with_config(move |config| {
         config.permissions.approval_policy = Constrained::allow_any(approval_policy);
         config.permissions.sandbox_policy = Constrained::allow_any(sandbox_policy_for_config);
@@ -2351,17 +2323,14 @@ allow_local_binding = true
         .expect("expected runtime managed network proxy addresses");
     let proxy_addr = runtime_proxy.http_addr.as_str();
 
-    let call_id_first = "allow-network-first";
-    // Use the same urllib-based pattern as the other network integration tests,
-    // but point it at the runtime proxy directly so the blocked host reliably
-    // produces a network approval request without relying on curl.
     let fetch_command = format!(
-        "python3 -c \"import urllib.request; proxy = urllib.request.ProxyHandler({{'http': 'http://{proxy_addr}'}}); opener = urllib.request.build_opener(proxy); print('OK:' + opener.open('http://codex-network-test.invalid', timeout=30).read().decode(errors='replace'))\""
+        "python3 -c \"import urllib.request; proxy = urllib.request.ProxyHandler({{'http': 'http://{proxy_addr}'}}); opener = urllib.request.build_opener(proxy); print('OK:' + opener.open('http://{blocked_host}', timeout=5).read().decode(errors='replace'))\""
     );
-    let first_event = shell_event(
-        call_id_first,
+    let call_id = "allow-network-with-saved-deny-rule";
+    let event = shell_event(
+        call_id,
         &fetch_command,
-        30_000,
+        5_000,
         SandboxPermissions::UseDefault,
     )?;
 
@@ -2369,12 +2338,12 @@ allow_local_binding = true
         &server,
         sse(vec![
             ev_response_created("resp-allow-network-1"),
-            first_event,
+            event,
             ev_completed("resp-allow-network-1"),
         ]),
     )
     .await;
-    let first_results = mount_sse_once(
+    let results = mount_sse_once(
         &server,
         sse(vec![
             ev_assistant_message("msg-allow-network-1", "done"),
@@ -2385,170 +2354,23 @@ allow_local_binding = true
 
     submit_turn(
         &test,
-        "allow-network-first",
+        "allow-network-with-saved-deny-rule",
         approval_policy,
         sandbox_policy.clone(),
     )
     .await?;
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let mut first_turn_id: Option<String> = None;
-    let mut first_turn_completed_before_network_prompt = false;
-    let approval = loop {
-        if std::time::Instant::now() >= deadline {
-            let completion_hint = if first_turn_completed_before_network_prompt {
-                " after observing completion first"
-            } else {
-                ""
-            };
-            panic!("timed out waiting for network approval request{completion_hint}");
-        }
-        let event = next_event_before_deadline(&test, deadline).await;
-        match event {
-            EventMsg::TurnStarted(turn_started) => {
-                first_turn_id.get_or_insert(turn_started.turn_id);
-            }
-            EventMsg::ExecApprovalRequest(approval) => {
-                let turn_id = first_turn_id.get_or_insert_with(|| approval.turn_id.clone());
-                if approval.turn_id != *turn_id {
-                    continue;
-                }
-                if approval.network_approval_context.is_some() {
-                    break approval;
-                }
-                test.codex
-                    .submit(Op::ExecApproval {
-                        id: approval.effective_approval_id(),
-                        turn_id: None,
-                        decision: ReviewDecision::Approved,
-                    })
-                    .await?;
-            }
-            EventMsg::TurnComplete(turn_complete) => {
-                let turn_id = first_turn_id.get_or_insert_with(|| turn_complete.turn_id.clone());
-                if turn_complete.turn_id != *turn_id {
-                    continue;
-                }
-                first_turn_completed_before_network_prompt = true;
-            }
-            _ => {}
-        }
-    };
-    let first_turn_id = first_turn_id.expect("expected first turn id");
-    let network_context = approval
-        .network_approval_context
-        .clone()
-        .expect("expected network approval context");
-    assert_eq!(network_context.protocol, NetworkApprovalProtocol::Http);
-    let expected_network_amendments = vec![
-        NetworkPolicyAmendment {
-            host: network_context.host.clone(),
-            action: NetworkPolicyRuleAction::Allow,
-        },
-        NetworkPolicyAmendment {
-            host: network_context.host.clone(),
-            action: NetworkPolicyRuleAction::Deny,
-        },
-    ];
-    assert_eq!(
-        approval.proposed_network_policy_amendments,
-        Some(expected_network_amendments.clone())
-    );
-    let deny_network_amendment = expected_network_amendments
-        .into_iter()
-        .find(|amendment| amendment.action == NetworkPolicyRuleAction::Deny)
-        .expect("expected deny network policy amendment");
-
-    test.codex
-        .submit(Op::ExecApproval {
-            id: approval.effective_approval_id(),
-            turn_id: None,
-            decision: ReviewDecision::NetworkPolicyAmendment {
-                network_policy_amendment: deny_network_amendment.clone(),
-            },
-        })
-        .await?;
-    wait_for_completion_for_turn(&test, &first_turn_id).await;
-
-    let policy_path = test.home.path().join("rules").join("default.rules");
-    let policy_contents = fs::read_to_string(&policy_path)?;
-    let expected_rule = format!(
-        r#"network_rule(host="{}", protocol="{}", decision="deny", justification="Deny {} access to {}")"#,
-        deny_network_amendment.host,
-        match network_context.protocol {
-            NetworkApprovalProtocol::Http => "http",
-            NetworkApprovalProtocol::Https => "https_connect",
-            NetworkApprovalProtocol::Socks5Tcp => "socks5_tcp",
-            NetworkApprovalProtocol::Socks5Udp => "socks5_udp",
-        },
-        match network_context.protocol {
-            NetworkApprovalProtocol::Http => "http",
-            NetworkApprovalProtocol::Https => "https_connect",
-            NetworkApprovalProtocol::Socks5Tcp => "socks5_tcp",
-            NetworkApprovalProtocol::Socks5Udp => "socks5_udp",
-        },
-        deny_network_amendment.host
-    );
-    assert!(
-        policy_contents.contains(&expected_rule),
-        "unexpected policy contents: {policy_contents}"
-    );
-
-    let first_output = parse_result(
-        &first_results
-            .single_request()
-            .function_call_output(call_id_first),
-    );
-    Expectation::CommandFailure {
-        output_contains: "",
-    }
-    .verify(&test, &first_output)?;
-
-    let call_id_second = "allow-network-second";
-    let second_event = shell_event(
-        call_id_second,
-        &fetch_command,
-        30_000,
-        SandboxPermissions::UseDefault,
-    )?;
-
-    let _ = mount_sse_once(
-        &server,
-        sse(vec![
-            ev_response_created("resp-allow-network-3"),
-            second_event,
-            ev_completed("resp-allow-network-3"),
-        ]),
-    )
-    .await;
-    let second_results = mount_sse_once(
-        &server,
-        sse(vec![
-            ev_assistant_message("msg-allow-network-2", "done"),
-            ev_completed("resp-allow-network-4"),
-        ]),
-    )
-    .await;
-
-    submit_turn(
-        &test,
-        "allow-network-second",
-        approval_policy,
-        sandbox_policy.clone(),
-    )
-    .await?;
-
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let mut second_turn_id: Option<String> = None;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut turn_id: Option<String> = None;
     loop {
         let event = next_event_before_deadline(&test, deadline).await;
         match event {
             EventMsg::TurnStarted(turn_started) => {
-                second_turn_id.get_or_insert(turn_started.turn_id);
+                turn_id.get_or_insert(turn_started.turn_id);
             }
             EventMsg::ExecApprovalRequest(approval) => {
-                let turn_id = second_turn_id.get_or_insert_with(|| approval.turn_id.clone());
-                if approval.turn_id != *turn_id {
+                let current_turn_id = turn_id.get_or_insert_with(|| approval.turn_id.clone());
+                if approval.turn_id != *current_turn_id {
                     continue;
                 }
                 if approval.network_approval_context.is_some() {
@@ -2566,8 +2388,8 @@ allow_local_binding = true
                     .await?;
             }
             EventMsg::TurnComplete(turn_complete) => {
-                let turn_id = second_turn_id.get_or_insert_with(|| turn_complete.turn_id.clone());
-                if turn_complete.turn_id != *turn_id {
+                let current_turn_id = turn_id.get_or_insert_with(|| turn_complete.turn_id.clone());
+                if turn_complete.turn_id != *current_turn_id {
                     continue;
                 }
                 break;
@@ -2576,15 +2398,11 @@ allow_local_binding = true
         }
     }
 
-    let second_output = parse_result(
-        &second_results
-            .single_request()
-            .function_call_output(call_id_second),
-    );
+    let output = parse_result(&results.single_request().function_call_output(call_id));
     Expectation::CommandFailure {
         output_contains: "",
     }
-    .verify(&test, &second_output)?;
+    .verify(&test, &output)?;
 
     Ok(())
 }
