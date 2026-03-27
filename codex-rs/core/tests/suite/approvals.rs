@@ -2382,10 +2382,18 @@ allow_local_binding = true
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let mut first_turn_id: Option<String> = None;
+    let mut first_turn_completed_before_network_prompt = false;
     let approval = loop {
         let remaining = deadline
             .checked_duration_since(std::time::Instant::now())
-            .expect("timed out waiting for network approval request");
+            .unwrap_or_else(|| {
+                let completion_hint = if first_turn_completed_before_network_prompt {
+                    " after observing completion first"
+                } else {
+                    ""
+                };
+                panic!("timed out waiting for network approval request{completion_hint}");
+            });
         let event = wait_for_event_with_timeout(&test.codex, |_| true, remaining).await;
         match event {
             EventMsg::TurnStarted(turn_started) => {
@@ -2412,7 +2420,7 @@ allow_local_binding = true
                 if turn_complete.turn_id != *turn_id {
                     continue;
                 }
-                panic!("expected network approval request before completion");
+                first_turn_completed_before_network_prompt = true;
             }
             _ => {}
         }
