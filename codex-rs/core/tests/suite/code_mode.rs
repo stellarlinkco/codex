@@ -90,6 +90,25 @@ fn extract_running_cell_id(text: &str) -> String {
         .to_string()
 }
 
+fn running_output_header_and_body(req: &ResponsesRequest, call_id: &str) -> (String, String) {
+    let items = custom_tool_output_items(req, call_id);
+    let text_items = items
+        .iter()
+        .filter_map(|item| item.get("text").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+
+    match text_items.as_slice() {
+        [header, rest @ ..] if !rest.is_empty() => ((*header).to_string(), rest.concat()),
+        [combined] => {
+            let (header, body) = combined
+                .split_once("Output:\n")
+                .expect("running output should include an Output section");
+            (format!("{header}Output:\n"), body.to_string())
+        }
+        _ => panic!("running output should contain at least one text item"),
+    }
+}
+
 fn wait_for_file_source(path: &Path) -> Result<String> {
     let quoted_path = shlex::try_join([path.to_string_lossy().as_ref()])?;
     let command = format!("if [ -f {quoted_path} ]; then printf ready; fi");
@@ -656,17 +675,16 @@ text("phase 3");
     test.submit_turn("start the long exec").await?;
 
     let first_request = first_completion.single_request();
-    let first_items = custom_tool_output_items(&first_request, "call-1");
-    assert_eq!(first_items.len(), 2);
+    let (running_header, running_body) = running_output_header_and_body(&first_request, "call-1");
     assert_regex_match(
         concat!(
             r"(?s)\A",
             r"Script running with cell ID \d+\nWall time \d+\.\d seconds\nOutput:\n\z"
         ),
-        text_item(&first_items, 0),
+        &running_header,
     );
-    assert_eq!(text_item(&first_items, 1), "phase 1");
-    let cell_id = extract_running_cell_id(text_item(&first_items, 0));
+    assert_eq!(running_body, "phase 1");
+    let cell_id = extract_running_cell_id(&running_header);
 
     responses::mount_sse_once(
         &server,
@@ -796,17 +814,16 @@ while (true) {}
     .await??;
 
     let first_request = first_completion.single_request();
-    let first_items = custom_tool_output_items(&first_request, "call-1");
-    assert_eq!(first_items.len(), 2);
+    let (running_header, running_body) = running_output_header_and_body(&first_request, "call-1");
     assert_regex_match(
         concat!(
             r"(?s)\A",
             r"Script running with cell ID \d+\nWall time \d+\.\d seconds\nOutput:\n\z"
         ),
-        text_item(&first_items, 0),
+        &running_header,
     );
-    assert_eq!(text_item(&first_items, 1), "phase 1");
-    let cell_id = extract_running_cell_id(text_item(&first_items, 0));
+    assert_eq!(running_body, "phase 1");
+    let cell_id = extract_running_cell_id(&running_header);
 
     responses::mount_sse_once(
         &server,
@@ -902,10 +919,9 @@ text("session b done");
     test.submit_turn("start session a").await?;
 
     let first_request = first_completion.single_request();
-    let first_items = custom_tool_output_items(&first_request, "call-1");
-    assert_eq!(first_items.len(), 2);
-    let session_a_id = extract_running_cell_id(text_item(&first_items, 0));
-    assert_eq!(text_item(&first_items, 1), "session a start");
+    let (running_header, running_body) = running_output_header_and_body(&first_request, "call-1");
+    let session_a_id = extract_running_cell_id(&running_header);
+    assert_eq!(running_body, "session a start");
 
     responses::mount_sse_once(
         &server,
@@ -1060,10 +1076,9 @@ text("phase 2");
     test.submit_turn("start the long exec").await?;
 
     let first_request = first_completion.single_request();
-    let first_items = custom_tool_output_items(&first_request, "call-1");
-    assert_eq!(first_items.len(), 2);
-    let cell_id = extract_running_cell_id(text_item(&first_items, 0));
-    assert_eq!(text_item(&first_items, 1), "phase 1");
+    let (running_header, running_body) = running_output_header_and_body(&first_request, "call-1");
+    let cell_id = extract_running_cell_id(&running_header);
+    assert_eq!(running_body, "phase 1");
 
     responses::mount_sse_once(
         &server,
@@ -1263,10 +1278,9 @@ text("session b done");
     test.submit_turn("start session a").await?;
 
     let first_request = first_completion.single_request();
-    let first_items = custom_tool_output_items(&first_request, "call-1");
-    assert_eq!(first_items.len(), 2);
-    let session_a_id = extract_running_cell_id(text_item(&first_items, 0));
-    assert_eq!(text_item(&first_items, 1), "session a start");
+    let (running_header, running_body) = running_output_header_and_body(&first_request, "call-1");
+    let session_a_id = extract_running_cell_id(&running_header);
+    assert_eq!(running_body, "session a start");
 
     responses::mount_sse_once(
         &server,
@@ -1445,16 +1459,15 @@ text("after yield");
     test.submit_turn("start yielded exec").await?;
 
     let first_request = first_completion.single_request();
-    let first_items = custom_tool_output_items(&first_request, "call-1");
-    assert_eq!(first_items.len(), 2);
+    let (running_header, running_body) = running_output_header_and_body(&first_request, "call-1");
     assert_regex_match(
         concat!(
             r"(?s)\A",
             r"Script running with cell ID \d+\nWall time \d+\.\d seconds\nOutput:\n\z"
         ),
-        text_item(&first_items, 0),
+        &running_header,
     );
-    assert_eq!(text_item(&first_items, 1), "before yield");
+    assert_eq!(running_body, "before yield");
 
     responses::mount_sse_once(
         &server,
@@ -1536,10 +1549,9 @@ text("token one token two token three token four token five token six token seve
     test.submit_turn("start the long exec").await?;
 
     let first_request = first_completion.single_request();
-    let first_items = custom_tool_output_items(&first_request, "call-1");
-    assert_eq!(first_items.len(), 2);
-    assert_eq!(text_item(&first_items, 1), "phase 1");
-    let cell_id = extract_running_cell_id(text_item(&first_items, 0));
+    let (running_header, running_body) = running_output_header_and_body(&first_request, "call-1");
+    assert_eq!(running_body, "phase 1");
+    let cell_id = extract_running_cell_id(&running_header);
 
     fs::write(&completion_gate, "ready")?;
     responses::mount_sse_once(
