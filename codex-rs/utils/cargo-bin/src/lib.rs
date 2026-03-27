@@ -1,5 +1,6 @@
 use std::ffi::OsString;
 use std::io;
+use std::panic::AssertUnwindSafe;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Command;
@@ -126,8 +127,10 @@ pub fn cargo_bin(name: &str) -> Result<PathBuf, CargoBinError> {
         }
     }
 
-    match assert_cmd::Command::cargo_bin(name) {
-        Ok(cmd) => {
+    let assert_cmd_result =
+        std::panic::catch_unwind(AssertUnwindSafe(|| assert_cmd::Command::cargo_bin(name)));
+    match assert_cmd_result {
+        Ok(Ok(cmd)) => {
             let mut path = PathBuf::from(cmd.get_program());
             if !path.is_absolute() {
                 path = std::env::current_dir()
@@ -143,7 +146,7 @@ pub fn cargo_bin(name: &str) -> Result<PathBuf, CargoBinError> {
                 })
             }
         }
-        Err(err) => Err(CargoBinError::NotFound {
+        Ok(Err(err)) => Err(CargoBinError::NotFound {
             name: name.to_owned(),
             env_keys,
             fallback: match cargo_build_failure {
@@ -153,6 +156,30 @@ pub fn cargo_bin(name: &str) -> Result<PathBuf, CargoBinError> {
                 None => format!("assert_cmd fallback failed: {err}"),
             },
         }),
+        Err(panic) => Err(CargoBinError::NotFound {
+            name: name.to_owned(),
+            env_keys,
+            fallback: match cargo_build_failure {
+                Some(cargo_build_failure) => format!(
+                    "{cargo_build_failure}\nassert_cmd fallback panicked: {}",
+                    panic_payload_message(panic)
+                ),
+                None => format!(
+                    "assert_cmd fallback panicked: {}",
+                    panic_payload_message(panic)
+                ),
+            },
+        }),
+    }
+}
+
+fn panic_payload_message(panic: Box<dyn std::any::Any + Send>) -> String {
+    match panic.downcast::<String>() {
+        Ok(message) => *message,
+        Err(panic) => match panic.downcast::<&'static str>() {
+            Ok(message) => (*message).to_string(),
+            Err(_) => "non-string panic payload".to_string(),
+        },
     }
 }
 

@@ -625,19 +625,22 @@ fn sandbox_detection_flags_sigsys_exit_code() {
 #[cfg(unix)]
 #[tokio::test]
 async fn kill_child_process_group_kills_grandchildren_on_timeout() -> Result<()> {
+    let temp_dir = tempfile::tempdir()?;
+    let pid_file = temp_dir.path().join("grandchild.pid");
+    let pid_file_display = pid_file.display();
     // On Linux/macOS, /bin/bash is typically present; on FreeBSD/OpenBSD,
     // prefer /bin/sh to avoid NotFound errors.
     #[cfg(any(target_os = "freebsd", target_os = "openbsd"))]
     let command = vec![
         "/bin/sh".to_string(),
         "-c".to_string(),
-        "sleep 60 & echo $!; sleep 60".to_string(),
+        format!("sleep 60 & printf '%s\\n' \"$!\" > '{pid_file_display}'; sleep 60"),
     ];
     #[cfg(all(unix, not(any(target_os = "freebsd", target_os = "openbsd"))))]
     let command = vec![
         "/bin/bash".to_string(),
         "-c".to_string(),
-        "sleep 60 & echo $!; sleep 60".to_string(),
+        format!("sleep 60 & printf '%s\\n' \"$!\" > '{pid_file_display}'; sleep 60"),
     ];
     let env: HashMap<String, String> = std::env::vars().collect();
     let params = ExecParams {
@@ -666,12 +669,18 @@ async fn kill_child_process_group_kills_grandchildren_on_timeout() -> Result<()>
     .await?;
     assert!(output.timed_out);
 
-    let stdout = output.stdout.from_utf8_lossy().text;
-    let pid_line = stdout.lines().next().unwrap_or("").trim();
+    let pid_line = std::fs::read_to_string(&pid_file)
+        .map(|contents| contents.trim().to_string())
+        .map_err(|error| {
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Failed to read pid file {}: {error}", pid_file.display()),
+            )
+        })?;
     let pid: i32 = pid_line.parse().map_err(|error| {
         io::Error::new(
             io::ErrorKind::InvalidData,
-            format!("Failed to parse pid from stdout '{pid_line}': {error}"),
+            format!("Failed to parse pid from file '{pid_line}': {error}"),
         )
     })?;
 

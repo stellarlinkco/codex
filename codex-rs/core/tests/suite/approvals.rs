@@ -698,17 +698,6 @@ where
     }
 }
 
-async fn wait_for_turn_started(test: &TestCodex) -> String {
-    let event = wait_for_event(&test.codex, |event| {
-        matches!(event, EventMsg::TurnStarted(_))
-    })
-    .await;
-    match event {
-        EventMsg::TurnStarted(turn_started) => turn_started.turn_id,
-        other => panic!("unexpected event: {other:?}"),
-    }
-}
-
 async fn wait_for_completion(test: &TestCodex) {
     wait_for_event(&test.codex, |event| {
         matches!(event, EventMsg::TurnComplete(_))
@@ -2390,22 +2379,23 @@ allow_local_binding = true
         sandbox_policy.clone(),
     )
     .await?;
-    let first_turn_id = wait_for_turn_started(&test).await;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut first_turn_id: Option<String> = None;
     let approval = loop {
         let remaining = deadline
             .checked_duration_since(std::time::Instant::now())
             .expect("timed out waiting for network approval request");
-        let event = wait_for_turn_event(&test, &first_turn_id, remaining, |event| {
-            matches!(
-                event,
-                EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
-            )
-        })
-        .await;
+        let event = wait_for_event_with_timeout(&test.codex, |_| true, remaining).await;
         match event {
+            EventMsg::TurnStarted(turn_started) => {
+                first_turn_id.get_or_insert(turn_started.turn_id);
+            }
             EventMsg::ExecApprovalRequest(approval) => {
+                let turn_id = first_turn_id.get_or_insert_with(|| approval.turn_id.clone());
+                if approval.turn_id != *turn_id {
+                    continue;
+                }
                 if approval.network_approval_context.is_some() {
                     break approval;
                 }
@@ -2417,12 +2407,17 @@ allow_local_binding = true
                     })
                     .await?;
             }
-            EventMsg::TurnComplete(_) => {
+            EventMsg::TurnComplete(turn_complete) => {
+                let turn_id = first_turn_id.get_or_insert_with(|| turn_complete.turn_id.clone());
+                if turn_complete.turn_id != *turn_id {
+                    continue;
+                }
                 panic!("expected network approval request before completion");
             }
-            other => panic!("unexpected event: {other:?}"),
+            _ => {}
         }
     };
+    let first_turn_id = first_turn_id.expect("expected first turn id");
     let network_context = approval
         .network_approval_context
         .clone()
@@ -2525,22 +2520,23 @@ allow_local_binding = true
         sandbox_policy.clone(),
     )
     .await?;
-    let second_turn_id = wait_for_turn_started(&test).await;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mut second_turn_id: Option<String> = None;
     loop {
         let remaining = deadline
             .checked_duration_since(std::time::Instant::now())
             .expect("timed out waiting for second turn completion");
-        let event = wait_for_turn_event(&test, &second_turn_id, remaining, |event| {
-            matches!(
-                event,
-                EventMsg::ExecApprovalRequest(_) | EventMsg::TurnComplete(_)
-            )
-        })
-        .await;
+        let event = wait_for_event_with_timeout(&test.codex, |_| true, remaining).await;
         match event {
+            EventMsg::TurnStarted(turn_started) => {
+                second_turn_id.get_or_insert(turn_started.turn_id);
+            }
             EventMsg::ExecApprovalRequest(approval) => {
+                let turn_id = second_turn_id.get_or_insert_with(|| approval.turn_id.clone());
+                if approval.turn_id != *turn_id {
+                    continue;
+                }
                 if approval.network_approval_context.is_some() {
                     panic!(
                         "unexpected network approval request: {:?}",
@@ -2555,8 +2551,14 @@ allow_local_binding = true
                     })
                     .await?;
             }
-            EventMsg::TurnComplete(_) => break,
-            other => panic!("unexpected event: {other:?}"),
+            EventMsg::TurnComplete(turn_complete) => {
+                let turn_id = second_turn_id.get_or_insert_with(|| turn_complete.turn_id.clone());
+                if turn_complete.turn_id != *turn_id {
+                    continue;
+                }
+                break;
+            }
+            _ => {}
         }
     }
 
