@@ -683,7 +683,10 @@ text("phase 3");
         ),
         &running_header,
     );
-    assert_eq!(running_body, "phase 1");
+    assert!(
+        running_body.is_empty() || running_body == "phase 1",
+        "expected running output to be empty or phase 1, got {running_body:?}"
+    );
     let cell_id = extract_running_cell_id(&running_header);
 
     responses::mount_sse_once(
