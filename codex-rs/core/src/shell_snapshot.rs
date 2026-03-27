@@ -29,19 +29,6 @@ pub struct ShellSnapshot {
     pub cwd: PathBuf,
 }
 
-impl Drop for ShellSnapshot {
-    fn drop(&mut self) {
-        if let Err(err) = std::fs::remove_file(&self.path)
-            && err.kind() != ErrorKind::NotFound
-        {
-            tracing::warn!(
-                "Failed to delete shell snapshot at {:?} during drop: {err:?}",
-                self.path
-            );
-        }
-    }
-}
-
 const SNAPSHOT_TIMEOUT: Duration = Duration::from_secs(10);
 const SNAPSHOT_RETENTION: Duration = Duration::from_secs(60 * 60 * 24 * 3); // 3 days retention.
 const SNAPSHOT_DIR: &str = "shell_snapshots";

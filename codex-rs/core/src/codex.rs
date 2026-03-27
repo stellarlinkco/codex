@@ -5203,6 +5203,17 @@ mod handlers {
             .unified_exec_manager
             .terminate_all_processes()
             .await;
+        let shell_snapshot = sess.services.shell_snapshot_tx.borrow().clone();
+        let _ = sess.services.shell_snapshot_tx.send(None);
+        if let Some(snapshot) = shell_snapshot.as_ref()
+            && let Err(err) = tokio::fs::remove_file(&snapshot.path).await
+            && err.kind() != std::io::ErrorKind::NotFound
+        {
+            warn!(
+                "failed to delete shell snapshot at {} during shutdown: {err}",
+                snapshot.path.display()
+            );
+        }
         sess.guardian_review_session.shutdown().await;
         info!("Shutting down Codex instance");
         let history = sess.clone_history().await;

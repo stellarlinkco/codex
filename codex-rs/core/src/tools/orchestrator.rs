@@ -59,8 +59,7 @@ impl ToolOrchestrator {
     {
         let network_approval = begin_network_approval(
             &tool_ctx.session,
-            &tool_ctx.turn.sub_id,
-            &tool_ctx.call_id,
+            tool_ctx.turn.clone(),
             has_managed_network_requirements,
             tool.network_approval_spec(req, tool_ctx),
         )

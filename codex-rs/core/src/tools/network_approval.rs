@@ -1,4 +1,5 @@
 use crate::codex::Session;
+use crate::codex::TurnContext;
 use crate::network_policy_decision::denied_network_policy_message;
 use crate::tools::sandboxing::ToolError;
 use codex_network_proxy::BlockedRequest;
@@ -156,6 +157,7 @@ impl PendingHostApproval {
 
 struct ActiveNetworkApprovalCall {
     registration_id: String,
+    turn_context: Option<Arc<TurnContext>>,
 }
 
 pub(crate) struct NetworkApprovalService {
@@ -185,10 +187,16 @@ impl NetworkApprovalService {
         *target_approved_hosts = approved_hosts;
     }
 
-    async fn register_call(&self, registration_id: String) {
+    async fn register_call(&self, registration_id: String, turn_context: Option<Arc<TurnContext>>) {
         let mut active_calls = self.active_calls.lock().await;
         let key = registration_id.clone();
-        active_calls.insert(key, Arc::new(ActiveNetworkApprovalCall { registration_id }));
+        active_calls.insert(
+            key,
+            Arc::new(ActiveNetworkApprovalCall {
+                registration_id,
+                turn_context,
+            }),
+        );
     }
 
     pub(crate) async fn unregister_call(&self, registration_id: &str) {
@@ -303,13 +311,24 @@ impl NetworkApprovalService {
         if !is_owner {
             return pending.wait_for_decision().await.to_network_decision();
         }
+        let owner_call = self.resolve_single_active_call().await;
 
         let target = Self::format_network_target(key.protocol, request.host.as_str(), key.port);
         let policy_denial_message =
             format!("Network access to \"{target}\" was blocked by policy.");
         let prompt_reason = format!("{} is not in the allowed_domains", request.host);
 
-        let Some(turn_context) = Self::active_turn_context(session).await else {
+        let turn_context = if let Some(owner_call) = owner_call.as_ref() {
+            owner_call.turn_context.clone()
+        } else {
+            None
+        };
+        let turn_context = if let Some(turn_context) = turn_context {
+            Some(turn_context)
+        } else {
+            Self::active_turn_context(session).await
+        };
+        let Some(turn_context) = turn_context else {
             pending.set_decision(PendingApprovalDecision::Deny).await;
             let mut pending_approvals = self.pending_host_approvals.lock().await;
             pending_approvals.remove(&key);
@@ -493,8 +512,7 @@ pub(crate) fn build_network_policy_decider(
 
 pub(crate) async fn begin_network_approval(
     session: &Session,
-    _turn_id: &str,
-    _call_id: &str,
+    turn_context: Arc<TurnContext>,
     has_managed_network_requirements: bool,
     spec: Option<NetworkApprovalSpec>,
 ) -> Option<ActiveNetworkApproval> {
@@ -507,7 +525,7 @@ pub(crate) async fn begin_network_approval(
     session
         .services
         .network_approval
-        .register_call(registration_id.clone())
+        .register_call(registration_id.clone(), Some(turn_context))
         .await;
 
     Some(ActiveNetworkApproval {
@@ -659,7 +677,9 @@ mod tests {
     #[tokio::test]
     async fn record_blocked_request_sets_policy_outcome_for_owner_call() {
         let service = NetworkApprovalService::default();
-        service.register_call("registration-1".to_string()).await;
+        service
+            .register_call("registration-1".to_string(), None)
+            .await;
 
         service
             .record_blocked_request(denied_blocked_request("example.com"))
@@ -676,7 +696,9 @@ mod tests {
     #[tokio::test]
     async fn blocked_request_policy_does_not_override_user_denial_outcome() {
         let service = NetworkApprovalService::default();
-        service.register_call("registration-1".to_string()).await;
+        service
+            .register_call("registration-1".to_string(), None)
+            .await;
 
         service
             .record_call_outcome("registration-1", NetworkApprovalOutcome::DeniedByUser)
@@ -694,8 +716,12 @@ mod tests {
     #[tokio::test]
     async fn record_blocked_request_ignores_ambiguous_unattributed_blocked_requests() {
         let service = NetworkApprovalService::default();
-        service.register_call("registration-1".to_string()).await;
-        service.register_call("registration-2".to_string()).await;
+        service
+            .register_call("registration-1".to_string(), None)
+            .await;
+        service
+            .register_call("registration-2".to_string(), None)
+            .await;
 
         service
             .record_blocked_request(denied_blocked_request("example.com"))
