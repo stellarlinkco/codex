@@ -1,5 +1,6 @@
 use crate::Cli;
 use crate::kanban;
+use crate::live_runtime;
 use crate::workspace;
 use anyhow::Context;
 use anyhow::bail;
@@ -32,8 +33,12 @@ use codex_core::config::Config;
 use codex_core::config::ConfigOverrides;
 use codex_core::config::load_config_as_toml_with_cli_overrides;
 use codex_core::git_info::collect_git_info;
+use codex_core::git_info::get_git_repo_root;
 use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_core::models_manager::manager::RefreshStrategy;
+use codex_core::runtime_owner::RuntimeLiveRegistration;
+use codex_core::runtime_owner::RuntimeOwner;
+use codex_core::runtime_owner::unix_timestamp_now;
 use codex_core::skills::SkillLoadOutcome;
 use codex_github_webhook::GithubCodexJobOutput;
 use codex_github_webhook::GithubCodexRunOverrides;
@@ -50,6 +55,7 @@ use codex_protocol::custom_prompts::PROMPTS_CMD_PREFIX;
 use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::openai_models::ReasoningEffortPreset;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::Op;
@@ -76,6 +82,8 @@ use std::net::SocketAddr;
 use std::path::Path as FsPath;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncSeekExt;
@@ -84,6 +92,8 @@ use tokio::sync::Mutex;
 use tokio::sync::RwLock;
 use tokio::sync::broadcast;
 use tracing::warn;
+
+mod telegram_worker;
 
 static WEB_ASSETS: Dir = include_dir!("$CARGO_MANIFEST_DIR/assets/web");
 
@@ -94,6 +104,7 @@ const GITHUB_JOBS_FILE_NAME: &str = "github-jobs.json";
 const GITHUB_JOB_LOGS_DIR: &str = "github-job-logs";
 const GITHUB_JOB_LOG_MAX_BYTES: u64 = 200_000;
 const GITHUB_SYNC_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const HEADLESS_OWNER_LEASE_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5);
 const WORKSPACE_WORK_ITEMS_FILE_NAME: &str = "work-items.json";
 const WORKSPACE_KANBAN_FILE_NAME: &str = "kanban.json";
 
@@ -121,9 +132,68 @@ struct AppState {
 
 struct ActiveSession {
     thread_id: ThreadId,
-    thread: Arc<CodexThread>,
+    thread: Option<Arc<CodexThread>>,
+    live_registration: Option<RuntimeLiveRegistration>,
+    lease_created_at: Option<i64>,
+    lease_heartbeat_stop: Arc<AtomicBool>,
     rollout_path: Option<PathBuf>,
     state: RwLock<SessionState>,
+}
+
+#[derive(Clone)]
+struct StoredSessionSnapshot {
+    rollout_path: PathBuf,
+    history: InitialHistory,
+    cwd: PathBuf,
+    name: Option<String>,
+    created_at: u64,
+    updated_at: u64,
+    seq: u64,
+    messages: Vec<WebDecryptedMessage>,
+}
+
+enum SessionActivation {
+    Headless(Arc<ActiveSession>),
+    Live(Arc<ActiveSession>),
+}
+
+enum ActivateSessionError {
+    NotFound,
+    Invalid(String),
+    Internal(String),
+    OwnerLeaseHeld { owner: RuntimeOwner, pid: u32 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum SessionBacking {
+    LiveWindow,
+    Headless,
+    Stored,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+enum SessionLiveState {
+    Idle,
+    Generating,
+    WaitingApproval,
+    WaitingUserInput,
+    Stopped,
+    Unavailable,
+}
+
+impl From<live_runtime::LiveBridgeLiveState> for SessionLiveState {
+    fn from(value: live_runtime::LiveBridgeLiveState) -> Self {
+        match value {
+            live_runtime::LiveBridgeLiveState::Idle => Self::Idle,
+            live_runtime::LiveBridgeLiveState::Generating => Self::Generating,
+            live_runtime::LiveBridgeLiveState::WaitingApproval => Self::WaitingApproval,
+            live_runtime::LiveBridgeLiveState::WaitingUserInput => Self::WaitingUserInput,
+            live_runtime::LiveBridgeLiveState::Stopped => Self::Stopped,
+            live_runtime::LiveBridgeLiveState::Unavailable => Self::Unavailable,
+        }
+    }
 }
 
 struct SessionState {
@@ -142,6 +212,11 @@ struct SessionState {
     metadata_version: u64,
     agent_state_version: u64,
     agent_state: WebAgentState,
+    backing: SessionBacking,
+    live_state: SessionLiveState,
+    runtime_owner: RuntimeOwner,
+    window_id: Option<String>,
+    controller_count: u64,
     next_seq: u64,
     messages: Vec<WebDecryptedMessage>,
 }
@@ -221,6 +296,28 @@ enum SyncEvent {
         session_id: String,
         message: WebDecryptedMessage,
     },
+    #[serde(rename = "message-delta")]
+    MessageDelta {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        event: Event,
+    },
+    #[serde(rename = "message-finalized")]
+    MessageFinalized {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+        event: Event,
+    },
+    #[serde(rename = "session-live-attached")]
+    SessionLiveAttached {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
+    #[serde(rename = "session-live-detached")]
+    SessionLiveDetached {
+        #[serde(rename = "sessionId")]
+        session_id: String,
+    },
     #[serde(rename = "connection-changed")]
     ConnectionChanged {
         #[serde(skip_serializing_if = "Option::is_none")]
@@ -271,6 +368,22 @@ struct ConnectionChangedData {
 #[serde(rename_all = "camelCase")]
 struct SessionsResponse {
     sessions: Vec<SessionSummary>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectsResponse {
+    projects: Vec<ProjectSummary>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectSummary {
+    project_key: String,
+    path: String,
+    active_sessions: u64,
+    total_sessions: u64,
+    updated_at: u64,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -489,6 +602,12 @@ struct SessionSummary {
     thinking: bool,
     active_at: u64,
     updated_at: u64,
+    backing: SessionBacking,
+    live_state: SessionLiveState,
+    project_key: String,
+    runtime_owner: Option<RuntimeOwner>,
+    window_id: Option<String>,
+    controller_count: u64,
     metadata: Option<SessionSummaryMetadata>,
     todo_progress: Option<TodoProgress>,
     pending_requests_count: u64,
@@ -535,6 +654,12 @@ struct Session {
     updated_at: u64,
     active: bool,
     active_at: u64,
+    backing: SessionBacking,
+    live_state: SessionLiveState,
+    project_key: String,
+    runtime_owner: Option<RuntimeOwner>,
+    window_id: Option<String>,
+    controller_count: u64,
     metadata: Option<Metadata>,
     metadata_version: u64,
     agent_state: Option<WebAgentState>,
@@ -647,14 +772,18 @@ mod tests {
     use super::MessagePostRequest;
     use super::ReasoningSummaryConfig;
     use super::SpawnRequest;
+    use super::SyncEvent;
     use super::WEB_ASSETS;
     use super::build_router;
     use super::custom_prompts_to_slash_commands;
+    use super::event_matches_session;
     use super::extract_reasoning_effort_from_history;
     use super::handle_machine_spawn;
     use super::handle_move_kanban_card;
     use super::handle_post_message;
+    use super::handle_projects;
     use super::handle_resume_session;
+    use super::handle_session;
     use super::handle_skills;
     use super::handle_slash_commands;
     use super::plan_mode_developer_instructions;
@@ -671,6 +800,12 @@ mod tests {
     use codex_core::config::Config;
     use codex_core::config::ConfigOverrides;
     use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
+    use codex_core::runtime_owner::RuntimeLiveRegistration;
+    use codex_core::runtime_owner::RuntimeOwner;
+    use codex_core::runtime_owner::ThreadOwnerLease;
+    use codex_core::runtime_owner::runtime_live_registration_path;
+    use codex_core::runtime_owner::runtime_owner_lease_path;
+    use codex_core::runtime_owner::unix_timestamp_now;
     use codex_core::skills::SkillLoadOutcome;
     use codex_core::skills::SkillMetadata;
     use codex_protocol::config_types::CollaborationMode;
@@ -770,6 +905,47 @@ mod tests {
             AuthRequest::InitData { init_data } => assert_eq!(init_data, "x"),
             _ => panic!("expected InitData"),
         }
+    }
+
+    #[test]
+    fn message_delta_events_match_session_filters() {
+        let event = codex_protocol::protocol::Event {
+            id: "evt-1".to_string(),
+            msg: codex_protocol::protocol::EventMsg::TurnStarted(
+                codex_protocol::protocol::TurnStartedEvent {
+                    turn_id: "turn-1".to_string(),
+                    model_context_window: None,
+                    collaboration_mode_kind: ModeKind::Default,
+                },
+            ),
+        };
+        let delta = SyncEvent::MessageDelta {
+            session_id: "session-1".to_string(),
+            event,
+        };
+        assert!(event_matches_session(&delta, "session-1"));
+        assert!(!event_matches_session(&delta, "session-2"));
+    }
+
+    #[test]
+    fn message_delta_events_serialize_expected_tags() {
+        let event = codex_protocol::protocol::Event {
+            id: "evt-1".to_string(),
+            msg: codex_protocol::protocol::EventMsg::TurnStarted(
+                codex_protocol::protocol::TurnStartedEvent {
+                    turn_id: "turn-1".to_string(),
+                    model_context_window: None,
+                    collaboration_mode_kind: ModeKind::Default,
+                },
+            ),
+        };
+        let payload = serde_json::to_value(SyncEvent::MessageFinalized {
+            session_id: "session-1".to_string(),
+            event,
+        })
+        .expect("serialize");
+        assert_eq!(payload["type"], "message-finalized");
+        assert_eq!(payload["sessionId"], "session-1");
     }
 
     #[test]
@@ -1101,7 +1277,9 @@ mod tests {
         }
         assert_eq!(effort, Some(ReasoningEffort::High));
 
-        let _ = session.thread.submit(Op::Shutdown).await;
+        if let Some(thread) = session.thread.as_ref() {
+            let _ = thread.submit(Op::Shutdown).await;
+        }
         state.sessions.write().await.remove(&session_id);
 
         let msg = MessagePostRequest {
@@ -1111,7 +1289,23 @@ mod tests {
         };
         let resp =
             handle_post_message(State(state.clone()), Path(session_id.clone()), Json(msg)).await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let resumed_session = state
+            .sessions
+            .read()
+            .await
+            .get(&session_id)
+            .cloned()
+            .expect("session reactivated by message");
+        assert!(
+            resumed_session.state.read().await.messages.len() >= 2,
+            "reactivated session should preserve transcript history"
+        );
+
+        if let Some(thread) = resumed_session.thread.as_ref() {
+            let _ = thread.submit(Op::Shutdown).await;
+        }
+        state.sessions.write().await.remove(&session_id);
 
         let resp = handle_resume_session(State(state.clone()), Path(session_id.clone())).await;
         assert_eq!(resp.status(), StatusCode::OK);
@@ -1127,6 +1321,140 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         let _ = state.thread_manager.remove_and_close_all_threads().await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn live_window_resume_attaches_and_projects_aggregate() {
+        let _lock = ENV_LOCK.lock().await;
+        codex_core::test_support::set_thread_manager_test_mode(true);
+
+        let codex_home = temp_dir("codex-home");
+        let _env = EnvVarGuard::set("CODEX_HOME", codex_home.as_path());
+
+        let base_overrides = ConfigOverrides {
+            cwd: Some(codex_home.clone()),
+            ..Default::default()
+        };
+        let config = Config::load_with_cli_overrides_and_harness_overrides(
+            Vec::new(),
+            base_overrides.clone(),
+        )
+        .await
+        .expect("load config");
+
+        let auth_manager = AuthManager::shared(
+            config.codex_home.clone(),
+            false,
+            config.cli_auth_credentials_store_mode,
+        );
+        let thread_manager = Arc::new(ThreadManager::new(
+            config.codex_home.clone(),
+            auth_manager.clone(),
+            SessionSource::Cli,
+            config.model_catalog.clone(),
+            CollaborationModesConfig::default(),
+        ));
+        let (events_tx, _) = broadcast::channel(64);
+        let kanban = crate::kanban::load_or_default(&config.codex_home).await;
+
+        let state = AppState {
+            token: Arc::new("test-token".to_string()),
+            static_dir: None,
+            config: Arc::new(config),
+            cli_overrides: Vec::new(),
+            base_overrides,
+            auth_manager,
+            thread_manager,
+            sessions: Arc::new(RwLock::new(HashMap::new())),
+            kanban: Arc::new(RwLock::new(kanban)),
+            workspaces: Arc::new(RwLock::new(crate::workspace::WorkspaceStore::default())),
+            github_webhook: None,
+            github_repos: Arc::new(RwLock::new(Vec::new())),
+            github_work_items: Arc::new(RwLock::new(super::GithubWorkItemsSnapshot::default())),
+            github_kanban: Arc::new(RwLock::new(crate::kanban::KanbanConfig::default())),
+            github_jobs: Arc::new(RwLock::new(HashMap::new())),
+            github_sync_lock: Arc::new(tokio::sync::Mutex::new(())),
+            workspace_kanban_locks: Arc::new(RwLock::new(HashMap::new())),
+            events_tx,
+        };
+
+        let live_cwd = temp_dir("live-cwd");
+        let thread_id = codex_protocol::ThreadId::new();
+        let window_id = "window-1".to_string();
+        let now = unix_timestamp_now();
+        let socket_path = codex_home.join("runtime/live/window-1.sock");
+        let registration = RuntimeLiveRegistration {
+            window_id: window_id.clone(),
+            thread_id,
+            pid: std::process::id(),
+            cwd: live_cwd.clone(),
+            socket_path,
+            last_heartbeat_at: now,
+            runtime_owner: RuntimeOwner::Tui,
+        };
+        let lease = ThreadOwnerLease {
+            thread_id,
+            runtime_owner: RuntimeOwner::Tui,
+            pid: std::process::id(),
+            window_id: Some(window_id.clone()),
+            created_at: now,
+            last_heartbeat_at: now,
+        };
+
+        let registration_path = runtime_live_registration_path(&codex_home, &window_id);
+        tokio::fs::create_dir_all(registration_path.parent().expect("live dir"))
+            .await
+            .expect("create live dir");
+        tokio::fs::write(
+            &registration_path,
+            serde_json::to_vec_pretty(&registration).expect("serialize registration"),
+        )
+        .await
+        .expect("write registration");
+        let lease_path = runtime_owner_lease_path(&codex_home, &thread_id);
+        tokio::fs::create_dir_all(lease_path.parent().expect("leases dir"))
+            .await
+            .expect("create leases dir");
+        tokio::fs::write(
+            &lease_path,
+            serde_json::to_vec_pretty(&lease).expect("serialize lease"),
+        )
+        .await
+        .expect("write lease");
+
+        let session_id = thread_id.to_string();
+        let resp = handle_resume_session(State(state.clone()), Path(session_id.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let attached_session = state
+            .sessions
+            .read()
+            .await
+            .get(&session_id)
+            .cloned()
+            .expect("live attach creates tracked live session");
+        assert!(attached_session.thread.is_none());
+        assert!(attached_session.live_registration.is_some());
+
+        let resp = handle_session(State(state.clone()), Path(session_id.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = collect_body_bytes(resp.into_body())
+            .await
+            .expect("detail body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("detail json");
+        assert_eq!(json["session"]["backing"], "liveWindow");
+        assert_eq!(json["session"]["runtimeOwner"], "tui");
+        assert_eq!(json["session"]["windowId"], window_id);
+
+        let resp = handle_projects(State(state.clone())).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = collect_body_bytes(resp.into_body())
+            .await
+            .expect("projects body");
+        let json: serde_json::Value = serde_json::from_slice(&body).expect("projects json");
+        assert_eq!(json["projects"].as_array().map(Vec::len), Some(1));
+        assert_eq!(json["projects"][0]["activeSessions"], 1);
+        assert_eq!(json["projects"][0]["totalSessions"], 1);
+        assert_eq!(json["projects"][0]["path"], live_cwd.display().to_string());
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -2335,6 +2663,7 @@ pub async fn run(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::
     if state.github_webhook.is_some() {
         tokio::spawn(github_sync_loop(state.clone()));
     }
+    telegram_worker::spawn(state.clone());
 
     let listener = TcpListener::bind(SocketAddr::new(cli.host, cli.port))
         .await
@@ -2371,6 +2700,7 @@ fn build_router(state: AppState) -> Router {
     let authed = Router::new()
         .route("/events", get(handle_events))
         .route("/sessions", get(handle_sessions))
+        .route("/projects", get(handle_projects))
         .route("/kanban", get(handle_get_kanban))
         .route("/models/catalog", get(handle_models_catalog))
         .route("/kanban/cards/{session_id}", put(handle_move_kanban_card))
@@ -2655,6 +2985,10 @@ fn event_matches_session(event: &SyncEvent, session_id: &str) -> bool {
         SyncEvent::SessionUpdated { session_id: id, .. } => id == session_id,
         SyncEvent::SessionRemoved { session_id: id } => id == session_id,
         SyncEvent::MessageReceived { session_id: id, .. } => id == session_id,
+        SyncEvent::MessageDelta { session_id: id, .. } => id == session_id,
+        SyncEvent::MessageFinalized { session_id: id, .. } => id == session_id,
+        SyncEvent::SessionLiveAttached { session_id: id } => id == session_id,
+        SyncEvent::SessionLiveDetached { session_id: id } => id == session_id,
         SyncEvent::ConnectionChanged { .. } => true,
         SyncEvent::Heartbeat => true,
         SyncEvent::KanbanUpdated { .. } => false,
@@ -2671,6 +3005,1042 @@ fn sse_json(event: &SyncEvent) -> SseEvent {
         return SseEvent::default().data("{\"type\":\"toast\",\"data\":{\"title\":\"Serialize error\",\"body\":\"\",\"sessionId\":\"\",\"url\":\"\"}}");
     };
     SseEvent::default().data(data)
+}
+
+fn session_project_key(cwd: &FsPath) -> String {
+    get_git_repo_root(cwd)
+        .unwrap_or_else(|| cwd.to_path_buf())
+        .display()
+        .to_string()
+}
+
+fn derive_headless_live_state(state: &SessionState) -> SessionLiveState {
+    let has_pending_requests = state
+        .agent_state
+        .requests
+        .as_ref()
+        .is_some_and(|requests| !requests.is_empty());
+    let waiting_user_input = state.agent_state.requests.as_ref().is_some_and(|requests| {
+        requests
+            .values()
+            .any(|request| request.tool == "request_user_input")
+    });
+    if waiting_user_input {
+        return SessionLiveState::WaitingUserInput;
+    }
+    if has_pending_requests {
+        return SessionLiveState::WaitingApproval;
+    }
+    if state.thinking {
+        return SessionLiveState::Generating;
+    }
+    if state.active {
+        return SessionLiveState::Idle;
+    }
+    SessionLiveState::Stopped
+}
+
+async fn start_headless_owner_lease(codex_home: &FsPath, session: Arc<ActiveSession>) {
+    session.lease_heartbeat_stop.store(false, Ordering::Release);
+    let Some(created_at) = session.lease_created_at else {
+        return;
+    };
+    if let Err(err) = live_runtime::write_headless_owner_lease(
+        codex_home,
+        session.thread_id,
+        std::process::id(),
+        created_at,
+        created_at,
+    )
+    .await
+    {
+        warn!(
+            error = %err,
+            thread_id = %session.thread_id,
+            "failed to write initial headless owner lease"
+        );
+    }
+}
+
+async fn stop_headless_owner_lease(codex_home: &FsPath, session: &ActiveSession) {
+    session.lease_heartbeat_stop.store(true, Ordering::Release);
+    live_runtime::remove_owner_lease(codex_home, &session.thread_id).await;
+}
+
+fn pending_requests_in_live_snapshot(snapshot: &live_runtime::LiveBridgeSnapshot) -> u64 {
+    snapshot
+        .buffered_events
+        .iter()
+        .filter(|event| {
+            matches!(
+                event.msg,
+                EventMsg::ExecApprovalRequest(_)
+                    | EventMsg::ApplyPatchApprovalRequest(_)
+                    | EventMsg::RequestPermissions(_)
+                    | EventMsg::RequestUserInput(_)
+            )
+        })
+        .count() as u64
+}
+
+fn owner_name(owner: RuntimeOwner) -> &'static str {
+    match owner {
+        RuntimeOwner::Tui => "tui",
+        RuntimeOwner::Cli => "cli",
+        RuntimeOwner::Serve => "serve",
+    }
+}
+
+fn rollout_items_to_web_messages(items: &[RolloutItem]) -> Vec<WebDecryptedMessage> {
+    let mut out = Vec::new();
+    let mut seq = 1_u64;
+
+    for item in items {
+        let RolloutItem::ResponseItem(item) = item else {
+            continue;
+        };
+        let codex_protocol::models::ResponseItem::Message { role, content, .. } = item else {
+            continue;
+        };
+        let text = codex_core::content_items_to_text(content);
+        let (wrapper_role, wrapper_content) = if role == "user" {
+            ("user", serde_json::json!({ "type": "text", "text": text }))
+        } else if role == "assistant" {
+            (
+                "agent",
+                serde_json::json!({
+                    "type": "output",
+                    "data": { "type":"assistant", "message": { "content": text } },
+                }),
+            )
+        } else {
+            continue;
+        };
+
+        out.push(WebDecryptedMessage {
+            id: uuid::Uuid::new_v4().to_string(),
+            seq: Some(seq),
+            local_id: None,
+            content: serde_json::json!({ "role": wrapper_role, "content": wrapper_content }),
+            created_at: now_ms(),
+            status: None,
+            original_text: None,
+        });
+        seq = seq.saturating_add(1);
+    }
+
+    out
+}
+
+async fn find_session_rollout_path(codex_home: &FsPath, session_id: &str) -> Option<PathBuf> {
+    match codex_core::find_thread_path_by_id_str(codex_home, session_id)
+        .await
+        .ok()
+        .flatten()
+    {
+        Some(path) => Some(path),
+        None => codex_core::find_archived_thread_path_by_id_str(codex_home, session_id)
+            .await
+            .ok()
+            .flatten(),
+    }
+}
+
+async fn restore_archived_rollout(
+    codex_home: &FsPath,
+    session_id: &str,
+) -> Result<Option<PathBuf>, String> {
+    if let Some(path) = codex_core::find_thread_path_by_id_str(codex_home, session_id)
+        .await
+        .map_err(|err| format!("resume_failed: {err}"))?
+    {
+        return Ok(Some(path));
+    }
+
+    let Some(archived_path) =
+        codex_core::find_archived_thread_path_by_id_str(codex_home, session_id)
+            .await
+            .map_err(|err| format!("resume_failed: {err}"))?
+    else {
+        return Ok(None);
+    };
+
+    let sessions_root = codex_home.join(codex_core::SESSIONS_SUBDIR);
+    tokio::fs::create_dir_all(&sessions_root)
+        .await
+        .map_err(|err| format!("resume_failed: {err}"))?;
+
+    let Some(file_name) = archived_path.file_name() else {
+        return Err("resume_failed: archived_session_missing_file_name".to_string());
+    };
+    let restored_path = sessions_root.join(file_name);
+    tokio::fs::rename(&archived_path, &restored_path)
+        .await
+        .map_err(|err| format!("resume_failed: {err}"))?;
+    Ok(Some(restored_path))
+}
+
+async fn load_stored_session_snapshot(
+    state: &AppState,
+    session_id: &str,
+    restore_archived: bool,
+) -> Result<Option<StoredSessionSnapshot>, String> {
+    let rollout_path = if restore_archived {
+        restore_archived_rollout(&state.config.codex_home, session_id).await?
+    } else {
+        find_session_rollout_path(&state.config.codex_home, session_id).await
+    };
+    let Some(rollout_path) = rollout_path else {
+        return Ok(None);
+    };
+
+    let history = codex_core::RolloutRecorder::get_rollout_history(&rollout_path)
+        .await
+        .map_err(|err| format!("resume_failed: {err}"))?;
+    let items = history.get_rollout_items();
+    let created_at = items
+        .iter()
+        .find_map(|item| match item {
+            RolloutItem::SessionMeta(meta_line) => parse_rfc3339_ms(&meta_line.meta.timestamp),
+            _ => None,
+        })
+        .unwrap_or_else(now_ms);
+    let updated_at = tokio::fs::metadata(&rollout_path)
+        .await
+        .ok()
+        .and_then(|meta| meta.modified().ok())
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| duration.as_millis() as u64)
+        .unwrap_or(created_at);
+    let cwd = history
+        .session_cwd()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+    let name = match ThreadId::from_string(session_id) {
+        Ok(thread_id) => codex_core::find_thread_name_by_id(&state.config.codex_home, &thread_id)
+            .await
+            .ok()
+            .flatten(),
+        Err(_) => None,
+    };
+    let messages = rollout_items_to_web_messages(&items);
+    let seq = messages.len() as u64;
+
+    Ok(Some(StoredSessionSnapshot {
+        rollout_path,
+        history,
+        cwd,
+        name,
+        created_at,
+        updated_at,
+        seq,
+        messages,
+    }))
+}
+
+async fn register_headless_session(
+    state: &AppState,
+    session_id: &str,
+    session: Arc<ActiveSession>,
+    emit_added_event: bool,
+) {
+    state
+        .sessions
+        .write()
+        .await
+        .insert(session_id.to_string(), session.clone());
+    start_headless_owner_lease(&state.config.codex_home, session.clone()).await;
+    tokio::spawn(session_event_loop(
+        state.clone(),
+        session_id.to_string(),
+        session,
+    ));
+
+    {
+        let mut kanban = state.kanban.write().await;
+        let changed = kanban.ensure_session(session_id);
+        let snapshot = kanban.clone();
+        drop(kanban);
+        if changed {
+            kanban::persist(&state.config.codex_home, &snapshot).await;
+            let data = serde_json::to_value(&snapshot).unwrap_or(JsonValue::Null);
+            let _ = state.events_tx.send(SyncEvent::KanbanUpdated { data });
+        }
+    }
+
+    let _ = if emit_added_event {
+        state.events_tx.send(SyncEvent::SessionAdded {
+            session_id: session_id.to_string(),
+            data: None,
+        })
+    } else {
+        state.events_tx.send(SyncEvent::SessionUpdated {
+            session_id: session_id.to_string(),
+            data: None,
+        })
+    };
+}
+
+fn live_request_from_event(event: &Event) -> Option<(String, WebAgentRequest)> {
+    let created_at = Some(now_ms());
+    match &event.msg {
+        EventMsg::ExecApprovalRequest(ev) => {
+            let approval_id = ev.effective_approval_id();
+            Some((
+                req_id_from_str(&approval_id),
+                WebAgentRequest {
+                    tool: "shell".to_string(),
+                    arguments: serde_json::json!({
+                        "kind": "exec",
+                        "approvalId": approval_id,
+                        "callId": ev.call_id,
+                        "turnId": ev.turn_id,
+                        "command": ev.command,
+                        "cwd": ev.cwd.display().to_string(),
+                        "reason": ev.reason,
+                        "proposedExecpolicyAmendment": ev.proposed_execpolicy_amendment,
+                    }),
+                    created_at,
+                },
+            ))
+        }
+        EventMsg::ApplyPatchApprovalRequest(ev) => Some((
+            req_id_from_str(&ev.call_id),
+            WebAgentRequest {
+                tool: "apply_patch".to_string(),
+                arguments: serde_json::json!({
+                    "kind": "patch",
+                    "callId": ev.call_id,
+                    "turnId": ev.turn_id,
+                    "reason": ev.reason,
+                }),
+                created_at,
+            },
+        )),
+        EventMsg::RequestPermissions(ev) => Some((
+            req_id_from_str(&ev.call_id),
+            WebAgentRequest {
+                tool: "permissions".to_string(),
+                arguments: serde_json::json!({
+                    "kind": "permissions",
+                    "callId": ev.call_id,
+                    "turnId": ev.turn_id,
+                    "reason": ev.reason,
+                    "permissions": ev.permissions,
+                }),
+                created_at,
+            },
+        )),
+        EventMsg::RequestUserInput(ev) => Some((
+            req_id_from_str(&ev.call_id),
+            WebAgentRequest {
+                tool: "request_user_input".to_string(),
+                arguments: serde_json::json!({
+                    "kind": "request_user_input",
+                    "callId": ev.call_id,
+                    "turnId": ev.turn_id,
+                    "questions": ev.questions,
+                }),
+                created_at,
+            },
+        )),
+        _ => None,
+    }
+}
+
+fn live_agent_state(snapshot: &live_runtime::LiveBridgeSnapshot) -> WebAgentState {
+    let mut requests = HashMap::new();
+    for event in &snapshot.buffered_events {
+        if let Some((id, request)) = live_request_from_event(event) {
+            requests.insert(id, request);
+        }
+    }
+
+    WebAgentState {
+        controlled_by_user: Some(true),
+        requests: (!requests.is_empty()).then_some(requests),
+        completed_requests: None,
+    }
+}
+
+async fn sync_live_session_messages_from_rollout(state: &AppState, session: &ActiveSession) {
+    let session_id = session.thread_id.to_string();
+    let Some(messages) = load_messages_from_rollout(state, &session_id).await else {
+        return;
+    };
+
+    let mut guard = session.state.write().await;
+    if messages.len() >= guard.messages.len() {
+        guard.next_seq = messages.len() as u64 + 1;
+        guard.messages = messages;
+        guard.updated_at = now_ms();
+    }
+}
+
+async fn refresh_live_session_from_snapshot(
+    session: &ActiveSession,
+    registration: &RuntimeLiveRegistration,
+    snapshot: &live_runtime::LiveBridgeSnapshot,
+) {
+    let (name, model, reasoning_effort, cwd) =
+        match snapshot.session_configured.as_ref().map(|event| &event.msg) {
+            Some(EventMsg::SessionConfigured(configured)) => (
+                configured.thread_name.clone(),
+                configured.model.clone(),
+                configured.reasoning_effort,
+                configured.cwd.clone(),
+            ),
+            _ => (
+                None,
+                "default".to_string(),
+                None,
+                snapshot
+                    .session_state
+                    .cwd
+                    .clone()
+                    .unwrap_or_else(|| registration.cwd.clone()),
+            ),
+        };
+    let live_state = SessionLiveState::from(snapshot.session_state.live_state);
+    let now = now_ms();
+
+    let mut guard = session.state.write().await;
+    guard.name = name.or_else(|| guard.name.clone());
+    guard.cwd = cwd;
+    guard.model = model;
+    guard.reasoning_effort = reasoning_effort;
+    guard.active = true;
+    guard.active_at = now;
+    guard.thinking = live_state == SessionLiveState::Generating;
+    guard.thinking_at = now;
+    guard.updated_at = now;
+    guard.backing = SessionBacking::LiveWindow;
+    guard.live_state = live_state;
+    guard.runtime_owner = registration.runtime_owner;
+    guard.window_id = Some(registration.window_id.clone());
+    guard.controller_count = 1;
+    guard.agent_state = live_agent_state(snapshot);
+    guard.agent_state_version = guard.agent_state_version.saturating_add(1);
+}
+
+async fn attach_live_session(
+    state: &AppState,
+    registration: RuntimeLiveRegistration,
+) -> Arc<ActiveSession> {
+    let session_id = registration.thread_id.to_string();
+    if let Some(existing) = state.sessions.read().await.get(&session_id).cloned() {
+        return existing;
+    }
+
+    let snapshot = live_runtime::bridge_snapshot(&registration).await.ok();
+    let stored = load_stored_session_snapshot(state, &session_id, false)
+        .await
+        .ok()
+        .flatten();
+    let heartbeat_updated_at = (registration.last_heartbeat_at.max(0) as u64) * 1000;
+    let live_state = snapshot
+        .as_ref()
+        .map(|snapshot| SessionLiveState::from(snapshot.session_state.live_state))
+        .unwrap_or(SessionLiveState::Unavailable);
+    let created_at = stored
+        .as_ref()
+        .map(|stored| stored.created_at)
+        .unwrap_or(heartbeat_updated_at);
+    let updated_at = stored
+        .as_ref()
+        .map(|stored| stored.updated_at.max(heartbeat_updated_at))
+        .unwrap_or(heartbeat_updated_at);
+    let messages = stored
+        .as_ref()
+        .map(|stored| stored.messages.clone())
+        .unwrap_or_default();
+    let next_seq = messages.len() as u64 + 1;
+    let default_cwd = stored
+        .as_ref()
+        .map(|stored| stored.cwd.clone())
+        .unwrap_or_else(|| registration.cwd.clone());
+    let default_name = stored.as_ref().and_then(|stored| stored.name.clone());
+    let (name, model, reasoning_effort, cwd) = match snapshot
+        .as_ref()
+        .and_then(|snapshot| snapshot.session_configured.as_ref())
+        .map(|event| &event.msg)
+    {
+        Some(EventMsg::SessionConfigured(configured)) => (
+            configured.thread_name.clone().or(default_name),
+            configured.model.clone(),
+            configured.reasoning_effort,
+            configured.cwd.clone(),
+        ),
+        _ => (default_name, "default".to_string(), None, default_cwd),
+    };
+
+    let session = Arc::new(ActiveSession {
+        thread_id: registration.thread_id,
+        thread: None,
+        live_registration: Some(registration.clone()),
+        lease_created_at: None,
+        lease_heartbeat_stop: Arc::new(AtomicBool::new(false)),
+        rollout_path: stored.as_ref().map(|stored| stored.rollout_path.clone()),
+        state: RwLock::new(SessionState {
+            name,
+            cwd,
+            model,
+            reasoning_effort,
+            created_at,
+            updated_at,
+            active: true,
+            active_at: heartbeat_updated_at,
+            thinking: live_state == SessionLiveState::Generating,
+            thinking_at: heartbeat_updated_at,
+            permission_mode: "default".to_string(),
+            model_mode: "default".to_string(),
+            metadata_version: 0,
+            agent_state_version: 0,
+            agent_state: snapshot.as_ref().map(live_agent_state).unwrap_or_default(),
+            backing: SessionBacking::LiveWindow,
+            live_state,
+            runtime_owner: registration.runtime_owner,
+            window_id: Some(registration.window_id.clone()),
+            controller_count: 1,
+            next_seq,
+            messages,
+        }),
+    });
+
+    state
+        .sessions
+        .write()
+        .await
+        .insert(session_id.clone(), session.clone());
+    let _ = state.events_tx.send(SyncEvent::SessionLiveAttached {
+        session_id: session_id.clone(),
+    });
+    let _ = state.events_tx.send(SyncEvent::SessionUpdated {
+        session_id: session_id.clone(),
+        data: None,
+    });
+
+    tokio::spawn(live_session_event_loop(
+        state.clone(),
+        session_id,
+        session.clone(),
+    ));
+    session
+}
+
+async fn live_session_event_loop(state: AppState, session_id: String, session: Arc<ActiveSession>) {
+    let Some(registration) = session.live_registration.clone() else {
+        return;
+    };
+
+    let mut reader = match live_runtime::open_subscription(&registration).await {
+        Ok(reader) => reader,
+        Err(err) => {
+            warn!(session_id, error = %err, "failed to subscribe to live bridge");
+            state.sessions.write().await.remove(&session_id);
+            let _ = state.events_tx.send(SyncEvent::SessionLiveDetached {
+                session_id: session_id.clone(),
+            });
+            let _ = state.events_tx.send(SyncEvent::SessionUpdated {
+                session_id,
+                data: None,
+            });
+            return;
+        }
+    };
+
+    while let Ok(Some(frame)) = live_runtime::next_subscription_frame(&mut reader).await {
+        match frame {
+            live_runtime::LiveBridgeServerFrame::Response { response, .. } => {
+                if let live_runtime::LiveBridgeResponse::Snapshot { snapshot } = response {
+                    refresh_live_session_from_snapshot(session.as_ref(), &registration, &snapshot)
+                        .await;
+                    sync_live_session_messages_from_rollout(&state, session.as_ref()).await;
+                    let _ = state.events_tx.send(SyncEvent::SessionUpdated {
+                        session_id: session_id.clone(),
+                        data: None,
+                    });
+                }
+            }
+            live_runtime::LiveBridgeServerFrame::Event { event } => match event {
+                live_runtime::LiveBridgeEvent::SessionState { .. } => {
+                    if let Ok(snapshot) = live_runtime::bridge_snapshot(&registration).await {
+                        refresh_live_session_from_snapshot(
+                            session.as_ref(),
+                            &registration,
+                            &snapshot,
+                        )
+                        .await;
+                        let _ = state.events_tx.send(SyncEvent::SessionUpdated {
+                            session_id: session_id.clone(),
+                            data: None,
+                        });
+                    }
+                }
+                live_runtime::LiveBridgeEvent::TurnStarted { .. }
+                | live_runtime::LiveBridgeEvent::TurnCompleted { .. } => {
+                    let _ = state.events_tx.send(SyncEvent::SessionUpdated {
+                        session_id: session_id.clone(),
+                        data: None,
+                    });
+                }
+                live_runtime::LiveBridgeEvent::MessageDelta { event } => {
+                    let _ = state.events_tx.send(SyncEvent::MessageDelta {
+                        session_id: session_id.clone(),
+                        event,
+                    });
+                }
+                live_runtime::LiveBridgeEvent::MessageFinalized { event } => {
+                    sync_live_session_messages_from_rollout(&state, session.as_ref()).await;
+                    let _ = state.events_tx.send(SyncEvent::MessageFinalized {
+                        session_id: session_id.clone(),
+                        event,
+                    });
+                }
+                live_runtime::LiveBridgeEvent::ApprovalRequested { event }
+                | live_runtime::LiveBridgeEvent::RequestUserInputRequested { event } => {
+                    if let Some((request_id, request)) = live_request_from_event(&event) {
+                        let mut guard = session.state.write().await;
+                        guard
+                            .agent_state
+                            .requests
+                            .get_or_insert_with(HashMap::new)
+                            .insert(request_id, request);
+                        guard.agent_state_version = guard.agent_state_version.saturating_add(1);
+                        guard.updated_at = now_ms();
+                    }
+                    let _ = state.events_tx.send(SyncEvent::SessionUpdated {
+                        session_id: session_id.clone(),
+                        data: None,
+                    });
+                }
+                live_runtime::LiveBridgeEvent::OwnerClosed => {
+                    state.sessions.write().await.remove(&session_id);
+                    let _ = state.events_tx.send(SyncEvent::SessionLiveDetached {
+                        session_id: session_id.clone(),
+                    });
+                    let _ = state.events_tx.send(SyncEvent::SessionUpdated {
+                        session_id: session_id.clone(),
+                        data: None,
+                    });
+                    return;
+                }
+            },
+            live_runtime::LiveBridgeServerFrame::Error { message, .. } => {
+                warn!(session_id, message, "live bridge returned error frame");
+            }
+        }
+    }
+
+    state.sessions.write().await.remove(&session_id);
+    let _ = state.events_tx.send(SyncEvent::SessionLiveDetached {
+        session_id: session_id.clone(),
+    });
+    let _ = state.events_tx.send(SyncEvent::SessionUpdated {
+        session_id,
+        data: None,
+    });
+}
+
+async fn activate_session_owner(
+    state: &AppState,
+    session_id: &str,
+) -> Result<SessionActivation, ActivateSessionError> {
+    if let Some(session) = state.sessions.read().await.get(session_id).cloned() {
+        if session.live_registration.is_some() {
+            return Ok(SessionActivation::Live(session));
+        }
+        return Ok(SessionActivation::Headless(session));
+    }
+
+    if let Ok(thread_id) = ThreadId::from_string(session_id)
+        && let Some(registration) =
+            live_runtime::load_live_registration_for_thread(&state.config.codex_home, &thread_id)
+                .await
+    {
+        let session = attach_live_session(state, registration).await;
+        return Ok(SessionActivation::Live(session));
+    }
+
+    let Some(stored) = load_stored_session_snapshot(state, session_id, true)
+        .await
+        .map_err(ActivateSessionError::Invalid)?
+    else {
+        return Err(ActivateSessionError::NotFound);
+    };
+
+    let recovered_effort = extract_reasoning_effort_from_history(&stored.history);
+    let mut overrides = state.base_overrides.clone();
+    overrides.cwd = Some(stored.cwd.clone());
+    let mut config = Config::load_with_cli_overrides_and_harness_overrides(
+        state.cli_overrides.clone(),
+        overrides,
+    )
+    .await
+    .map_err(|err| ActivateSessionError::Internal(format!("config_load_failed: {err}")))?;
+    if let Some(effort) = recovered_effort {
+        config.model_reasoning_effort = Some(effort);
+    }
+
+    let new_thread = state
+        .thread_manager
+        .resume_thread_with_history(
+            config,
+            stored.history.clone(),
+            state.auth_manager.clone(),
+            true,
+        )
+        .await
+        .map_err(|err| ActivateSessionError::Internal(format!("resume_failed: {err}")))?;
+
+    let thread_id = new_thread.thread_id;
+    let lease_created_at = unix_timestamp_now();
+    if let Some(existing_lease) = live_runtime::claim_headless_owner_lease(
+        &state.config.codex_home,
+        thread_id,
+        std::process::id(),
+        lease_created_at,
+        lease_created_at,
+    )
+    .await
+    .map_err(|err| ActivateSessionError::Internal(format!("owner_lease_failed: {err}")))?
+    {
+        let _ = new_thread.thread.submit(Op::Shutdown).await;
+        return Err(ActivateSessionError::OwnerLeaseHeld {
+            owner: existing_lease.runtime_owner,
+            pid: existing_lease.pid,
+        });
+    }
+
+    let session = Arc::new(ActiveSession {
+        thread_id,
+        thread: Some(new_thread.thread),
+        live_registration: None,
+        lease_created_at: Some(lease_created_at),
+        lease_heartbeat_stop: Arc::new(AtomicBool::new(false)),
+        rollout_path: Some(stored.rollout_path.clone()),
+        state: RwLock::new(SessionState {
+            name: stored.name.clone(),
+            cwd: stored.cwd,
+            model: new_thread.session_configured.model.clone(),
+            reasoning_effort: new_thread.session_configured.reasoning_effort,
+            created_at: stored.created_at,
+            updated_at: stored.updated_at,
+            active: true,
+            active_at: stored.updated_at,
+            thinking: false,
+            thinking_at: stored.updated_at,
+            permission_mode: "default".to_string(),
+            model_mode: "default".to_string(),
+            metadata_version: 0,
+            agent_state_version: 0,
+            agent_state: WebAgentState::default(),
+            backing: SessionBacking::Headless,
+            live_state: SessionLiveState::Idle,
+            runtime_owner: RuntimeOwner::Serve,
+            window_id: None,
+            controller_count: 0,
+            next_seq: stored.seq.saturating_add(1),
+            messages: stored.messages,
+        }),
+    });
+    register_headless_session(state, session_id, session.clone(), false).await;
+    Ok(SessionActivation::Headless(session))
+}
+
+async fn build_live_window_session(
+    state: &AppState,
+    session_id: &str,
+    registration: &RuntimeLiveRegistration,
+) -> Session {
+    let snapshot = live_runtime::bridge_snapshot(registration).await.ok();
+    let stored = load_stored_session_snapshot(state, session_id, false)
+        .await
+        .ok()
+        .flatten();
+    let live_state = snapshot
+        .as_ref()
+        .map(|snapshot| SessionLiveState::from(snapshot.session_state.live_state))
+        .unwrap_or(SessionLiveState::Unavailable);
+    let heartbeat_updated_at = (registration.last_heartbeat_at.max(0) as u64) * 1000;
+    let created_at = stored
+        .as_ref()
+        .map(|stored| stored.created_at)
+        .unwrap_or(heartbeat_updated_at);
+    let updated_at = stored
+        .as_ref()
+        .map(|stored| stored.updated_at.max(heartbeat_updated_at))
+        .unwrap_or(heartbeat_updated_at);
+    let cwd = stored
+        .as_ref()
+        .map(|stored| stored.cwd.clone())
+        .unwrap_or_else(|| registration.cwd.clone());
+
+    Session {
+        id: session_id.to_string(),
+        namespace: "local".to_string(),
+        seq: stored.as_ref().map(|stored| stored.seq).unwrap_or(0),
+        created_at,
+        updated_at,
+        active: true,
+        active_at: heartbeat_updated_at,
+        backing: SessionBacking::LiveWindow,
+        live_state,
+        project_key: session_project_key(&cwd),
+        runtime_owner: Some(registration.runtime_owner),
+        window_id: Some(registration.window_id.clone()),
+        controller_count: 1,
+        metadata: Some(Metadata {
+            path: cwd.display().to_string(),
+            host: "local".to_string(),
+            name: stored.as_ref().and_then(|stored| stored.name.clone()),
+            machine_id: Some("local".to_string()),
+            tools: None,
+            flavor: Some("codex".to_string()),
+            summary: None,
+        }),
+        metadata_version: 0,
+        agent_state: None,
+        agent_state_version: 0,
+        thinking: live_state == SessionLiveState::Generating,
+        thinking_at: heartbeat_updated_at,
+        permission_mode: None,
+        model_mode: None,
+    }
+}
+
+async fn collect_session_summaries(state: &AppState) -> Vec<SessionSummary> {
+    let active_page = match codex_core::RolloutRecorder::list_threads(
+        &state.config,
+        10_000,
+        None,
+        codex_core::ThreadSortKey::UpdatedAt,
+        codex_core::INTERACTIVE_SESSION_SOURCES,
+        None,
+        &state.config.model_provider_id,
+        None,
+    )
+    .await
+    {
+        Ok(page) => page,
+        Err(_) => return Vec::new(),
+    };
+    let archived_page = codex_core::RolloutRecorder::list_archived_threads(
+        &state.config,
+        10_000,
+        None,
+        codex_core::ThreadSortKey::UpdatedAt,
+        codex_core::INTERACTIVE_SESSION_SOURCES,
+        None,
+        &state.config.model_provider_id,
+        None,
+    )
+    .await
+    .unwrap_or_default();
+
+    let mut ids: HashSet<ThreadId> = HashSet::new();
+    for item in active_page.items.iter().chain(archived_page.items.iter()) {
+        if let Some(thread_id) = item.thread_id {
+            ids.insert(thread_id);
+        }
+    }
+    let names = codex_core::find_thread_names_by_ids(&state.config.codex_home, &ids)
+        .await
+        .unwrap_or_default();
+    let raw_live_registrations =
+        live_runtime::load_live_registrations(&state.config.codex_home).await;
+    let mut live_registrations = HashMap::new();
+    for thread_id in raw_live_registrations.keys() {
+        if let Some(registration) =
+            live_runtime::load_live_registration_for_thread(&state.config.codex_home, thread_id)
+                .await
+        {
+            live_registrations.insert(*thread_id, registration);
+        }
+    }
+    let active_sessions = state.sessions.read().await;
+    let now = now_ms();
+    let mut seen_ids = HashSet::new();
+    let mut ordered = Vec::new();
+
+    for (item, archived) in active_page
+        .items
+        .into_iter()
+        .map(|item| (item, false))
+        .chain(archived_page.items.into_iter().map(|item| (item, true)))
+    {
+        let Some(thread_id) = item.thread_id else {
+            continue;
+        };
+        let id = thread_id.to_string();
+        if !seen_ids.insert(id.clone()) {
+            continue;
+        }
+
+        let name = names.get(&thread_id).cloned().or_else(|| {
+            active_sessions
+                .get(&id)
+                .and_then(|session| session.state.try_read().ok()?.name.clone())
+        });
+        let cwd = item
+            .cwd
+            .as_ref()
+            .map(|cwd| cwd.display().to_string())
+            .unwrap_or_default();
+        let updated_at = item
+            .updated_at
+            .as_deref()
+            .and_then(parse_rfc3339_ms)
+            .unwrap_or(now);
+        let active_session = active_sessions.get(&id);
+        let (
+            active,
+            thinking,
+            active_at,
+            pending,
+            backing,
+            live_state,
+            runtime_owner,
+            window_id,
+            controller_count,
+        ) = if let Some(session) = active_session {
+            let guard = session.state.read().await;
+            let pending = guard
+                .agent_state
+                .requests
+                .as_ref()
+                .map(|requests| requests.len() as u64)
+                .unwrap_or(0);
+            (
+                guard.active,
+                guard.thinking,
+                guard.active_at,
+                pending,
+                guard.backing,
+                guard.live_state,
+                Some(guard.runtime_owner),
+                guard.window_id.clone(),
+                guard.controller_count,
+            )
+        } else if let Some(registration) = live_registrations.remove(&thread_id) {
+            let live_updated_at = (registration.last_heartbeat_at.max(0) as u64) * 1000;
+            let snapshot = live_runtime::bridge_snapshot(&registration).await.ok();
+            let live_state = snapshot
+                .as_ref()
+                .map(|snapshot| SessionLiveState::from(snapshot.session_state.live_state))
+                .unwrap_or(SessionLiveState::Unavailable);
+            (
+                true,
+                live_state == SessionLiveState::Generating,
+                live_updated_at,
+                snapshot
+                    .as_ref()
+                    .map(pending_requests_in_live_snapshot)
+                    .unwrap_or(0),
+                SessionBacking::LiveWindow,
+                live_state,
+                Some(registration.runtime_owner),
+                Some(registration.window_id.clone()),
+                1,
+            )
+        } else {
+            (
+                false,
+                false,
+                updated_at,
+                0,
+                SessionBacking::Stored,
+                SessionLiveState::Stopped,
+                None,
+                None,
+                0,
+            )
+        };
+
+        ordered.push((
+            !active,
+            archived,
+            std::cmp::Reverse(updated_at),
+            SessionSummary {
+                id,
+                active,
+                thinking,
+                active_at,
+                updated_at,
+                backing,
+                live_state,
+                project_key: session_project_key(PathBuf::from(&cwd).as_path()),
+                runtime_owner,
+                window_id,
+                controller_count,
+                metadata: Some(SessionSummaryMetadata {
+                    name,
+                    path: cwd,
+                    machine_id: Some("local".to_string()),
+                    summary: None,
+                    flavor: Some("codex".to_string()),
+                    worktree: None,
+                }),
+                todo_progress: None,
+                pending_requests_count: pending,
+                model_mode: None,
+            },
+        ));
+    }
+
+    for (thread_id, registration) in live_registrations {
+        let id = thread_id.to_string();
+        if !seen_ids.insert(id.clone()) {
+            continue;
+        }
+        let snapshot = live_runtime::bridge_snapshot(&registration).await.ok();
+        let live_state = snapshot
+            .as_ref()
+            .map(|snapshot| SessionLiveState::from(snapshot.session_state.live_state))
+            .unwrap_or(SessionLiveState::Unavailable);
+        let updated_at = (registration.last_heartbeat_at.max(0) as u64) * 1000;
+        ordered.push((
+            false,
+            false,
+            std::cmp::Reverse(updated_at),
+            SessionSummary {
+                id,
+                active: true,
+                thinking: live_state == SessionLiveState::Generating,
+                active_at: updated_at,
+                updated_at,
+                backing: SessionBacking::LiveWindow,
+                live_state,
+                project_key: session_project_key(&registration.cwd),
+                runtime_owner: Some(registration.runtime_owner),
+                window_id: Some(registration.window_id.clone()),
+                controller_count: 1,
+                metadata: Some(SessionSummaryMetadata {
+                    name: names.get(&thread_id).cloned(),
+                    path: registration.cwd.display().to_string(),
+                    machine_id: Some("local".to_string()),
+                    summary: None,
+                    flavor: Some("codex".to_string()),
+                    worktree: None,
+                }),
+                todo_progress: None,
+                pending_requests_count: snapshot
+                    .as_ref()
+                    .map(pending_requests_in_live_snapshot)
+                    .unwrap_or(0),
+                model_mode: None,
+            },
+        ));
+    }
+
+    ordered.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then_with(|| a.1.cmp(&b.1))
+            .then_with(|| a.2.cmp(&b.2))
+    });
+    ordered
+        .into_iter()
+        .map(|(_, _, _, summary)| summary)
+        .collect()
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -3969,96 +5339,41 @@ async fn handle_move_github_kanban_card(
 }
 
 async fn handle_sessions(State(state): State<AppState>) -> Response {
-    let page = match codex_core::RolloutRecorder::list_threads(
-        state.config.as_ref(),
-        2000,
-        None,
-        codex_core::ThreadSortKey::UpdatedAt,
-        codex_core::INTERACTIVE_SESSION_SOURCES,
-        None,
-        &state.config.model_provider_id,
-        None,
-    )
-    .await
-    {
-        Ok(page) => page,
-        Err(_) => {
-            return Json(SessionsResponse {
-                sessions: Vec::new(),
-            })
-            .into_response();
-        }
-    };
+    let sessions = collect_session_summaries(&state).await;
+    Json(SessionsResponse { sessions }).into_response()
+}
 
-    let mut ids: HashSet<ThreadId> = HashSet::new();
-    for item in &page.items {
-        if let Some(thread_id) = item.thread_id {
-            ids.insert(thread_id);
-        }
-    }
-    let names = codex_core::find_thread_names_by_ids(&state.config.codex_home, &ids)
-        .await
-        .unwrap_or_default();
+async fn handle_projects(State(state): State<AppState>) -> Response {
+    let sessions = collect_session_summaries(&state).await;
+    let mut projects: HashMap<String, ProjectSummary> = HashMap::new();
 
-    let active = state.sessions.read().await;
-    let now = now_ms();
-    let mut sessions = Vec::new();
-    for item in page.items {
-        let Some(thread_id) = item.thread_id else {
+    for session in sessions {
+        let Some(metadata) = session.metadata else {
             continue;
         };
-
-        let id = thread_id.to_string();
-        let name = names.get(&thread_id).cloned().or_else(|| {
-            active
-                .get(&id)
-                .and_then(|s| s.state.try_read().ok()?.name.clone())
-        });
-        let cwd = item
-            .cwd
-            .as_ref()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default();
-        let updated_at = item
-            .updated_at
-            .as_deref()
-            .and_then(parse_rfc3339_ms)
-            .unwrap_or(now);
-        let active_session = active.get(&id);
-        let (is_active, thinking, active_at, pending) = if let Some(session) = active_session {
-            let guard = session.state.read().await;
-            let pending = guard
-                .agent_state
-                .requests
-                .as_ref()
-                .map(|m| m.len() as u64)
-                .unwrap_or(0);
-            (guard.active, guard.thinking, guard.active_at, pending)
-        } else {
-            (false, false, updated_at, 0)
-        };
-
-        sessions.push(SessionSummary {
-            id,
-            active: is_active,
-            thinking,
-            active_at,
-            updated_at,
-            metadata: Some(SessionSummaryMetadata {
-                name,
-                path: cwd,
-                machine_id: Some("local".to_string()),
-                summary: None,
-                flavor: Some("codex".to_string()),
-                worktree: None,
-            }),
-            todo_progress: None,
-            pending_requests_count: pending,
-            model_mode: None,
-        });
+        let entry = projects
+            .entry(session.project_key.clone())
+            .or_insert_with(|| ProjectSummary {
+                project_key: session.project_key.clone(),
+                path: metadata.path.clone(),
+                active_sessions: 0,
+                total_sessions: 0,
+                updated_at: session.updated_at,
+            });
+        entry.total_sessions = entry.total_sessions.saturating_add(1);
+        if session.active {
+            entry.active_sessions = entry.active_sessions.saturating_add(1);
+        }
+        entry.updated_at = entry.updated_at.max(session.updated_at);
     }
 
-    Json(SessionsResponse { sessions }).into_response()
+    let mut projects: Vec<ProjectSummary> = projects.into_values().collect();
+    projects.sort_by(|a, b| {
+        b.updated_at
+            .cmp(&a.updated_at)
+            .then_with(|| a.project_key.cmp(&b.project_key))
+    });
+    Json(ProjectsResponse { projects }).into_response()
 }
 
 async fn handle_session(State(state): State<AppState>, Path(id): Path<String>) -> Response {
@@ -4067,90 +5382,44 @@ async fn handle_session(State(state): State<AppState>, Path(id): Path<String>) -
         return Json(SessionResponse { session: s }).into_response();
     }
 
-    let now = now_ms();
-
-    let rollout_path = match codex_core::find_thread_path_by_id_str(&state.config.codex_home, &id)
-        .await
-        .ok()
-        .flatten()
+    if let Ok(thread_id) = ThreadId::from_string(&id)
+        && let Some(registration) =
+            live_runtime::load_live_registration_for_thread(&state.config.codex_home, &thread_id)
+                .await
     {
-        Some(path) => Some(path),
-        None => codex_core::find_archived_thread_path_by_id_str(&state.config.codex_home, &id)
-            .await
-            .ok()
-            .flatten(),
-    };
-    let Some(rollout_path) = rollout_path else {
-        return (StatusCode::NOT_FOUND, Json(json_error("session_not_found"))).into_response();
-    };
+        let session = build_live_window_session(&state, &id, &registration).await;
+        return Json(SessionResponse { session }).into_response();
+    }
 
-    let history = match codex_core::RolloutRecorder::get_rollout_history(&rollout_path).await {
-        Ok(history) => history,
-        Err(err) => {
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(json_error(&format!("resume_failed: {err}"))),
-            )
-                .into_response();
+    let stored = match load_stored_session_snapshot(&state, &id, false).await {
+        Ok(Some(stored)) => stored,
+        Ok(None) => {
+            return (StatusCode::NOT_FOUND, Json(json_error("session_not_found"))).into_response();
+        }
+        Err(message) => {
+            return (StatusCode::BAD_REQUEST, Json(json_error(&message))).into_response();
         }
     };
-
-    let items = history.get_rollout_items();
-    let created_at = items
-        .iter()
-        .find_map(|item| match item {
-            codex_protocol::protocol::RolloutItem::SessionMeta(meta_line) => {
-                parse_rfc3339_ms(&meta_line.meta.timestamp)
-            }
-            _ => None,
-        })
-        .unwrap_or(now);
-
-    let updated_at = tokio::fs::metadata(&rollout_path)
-        .await
-        .ok()
-        .and_then(|meta| meta.modified().ok())
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(created_at);
-
-    let cwd = history
-        .session_cwd()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-    let name = match ThreadId::from_string(&id) {
-        Ok(thread_id) => codex_core::find_thread_name_by_id(&state.config.codex_home, &thread_id)
-            .await
-            .ok()
-            .flatten(),
-        Err(_) => None,
-    };
-
-    let seq = items
-        .iter()
-        .filter(|item| {
-            matches!(
-                item,
-                codex_protocol::protocol::RolloutItem::ResponseItem(
-                    codex_protocol::models::ResponseItem::Message { .. }
-                )
-            )
-        })
-        .count() as u64;
 
     Json(SessionResponse {
         session: Session {
             id,
             namespace: "local".to_string(),
-            seq,
-            created_at,
-            updated_at,
+            seq: stored.seq,
+            created_at: stored.created_at,
+            updated_at: stored.updated_at,
             active: false,
-            active_at: updated_at,
+            active_at: stored.updated_at,
+            backing: SessionBacking::Stored,
+            live_state: SessionLiveState::Stopped,
+            project_key: session_project_key(&stored.cwd),
+            runtime_owner: None,
+            window_id: None,
+            controller_count: 0,
             metadata: Some(Metadata {
-                path: cwd.display().to_string(),
+                path: stored.cwd.display().to_string(),
                 host: "local".to_string(),
-                name,
+                name: stored.name,
                 machine_id: Some("local".to_string()),
                 tools: None,
                 flavor: Some("codex".to_string()),
@@ -4160,7 +5429,7 @@ async fn handle_session(State(state): State<AppState>, Path(id): Path<String>) -
             agent_state: None,
             agent_state_version: 0,
             thinking: false,
-            thinking_at: updated_at,
+            thinking_at: stored.updated_at,
             permission_mode: Some("default".to_string()),
             model_mode: Some("default".to_string()),
         },
@@ -4169,136 +5438,53 @@ async fn handle_session(State(state): State<AppState>, Path(id): Path<String>) -
 }
 
 async fn handle_resume_session(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    if state.sessions.read().await.contains_key(&id) {
-        return Json(serde_json::json!({ "sessionId": id })).into_response();
-    }
-
-    let Some(rollout_path) = codex_core::find_thread_path_by_id_str(&state.config.codex_home, &id)
-        .await
-        .ok()
-        .flatten()
-    else {
-        return (StatusCode::NOT_FOUND, Json(json_error("session_not_found"))).into_response();
-    };
-
-    let initial_history =
-        match codex_core::RolloutRecorder::get_rollout_history(&rollout_path).await {
-            Ok(history) => history,
-            Err(err) => {
-                return (
-                    StatusCode::BAD_REQUEST,
-                    Json(json_error(&format!("resume_failed: {err}"))),
-                )
-                    .into_response();
-            }
-        };
-    let cwd = initial_history
-        .session_cwd()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
-
-    let recovered_effort = extract_reasoning_effort_from_history(&initial_history);
-    let mut overrides = state.base_overrides.clone();
-    overrides.cwd = Some(cwd);
-    let mut config = match Config::load_with_cli_overrides_and_harness_overrides(
-        state.cli_overrides.clone(),
-        overrides,
-    )
-    .await
-    {
-        Ok(cfg) => cfg,
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json_error(&format!("config_load_failed: {err}"))),
-            )
-                .into_response();
+    match activate_session_owner(&state, &id).await {
+        Ok(SessionActivation::Headless(session)) => Json(serde_json::json!({
+            "sessionId": session.thread_id.to_string()
+        }))
+        .into_response(),
+        Ok(SessionActivation::Live(session)) => {
+            Json(serde_json::json!({ "sessionId": session.thread_id.to_string() })).into_response()
         }
-    };
-    if let Some(effort) = recovered_effort {
-        config.model_reasoning_effort = Some(effort);
-    }
-
-    let new_thread = match state
-        .thread_manager
-        .resume_thread_with_history(config, initial_history, state.auth_manager.clone(), true)
-        .await
-    {
-        Ok(new_thread) => new_thread,
-        Err(err) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(json_error(&format!("resume_failed: {err}"))),
-            )
-                .into_response();
+        Err(ActivateSessionError::NotFound) => {
+            (StatusCode::NOT_FOUND, Json(json_error("session_not_found"))).into_response()
         }
-    };
-
-    let thread_id = new_thread.thread_id;
-    let session_id = thread_id.to_string();
-    let session = Arc::new(ActiveSession {
-        thread_id,
-        thread: new_thread.thread,
-        rollout_path: new_thread.session_configured.rollout_path.clone(),
-        state: RwLock::new(SessionState {
-            name: new_thread.session_configured.thread_name.clone(),
-            cwd: new_thread.session_configured.cwd.clone(),
-            model: new_thread.session_configured.model.clone(),
-            reasoning_effort: new_thread.session_configured.reasoning_effort,
-            created_at: now_ms(),
-            updated_at: now_ms(),
-            active: true,
-            active_at: now_ms(),
-            thinking: false,
-            thinking_at: now_ms(),
-            permission_mode: "default".to_string(),
-            model_mode: "default".to_string(),
-            metadata_version: 0,
-            agent_state_version: 0,
-            agent_state: WebAgentState::default(),
-            next_seq: 1,
-            messages: Vec::new(),
-        }),
-    });
-
-    state
-        .sessions
-        .write()
-        .await
-        .insert(session_id.clone(), session.clone());
-    tokio::spawn(session_event_loop(
-        state.clone(),
-        session_id.clone(),
-        session,
-    ));
-
-    {
-        let mut kanban = state.kanban.write().await;
-        let changed = kanban.ensure_session(&session_id);
-        let snapshot = kanban.clone();
-        drop(kanban);
-        if changed {
-            kanban::persist(&state.config.codex_home, &snapshot).await;
-            let data = serde_json::to_value(&snapshot).unwrap_or(JsonValue::Null);
-            let _ = state.events_tx.send(SyncEvent::KanbanUpdated { data });
+        Err(ActivateSessionError::Invalid(message)) => {
+            (StatusCode::BAD_REQUEST, Json(json_error(&message))).into_response()
         }
+        Err(ActivateSessionError::Internal(message)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(json_error(&message)),
+        )
+            .into_response(),
+        Err(ActivateSessionError::OwnerLeaseHeld { owner, pid }) => (
+            StatusCode::CONFLICT,
+            Json(json_error(&format!(
+                "owner_lease_held:{}:{pid}",
+                owner_name(owner)
+            ))),
+        )
+            .into_response(),
     }
-    let _ = state.events_tx.send(SyncEvent::SessionUpdated {
-        session_id: session_id.clone(),
-        data: None,
-    });
-    Json(serde_json::json!({ "sessionId": session_id })).into_response()
 }
 
 async fn handle_abort_session(State(state): State<AppState>, Path(id): Path<String>) -> Response {
     let Some(session) = state.sessions.read().await.get(&id).cloned() else {
         return Json(serde_json::json!({})).into_response();
     };
-    let _ = session.thread.submit(Op::Interrupt).await;
+    if let Some(thread) = session.thread.as_ref() {
+        let _ = thread.submit(Op::Interrupt).await;
+    } else if let Some(registration) = session.live_registration.clone() {
+        let _ =
+            live_runtime::bridge_command(&registration, live_runtime::LiveBridgeCommand::Interrupt)
+                .await;
+    }
     Json(serde_json::json!({})).into_response()
 }
 
 async fn handle_archive_session(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    let rollout_path = if let Some(session) = state.sessions.read().await.get(&id).cloned() {
+    let active_session = state.sessions.read().await.get(&id).cloned();
+    let rollout_path = if let Some(session) = active_session.as_ref() {
         session.rollout_path.clone()
     } else {
         codex_core::find_thread_path_by_id_str(&state.config.codex_home, &id)
@@ -4324,7 +5510,15 @@ async fn handle_archive_session(State(state): State<AppState>, Path(id): Path<St
         .unwrap_or_else(|| archived_root.join(format!("{id}.jsonl")));
     let _ = tokio::fs::rename(&path, &dest).await;
 
-    state.sessions.write().await.remove(&id);
+    if let Some(session) = active_session.as_ref()
+        && let Some(thread) = session.thread.as_ref()
+    {
+        let _ = thread.submit(Op::Shutdown).await;
+    }
+
+    if let Some(session) = state.sessions.write().await.remove(&id) {
+        stop_headless_owner_lease(&state.config.codex_home, session.as_ref()).await;
+    }
     let _ = state.events_tx.send(SyncEvent::SessionRemoved {
         session_id: id.clone(),
     });
@@ -4344,7 +5538,15 @@ async fn handle_archive_session(State(state): State<AppState>, Path(id): Path<St
 }
 
 async fn handle_delete_session(State(state): State<AppState>, Path(id): Path<String>) -> Response {
-    state.sessions.write().await.remove(&id);
+    if let Some(session) = state.sessions.read().await.get(&id).cloned()
+        && let Some(thread) = session.thread.as_ref()
+    {
+        let _ = thread.submit(Op::Shutdown).await;
+    }
+
+    if let Some(session) = state.sessions.write().await.remove(&id) {
+        stop_headless_owner_lease(&state.config.codex_home, session.as_ref()).await;
+    }
 
     if let Some(path) = codex_core::find_thread_path_by_id_str(&state.config.codex_home, &id)
         .await
@@ -4403,8 +5605,10 @@ async fn handle_rename_session(
 
     if let Some(session) = state.sessions.read().await.get(&id).cloned() {
         session.state.write().await.name = normalized.clone();
-        if let Some(name) = normalized {
-            let _ = session.thread.submit(Op::SetThreadName { name }).await;
+        if let Some(name) = normalized
+            && let Some(thread) = session.thread.as_ref()
+        {
+            let _ = thread.submit(Op::SetThreadName { name }).await;
         }
     }
     let _ = state.events_tx.send(SyncEvent::SessionUpdated {
@@ -4463,13 +5667,35 @@ async fn handle_post_message(
     Path(id): Path<String>,
     Json(body): Json<MessagePostRequest>,
 ) -> Response {
-    let Some(session) = state.sessions.read().await.get(&id).cloned() else {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(json_error("session_inactive")),
-        )
-            .into_response();
+    let activation = match activate_session_owner(&state, &id).await {
+        Ok(SessionActivation::Headless(session)) => session,
+        Ok(SessionActivation::Live(session)) => session,
+        Err(ActivateSessionError::NotFound) => {
+            return (StatusCode::NOT_FOUND, Json(json_error("session_not_found"))).into_response();
+        }
+        Err(ActivateSessionError::Invalid(message)) => {
+            return (StatusCode::BAD_REQUEST, Json(json_error(&message))).into_response();
+        }
+        Err(ActivateSessionError::Internal(message)) => {
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(json_error(&message)),
+            )
+                .into_response();
+        }
+        Err(ActivateSessionError::OwnerLeaseHeld { owner, pid }) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(json_error(&format!(
+                    "owner_lease_held:{}:{pid}",
+                    owner_name(owner)
+                ))),
+            )
+                .into_response();
+        }
     };
+
+    let is_live_session = activation.thread.is_none();
 
     let created_at = now_ms();
     let text = body.text;
@@ -4477,7 +5703,7 @@ async fn handle_post_message(
     let local_id = body.local_id;
     let attachments = body.attachments;
     let (message, op) = {
-        let mut guard = session.state.write().await;
+        let mut guard = activation.state.write().await;
         let seq = guard.next_seq;
         guard.next_seq += 1;
         guard.updated_at = created_at;
@@ -4527,7 +5753,7 @@ async fn handle_post_message(
 
         let op = Op::UserTurn {
             items: vec![UserInput::Text {
-                text,
+                text: text.clone(),
                 text_elements: Vec::new(),
             }],
             cwd: guard.cwd.clone(),
@@ -4549,7 +5775,45 @@ async fn handle_post_message(
         session_id: id.clone(),
         message: message.clone(),
     });
-    let _ = session.thread.submit(op).await;
+    if let Some(thread) = activation.thread.as_ref() {
+        let _ = thread.submit(op).await;
+    } else if is_live_session && let Some(registration) = activation.live_registration.clone() {
+        let snapshot = live_runtime::bridge_snapshot(&registration).await.ok();
+        let live_state = snapshot
+            .as_ref()
+            .map(|snapshot| snapshot.session_state.live_state)
+            .unwrap_or(live_runtime::LiveBridgeLiveState::Unavailable);
+        let command = if matches!(
+            live_state,
+            live_runtime::LiveBridgeLiveState::Generating
+                | live_runtime::LiveBridgeLiveState::WaitingApproval
+                | live_runtime::LiveBridgeLiveState::WaitingUserInput
+        ) {
+            live_runtime::LiveBridgeCommand::SteerInput {
+                items: vec![UserInput::Text {
+                    text: text.clone(),
+                    text_elements: Vec::new(),
+                }],
+                expected_turn_id: snapshot
+                    .as_ref()
+                    .and_then(|snapshot| snapshot.session_state.current_turn_id.clone()),
+            }
+        } else {
+            live_runtime::LiveBridgeCommand::SubmitInput {
+                items: vec![UserInput::Text {
+                    text: text.clone(),
+                    text_elements: Vec::new(),
+                }],
+            }
+        };
+        if let Err(err) = live_runtime::bridge_command(&registration, command).await {
+            return (
+                StatusCode::BAD_GATEWAY,
+                Json(json_error(&format!("live_bridge_submit_failed: {err}"))),
+            )
+                .into_response();
+        }
+    }
     Json(serde_json::json!({})).into_response()
 }
 
@@ -4595,7 +5859,7 @@ async fn handle_approve_permission(
     };
 
     let completed_at = now_ms();
-    let op = {
+    let (op, bridge_command) = {
         let mut guard = session.state.write().await;
         let Some(requests) = guard.agent_state.requests.as_mut() else {
             return Json(serde_json::json!({})).into_response();
@@ -4615,7 +5879,7 @@ async fn handle_approve_permission(
             status: "approved".to_string(),
             reason: None,
             mode: body.mode.clone(),
-            decision: Some(decision),
+            decision: Some(decision.clone()),
             allow_tools: body.allow_tools.clone(),
             answers: body.answers.clone(),
         };
@@ -4625,12 +5889,24 @@ async fn handle_approve_permission(
             .get_or_insert_with(HashMap::new)
             .insert(req_id.clone(), completed);
         guard.agent_state_version += 1;
+        if session.thread.is_some() {
+            guard.live_state = derive_headless_live_state(&guard);
+        }
 
-        op
+        (
+            op,
+            build_live_bridge_approve_command(&pending.arguments, &decision, body.answers.clone()),
+        )
     };
 
-    if let Some(op) = op {
-        let _ = session.thread.submit(op).await;
+    if let Some(op) = op
+        && let Some(thread) = session.thread.as_ref()
+    {
+        let _ = thread.submit(op).await;
+    } else if let Some(command) = bridge_command
+        && let Some(registration) = session.live_registration.clone()
+    {
+        let _ = live_runtime::bridge_command(&registration, command).await;
     }
     let _ = state.events_tx.send(SyncEvent::SessionUpdated {
         session_id: id,
@@ -4649,7 +5925,7 @@ async fn handle_deny_permission(
     };
 
     let completed_at = now_ms();
-    let op = {
+    let (op, bridge_command) = {
         let mut guard = session.state.write().await;
         let Some(requests) = guard.agent_state.requests.as_mut() else {
             return Json(serde_json::json!({})).into_response();
@@ -4669,7 +5945,7 @@ async fn handle_deny_permission(
             status: "denied".to_string(),
             reason: None,
             mode: None,
-            decision: Some(decision),
+            decision: Some(decision.clone()),
             allow_tools: None,
             answers: None,
         };
@@ -4679,11 +5955,23 @@ async fn handle_deny_permission(
             .get_or_insert_with(HashMap::new)
             .insert(req_id.clone(), completed);
         guard.agent_state_version += 1;
-        op
+        if session.thread.is_some() {
+            guard.live_state = derive_headless_live_state(&guard);
+        }
+        (
+            op,
+            build_live_bridge_deny_command(&pending.arguments, &decision),
+        )
     };
 
-    if let Some(op) = op {
-        let _ = session.thread.submit(op).await;
+    if let Some(op) = op
+        && let Some(thread) = session.thread.as_ref()
+    {
+        let _ = thread.submit(op).await;
+    } else if let Some(command) = bridge_command
+        && let Some(registration) = session.live_registration.clone()
+    {
+        let _ = live_runtime::bridge_command(&registration, command).await;
     }
     let _ = state.events_tx.send(SyncEvent::SessionUpdated {
         session_id: id,
@@ -4722,6 +6010,25 @@ fn build_permission_op(
                 .to_string(),
             decision: decision_to_review_decision(decision, arguments),
         }),
+        "permissions" => Some(Op::RequestPermissionsResponse {
+            id: arguments
+                .get("callId")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            response: codex_protocol::request_permissions::RequestPermissionsResponse {
+                permissions: arguments
+                    .get("permissions")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok())
+                    .unwrap_or_default(),
+                scope: if decision == "approved_for_session" {
+                    codex_protocol::request_permissions::PermissionGrantScope::Session
+                } else {
+                    codex_protocol::request_permissions::PermissionGrantScope::Turn
+                },
+            },
+        }),
         "request_user_input" => {
             let turn_id = arguments
                 .get("turnId")
@@ -4734,6 +6041,125 @@ fn build_permission_op(
                 response,
             })
         }
+        _ => None,
+    }
+}
+
+fn build_live_bridge_approve_command(
+    arguments: &JsonValue,
+    decision: &str,
+    answers: Option<JsonValue>,
+) -> Option<live_runtime::LiveBridgeCommand> {
+    let kind = arguments
+        .get("kind")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    match kind {
+        "exec" => Some(live_runtime::LiveBridgeCommand::Approve {
+            action: live_runtime::LiveBridgeApprovalAction::Exec {
+                id: arguments
+                    .get("approvalId")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                turn_id: arguments
+                    .get("turnId")
+                    .and_then(JsonValue::as_str)
+                    .map(ToOwned::to_owned),
+                decision: Some(decision_to_review_decision(decision, arguments)),
+            },
+        }),
+        "patch" => Some(live_runtime::LiveBridgeCommand::Approve {
+            action: live_runtime::LiveBridgeApprovalAction::Patch {
+                id: arguments
+                    .get("callId")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                decision: Some(decision_to_review_decision(decision, arguments)),
+            },
+        }),
+        "permissions" => Some(live_runtime::LiveBridgeCommand::Approve {
+            action: live_runtime::LiveBridgeApprovalAction::Permissions {
+                id: arguments
+                    .get("callId")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                permissions: arguments
+                    .get("permissions")
+                    .cloned()
+                    .and_then(|value| serde_json::from_value(value).ok())
+                    .unwrap_or_default(),
+                scope: Some(if decision == "approved_for_session" {
+                    codex_protocol::request_permissions::PermissionGrantScope::Session
+                } else {
+                    codex_protocol::request_permissions::PermissionGrantScope::Turn
+                }),
+            },
+        }),
+        "request_user_input" => Some(live_runtime::LiveBridgeCommand::AnswerUserInput {
+            turn_id: arguments
+                .get("turnId")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            response: answers_to_user_input_response(answers.unwrap_or(JsonValue::Null)),
+        }),
+        _ => None,
+    }
+}
+
+fn build_live_bridge_deny_command(
+    arguments: &JsonValue,
+    decision: &str,
+) -> Option<live_runtime::LiveBridgeCommand> {
+    let kind = arguments
+        .get("kind")
+        .and_then(JsonValue::as_str)
+        .unwrap_or_default();
+    match kind {
+        "exec" => Some(live_runtime::LiveBridgeCommand::Deny {
+            action: live_runtime::LiveBridgeDenialAction::Exec {
+                id: arguments
+                    .get("approvalId")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                turn_id: arguments
+                    .get("turnId")
+                    .and_then(JsonValue::as_str)
+                    .map(ToOwned::to_owned),
+                abort: decision == "abort",
+            },
+        }),
+        "patch" => Some(live_runtime::LiveBridgeCommand::Deny {
+            action: live_runtime::LiveBridgeDenialAction::Patch {
+                id: arguments
+                    .get("callId")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                abort: decision == "abort",
+            },
+        }),
+        "permissions" => Some(live_runtime::LiveBridgeCommand::Deny {
+            action: live_runtime::LiveBridgeDenialAction::Permissions {
+                id: arguments
+                    .get("callId")
+                    .and_then(JsonValue::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+            },
+        }),
+        "request_user_input" => Some(live_runtime::LiveBridgeCommand::AnswerUserInput {
+            turn_id: arguments
+                .get("turnId")
+                .and_then(JsonValue::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            response: answers_to_user_input_response(JsonValue::Null),
+        }),
         _ => None,
     }
 }
@@ -4889,6 +6315,37 @@ async fn handle_machine_spawn(
     };
 
     let thread_id = new_thread.thread_id;
+    let lease_created_at = unix_timestamp_now();
+    if let Some(existing_lease) = match live_runtime::claim_headless_owner_lease(
+        &state.config.codex_home,
+        thread_id,
+        std::process::id(),
+        lease_created_at,
+        lease_created_at,
+    )
+    .await
+    {
+        Ok(existing_lease) => existing_lease,
+        Err(err) => {
+            let _ = new_thread.thread.submit(Op::Shutdown).await;
+            return Json(SpawnError {
+                kind: "error",
+                message: format!("owner lease failed: {err}"),
+            })
+            .into_response();
+        }
+    } {
+        let _ = new_thread.thread.submit(Op::Shutdown).await;
+        return Json(SpawnError {
+            kind: "error",
+            message: format!(
+                "owner lease held by {}:{}",
+                owner_name(existing_lease.runtime_owner),
+                existing_lease.pid
+            ),
+        })
+        .into_response();
+    }
     let session_id = thread_id.to_string();
     let permission_mode = if body.yolo.unwrap_or(false) {
         "yolo".to_string()
@@ -4898,7 +6355,10 @@ async fn handle_machine_spawn(
 
     let session = Arc::new(ActiveSession {
         thread_id,
-        thread: new_thread.thread,
+        thread: Some(new_thread.thread),
+        live_registration: None,
+        lease_created_at: Some(lease_created_at),
+        lease_heartbeat_stop: Arc::new(AtomicBool::new(false)),
         rollout_path: new_thread.session_configured.rollout_path.clone(),
         state: RwLock::new(SessionState {
             name: new_thread.session_configured.thread_name.clone(),
@@ -4916,38 +6376,17 @@ async fn handle_machine_spawn(
             metadata_version: 0,
             agent_state_version: 0,
             agent_state: WebAgentState::default(),
+            backing: SessionBacking::Headless,
+            live_state: SessionLiveState::Idle,
+            runtime_owner: RuntimeOwner::Serve,
+            window_id: None,
+            controller_count: 0,
             next_seq: 1,
             messages: Vec::new(),
         }),
     });
 
-    state
-        .sessions
-        .write()
-        .await
-        .insert(session_id.clone(), session.clone());
-    tokio::spawn(session_event_loop(
-        state.clone(),
-        session_id.clone(),
-        session,
-    ));
-
-    {
-        let mut kanban = state.kanban.write().await;
-        let changed = kanban.ensure_session(&session_id);
-        let snapshot = kanban.clone();
-        drop(kanban);
-        if changed {
-            kanban::persist(&state.config.codex_home, &snapshot).await;
-            let data = serde_json::to_value(&snapshot).unwrap_or(JsonValue::Null);
-            let _ = state.events_tx.send(SyncEvent::KanbanUpdated { data });
-        }
-    }
-
-    let _ = state.events_tx.send(SyncEvent::SessionAdded {
-        session_id: session_id.clone(),
-        data: None,
-    });
+    register_headless_session(&state, &session_id, session, true).await;
 
     Json(SpawnSuccess {
         kind: "success",
@@ -5622,11 +7061,36 @@ async fn handle_static(State(state): State<AppState>, req: axum::http::Request<B
 }
 
 async fn session_event_loop(state: AppState, session_id: String, session: Arc<ActiveSession>) {
+    let Some(thread) = session.thread.as_ref().cloned() else {
+        return;
+    };
+    let lease_created_at = session.lease_created_at.unwrap_or_else(unix_timestamp_now);
+    let mut owner_lease_heartbeat = tokio::time::interval(HEADLESS_OWNER_LEASE_HEARTBEAT_INTERVAL);
     loop {
-        let event = match session.thread.next_event().await {
-            Ok(event) => event,
-            Err(_) => break,
+        let event = tokio::select! {
+            _ = owner_lease_heartbeat.tick() => {
+                if session.lease_heartbeat_stop.load(Ordering::Acquire) {
+                    break;
+                }
+                if let Err(err) = live_runtime::write_headless_owner_lease(
+                    &state.config.codex_home,
+                    session.thread_id,
+                    std::process::id(),
+                    unix_timestamp_now(),
+                    lease_created_at,
+                ).await {
+                    warn!(session_id, error = %err, "failed to refresh headless owner lease");
+                }
+                continue;
+            }
+            event = thread.next_event() => {
+                match event {
+                    Ok(event) => event,
+                    Err(_) => break,
+                }
+            }
         };
+        let emitted_event = event.clone();
         match event.msg {
             EventMsg::TurnStarted(_) => {
                 let now = now_ms();
@@ -5635,6 +7099,7 @@ async fn session_event_loop(state: AppState, session_id: String, session: Arc<Ac
                     guard.thinking = true;
                     guard.thinking_at = now;
                     guard.updated_at = now;
+                    guard.live_state = derive_headless_live_state(&guard);
                 }
                 let _ = state.events_tx.send(SyncEvent::SessionUpdated {
                     session_id: session_id.clone(),
@@ -5648,6 +7113,7 @@ async fn session_event_loop(state: AppState, session_id: String, session: Arc<Ac
                     guard.thinking = false;
                     guard.thinking_at = now;
                     guard.updated_at = now;
+                    guard.live_state = derive_headless_live_state(&guard);
                 }
                 let _ = state.events_tx.send(SyncEvent::SessionUpdated {
                     session_id: session_id.clone(),
@@ -5682,11 +7148,33 @@ async fn session_event_loop(state: AppState, session_id: String, session: Arc<Ac
                         original_text: None,
                     };
                     guard.messages.push(message.clone());
+                    guard.live_state = derive_headless_live_state(&guard);
                     message
                 };
                 let _ = state.events_tx.send(SyncEvent::MessageReceived {
                     session_id: session_id.clone(),
                     message,
+                });
+            }
+            EventMsg::AgentMessageContentDelta(_)
+            | EventMsg::ReasoningContentDelta(_)
+            | EventMsg::ReasoningRawContentDelta(_)
+            | EventMsg::PlanDelta(_) => {
+                let _ = state.events_tx.send(SyncEvent::MessageDelta {
+                    session_id: session_id.clone(),
+                    event: emitted_event,
+                });
+            }
+            EventMsg::ItemCompleted(completed)
+                if matches!(
+                    completed.item,
+                    codex_protocol::items::TurnItem::AgentMessage(_)
+                        | codex_protocol::items::TurnItem::Reasoning(_)
+                ) =>
+            {
+                let _ = state.events_tx.send(SyncEvent::MessageFinalized {
+                    session_id: session_id.clone(),
+                    event: emitted_event,
                 });
             }
             EventMsg::ExecApprovalRequest(ev) => {
@@ -5715,6 +7203,7 @@ async fn session_event_loop(state: AppState, session_id: String, session: Arc<Ac
                         .insert(req_id_from_str(&approval_id), req);
                     guard.agent_state_version += 1;
                     guard.updated_at = now;
+                    guard.live_state = derive_headless_live_state(&guard);
                 }
                 let _ = state.events_tx.send(SyncEvent::SessionUpdated {
                     session_id: session_id.clone(),
@@ -5743,6 +7232,36 @@ async fn session_event_loop(state: AppState, session_id: String, session: Arc<Ac
                         .insert(req_id_from_str(&call_id), req);
                     guard.agent_state_version += 1;
                     guard.updated_at = now;
+                    guard.live_state = derive_headless_live_state(&guard);
+                }
+                let _ = state.events_tx.send(SyncEvent::SessionUpdated {
+                    session_id: session_id.clone(),
+                    data: None,
+                });
+            }
+            EventMsg::RequestPermissions(ev) => {
+                let now = now_ms();
+                {
+                    let mut guard = session.state.write().await;
+                    let req = WebAgentRequest {
+                        tool: "permissions".to_string(),
+                        arguments: serde_json::json!({
+                            "kind": "permissions",
+                            "callId": ev.call_id,
+                            "turnId": ev.turn_id,
+                            "reason": ev.reason,
+                            "permissions": ev.permissions,
+                        }),
+                        created_at: Some(now),
+                    };
+                    guard
+                        .agent_state
+                        .requests
+                        .get_or_insert_with(HashMap::new)
+                        .insert(req_id_from_str(&ev.call_id), req);
+                    guard.agent_state_version += 1;
+                    guard.updated_at = now;
+                    guard.live_state = derive_headless_live_state(&guard);
                 }
                 let _ = state.events_tx.send(SyncEvent::SessionUpdated {
                     session_id: session_id.clone(),
@@ -5771,6 +7290,7 @@ async fn session_event_loop(state: AppState, session_id: String, session: Arc<Ac
                         .insert(req_id_from_str(&call_id), req);
                     guard.agent_state_version += 1;
                     guard.updated_at = now;
+                    guard.live_state = derive_headless_live_state(&guard);
                 }
                 let _ = state.events_tx.send(SyncEvent::SessionUpdated {
                     session_id: session_id.clone(),
@@ -5780,6 +7300,7 @@ async fn session_event_loop(state: AppState, session_id: String, session: Arc<Ac
             _ => {}
         }
     }
+    stop_headless_owner_lease(&state.config.codex_home, session.as_ref()).await;
 }
 
 fn req_id_from_str(id: &str) -> String {
@@ -5796,6 +7317,12 @@ async fn build_session_json(session: &ActiveSession) -> Session {
         updated_at: guard.updated_at,
         active: guard.active,
         active_at: guard.active_at,
+        backing: guard.backing,
+        live_state: guard.live_state,
+        project_key: session_project_key(&guard.cwd),
+        runtime_owner: Some(guard.runtime_owner),
+        window_id: guard.window_id.clone(),
+        controller_count: guard.controller_count,
         metadata: Some(Metadata {
             path: guard.cwd.display().to_string(),
             host: "local".to_string(),
@@ -6749,10 +8276,7 @@ async fn resolve_session_cwd(state: &AppState, session_id: &str) -> Result<PathB
     if let Some(session) = state.sessions.read().await.get(session_id).cloned() {
         return Ok(session.state.read().await.cwd.clone());
     }
-    let Some(path) = codex_core::find_thread_path_by_id_str(&state.config.codex_home, session_id)
-        .await
-        .map_err(|e| e.to_string())?
-    else {
+    let Some(path) = find_session_rollout_path(&state.config.codex_home, session_id).await else {
         return Err("session not found".to_string());
     };
     let history = codex_core::RolloutRecorder::get_rollout_history(&path)
@@ -6767,52 +8291,11 @@ async fn load_messages_from_rollout(
     state: &AppState,
     session_id: &str,
 ) -> Option<Vec<WebDecryptedMessage>> {
-    let path = codex_core::find_thread_path_by_id_str(&state.config.codex_home, session_id)
-        .await
-        .ok()
-        .flatten()?;
+    let path = find_session_rollout_path(&state.config.codex_home, session_id).await?;
     let history = codex_core::RolloutRecorder::get_rollout_history(&path)
         .await
         .ok()?;
-    let items = history.get_rollout_items();
-    let mut out = Vec::new();
-    let mut seq: u64 = 1;
-
-    for item in items {
-        let codex_protocol::protocol::RolloutItem::ResponseItem(item) = item else {
-            continue;
-        };
-        let codex_protocol::models::ResponseItem::Message { role, content, .. } = item else {
-            continue;
-        };
-        let text = codex_core::content_items_to_text(&content);
-        let (wrapper_role, wrapper_content) = if role == "user" {
-            ("user", serde_json::json!({ "type": "text", "text": text }))
-        } else if role == "assistant" {
-            (
-                "agent",
-                serde_json::json!({
-                    "type":"output",
-                    "data": { "type":"assistant", "message": { "content": text } }
-                }),
-            )
-        } else {
-            continue;
-        };
-
-        let msg = WebDecryptedMessage {
-            id: uuid::Uuid::new_v4().to_string(),
-            seq: Some(seq),
-            local_id: None,
-            content: serde_json::json!({ "role": wrapper_role, "content": wrapper_content }),
-            created_at: now_ms(),
-            status: None,
-            original_text: None,
-        };
-        seq += 1;
-        out.push(msg);
-    }
-    Some(out)
+    Some(rollout_items_to_web_messages(&history.get_rollout_items()))
 }
 
 fn generate_token() -> String {
