@@ -25,25 +25,27 @@
 
 ### 1.1 要删除的文件
 
-| 文件路径 | 行数 | 说明 |
-|---------|------|------|
-| `core/src/tools/handlers/multi_agents/team_task_list.rs` | 48 | team_task_list handler |
-| `core/src/tools/handlers/multi_agents/team_task_claim.rs` | 93 | team_task_claim handler |
-| `core/src/tools/handlers/multi_agents/team_task_claim_next.rs` | 124 | team_task_claim_next handler |
-| `core/src/tools/handlers/multi_agents/team_task_complete.rs` | 125 | team_task_complete handler |
-| `core/src/tools/handlers/multi_agents/locks.rs` | 100 | 仅被 task 系统使用的文件锁 |
+| 文件路径                                                       | 行数 | 说明                         |
+| -------------------------------------------------------------- | ---- | ---------------------------- |
+| `core/src/tools/handlers/multi_agents/team_task_list.rs`       | 48   | team_task_list handler       |
+| `core/src/tools/handlers/multi_agents/team_task_claim.rs`      | 93   | team_task_claim handler      |
+| `core/src/tools/handlers/multi_agents/team_task_claim_next.rs` | 124  | team_task_claim_next handler |
+| `core/src/tools/handlers/multi_agents/team_task_complete.rs`   | 125  | team_task_complete handler   |
+| `core/src/tools/handlers/multi_agents/locks.rs`                | 100  | 仅被 task 系统使用的文件锁   |
 
 ### 1.2 要修改的文件
 
 #### `core/src/tools/handlers/multi_agents.rs`（1864 行）
 
 **删除类型定义**：
+
 - Line 145: `enum PersistedTaskState` — 删除整个 enum
 - Line 153: `struct PersistedTeamTask` — 删除整个 struct
 - Line 164: `struct PersistedTeamTaskAssignee` — 删除整个 struct
 - Line 512: `struct TeamTaskOutput` — 删除整个 struct
 
 **删除函数**：
+
 - Line 223: `fn team_tasks_dir()` — 删除
 - Line 227: `async fn lock_team_tasks()` — 删除
 - Line 304: `fn build_initial_team_tasks()` — 删除
@@ -52,6 +54,7 @@
 - Line 1168: `async fn dispatch_task_completed_hook()` — 删除
 
 **删除 mod 声明**：
+
 - Line 1588: `mod team_task_list;` — 删除
 - Line 1590: `mod team_task_claim;` — 删除
 - Line 1592: `mod team_task_claim_next;` — 删除
@@ -59,6 +62,7 @@
 - Line 659: `mod locks;` — 删除
 
 **修改 handle() match（Line 629-656）**：
+
 - 删除 `"team_task_list"` arm
 - 删除 `"team_task_claim"` arm
 - 删除 `"team_task_claim_next"` arm
@@ -67,12 +71,14 @@
 #### `core/src/tools/spec.rs`（4593 行）
 
 **删除函数**：
+
 - Line 1406: `create_team_task_list_tool()` — 删除整个函数
 - Line 1426: `create_team_task_claim_tool()` — 删除整个函数
 - Line 1454: `create_team_task_claim_next_tool()` — 删除整个函数
 - Line 1486: `create_team_task_complete_tool()` — 删除整个函数
 
 **修改 build_specs()（Line 2690-2728）**：
+
 - 删除这 4 个工具的 `push_spec` 和 `register_handler` 调用
 
 #### `core/src/tools/handlers/multi_agents/spawn_team.rs`（379 行）
@@ -117,12 +123,14 @@ cargo clippy -p codex-core -- -D warnings
 #### `core/src/tools/handlers/multi_agents/send_message.rs`
 
 **参考现有实现**：
+
 - `send_input.rs`（47 行）— 基础 direct messaging
 - `team_message.rs`（81 行）— team 内消息
 - `team_broadcast.rs`（114 行）— 广播
 - `team_ask_lead.rs`（99 行）— 向上通信
 
 **输入 Schema**：
+
 ```rust
 #[derive(Deserialize)]
 struct SendMessageArgs {
@@ -139,10 +147,11 @@ struct SendMessageArgs {
 ```
 
 **路由逻辑**：
+
 ```rust
 pub async fn handle(...) -> Result<ToolOutput, FunctionCallError> {
     let args: SendMessageArgs = parse_arguments(&arguments)?;
-    
+
     if args.broadcast && args.team_id.is_some() {
         // 路径 A: 广播（复用 team_broadcast 逻辑）
         broadcast_to_team(session, turn, &args).await
@@ -160,29 +169,31 @@ pub async fn handle(...) -> Result<ToolOutput, FunctionCallError> {
 ```
 
 **复用的 helper 函数**（在 `multi_agents.rs` 中）：
+
 - `send_input_to_member()`（Line 536）— 所有路径共用
 - `parse_collab_input()`（Line 1733）— 解析 message/items union
-- `find_team_member()`  — team 成员查找
+- `find_team_member()` — team 成员查找
 - `get_team_record()` — team 注册表查询
 
 ### 2.2 要删除的文件
 
-| 文件路径 | 行数 |
-|---------|------|
-| `core/src/tools/handlers/multi_agents/send_input.rs` | 47 |
-| `core/src/tools/handlers/multi_agents/team_message.rs` | 81 |
-| `core/src/tools/handlers/multi_agents/team_broadcast.rs` | 114 |
-| `core/src/tools/handlers/multi_agents/team_ask_lead.rs` | 99 |
-| `core/src/tools/handlers/multi_agents/team_inbox_pop.rs` | 91 |
-| `core/src/tools/handlers/multi_agents/team_inbox_ack.rs` | 74 |
-| `core/src/tools/handlers/multi_agents/inbox.rs` | 292 |
+| 文件路径                                                 | 行数 |
+| -------------------------------------------------------- | ---- |
+| `core/src/tools/handlers/multi_agents/send_input.rs`     | 47   |
+| `core/src/tools/handlers/multi_agents/team_message.rs`   | 81   |
+| `core/src/tools/handlers/multi_agents/team_broadcast.rs` | 114  |
+| `core/src/tools/handlers/multi_agents/team_ask_lead.rs`  | 99   |
+| `core/src/tools/handlers/multi_agents/team_inbox_pop.rs` | 91   |
+| `core/src/tools/handlers/multi_agents/team_inbox_ack.rs` | 74   |
+| `core/src/tools/handlers/multi_agents/inbox.rs`          | 292  |
 
 ### 2.3 要修改的文件
 
 #### `core/src/tools/handlers/multi_agents.rs`
 
 **删除 mod 声明**：
-- Line 661: `mod inbox;` 
+
+- Line 661: `mod inbox;`
 - Line 663: `mod team_ask_lead;`
 - Line 665: `mod team_inbox_pop;`
 - Line 667: `mod team_inbox_ack;`
@@ -191,17 +202,20 @@ pub async fn handle(...) -> Result<ToolOutput, FunctionCallError> {
 - Line 1598: `mod team_broadcast;`
 
 **新增 mod 声明**：
+
 ```rust
 mod send_message;
 ```
 
 **修改 handle() match**：
+
 - 删除 `"send_input"`, `"team_message"`, `"team_broadcast"`, `"team_ask_lead"`, `"team_inbox_pop"`, `"team_inbox_ack"` 共 6 个 arm
 - 新增 `"send_message" => send_message::handle(session, turn, call_id, arguments).await`
 
 #### `core/src/tools/spec.rs`
 
 **删除函数**：
+
 - Line 1015: `create_send_input_tool()`
 - Line 1514: `create_team_message_tool()`
 - Line 1561: `create_team_broadcast_tool()`
@@ -210,6 +224,7 @@ mod send_message;
 - Line 1669: `create_team_inbox_ack_tool()`
 
 **新增函数** `create_send_message_tool()`：
+
 ```rust
 fn create_send_message_tool() -> ToolSpec {
     // JSON Schema:
@@ -229,6 +244,7 @@ fn create_send_message_tool() -> ToolSpec {
 ```
 
 **修改 build_specs()**：
+
 - 替换 6 个旧注册为 1 个 `send_message` 注册
 
 ### 2.4 验证规则
@@ -261,12 +277,14 @@ cargo clippy -p codex-core -- -D warnings
 #### `core/src/tools/handlers/multi_agents/create_team.rs`
 
 **基于** `spawn_team.rs`（379 行）简化：
+
 - 保留：成员生成逻辑（循环 spawn + role + worktree）
 - 保留：team registry 注册 + 持久化
 - 删除：`build_initial_team_tasks()` 调用（Task 1 已删）
 - 新增：创建完成后注入 coordinator prompt 到 lead thread（Task 5 实现，此处先留 TODO）
 
 **输入 Schema**：
+
 ```rust
 #[derive(Deserialize)]
 struct CreateTeamArgs {
@@ -288,6 +306,7 @@ struct CreateTeamMemberArgs {
 ```
 
 **输出**：
+
 ```rust
 struct CreateTeamResult {
     team_id: String,
@@ -303,12 +322,14 @@ struct CreateTeamMemberResult {
 #### `core/src/tools/handlers/multi_agents/delete_team.rs`
 
 **合并** `close_team.rs`（235 行）+ `team_cleanup.rs`（90 行）：
+
 - 关闭所有成员（`shutdown_agent`）
 - 清理 worktrees（`cleanup_agent_worktree`）
 - 删除持久化（`remove_team_persistence`）
 - 从 registry 移除（`remove_team_record`）
 
 **输入 Schema**：
+
 ```rust
 #[derive(Deserialize)]
 struct DeleteTeamArgs {
@@ -320,12 +341,12 @@ struct DeleteTeamArgs {
 
 ### 3.2 要删除的文件
 
-| 文件路径 | 行数 |
-|---------|------|
-| `core/src/tools/handlers/multi_agents/spawn_team.rs` | 379 |
-| `core/src/tools/handlers/multi_agents/wait_team.rs` | 212 |
-| `core/src/tools/handlers/multi_agents/close_team.rs` | 235 |
-| `core/src/tools/handlers/multi_agents/team_cleanup.rs` | 90 |
+| 文件路径                                               | 行数 |
+| ------------------------------------------------------ | ---- |
+| `core/src/tools/handlers/multi_agents/spawn_team.rs`   | 379  |
+| `core/src/tools/handlers/multi_agents/wait_team.rs`    | 212  |
+| `core/src/tools/handlers/multi_agents/close_team.rs`   | 235  |
+| `core/src/tools/handlers/multi_agents/team_cleanup.rs` | 90   |
 
 ### 3.3 要修改的文件
 
@@ -336,6 +357,7 @@ struct DeleteTeamArgs {
 **新增 mod**：`create_team`, `delete_team`
 
 **修改 handle() match**：
+
 - 删除 `"spawn_team"`, `"wait_team"`, `"close_team"`, `"team_cleanup"` arm
 - 新增 `"create_team"` 和 `"delete_team"` arm
 
@@ -344,6 +366,7 @@ struct DeleteTeamArgs {
 #### `core/src/tools/spec.rs`
 
 **删除函数**：
+
 - Line 1245: `create_spawn_team_tool()`
 - Line 1333: `create_wait_team_tool()`
 - Line 1374: `create_close_team_tool()`
@@ -497,6 +520,7 @@ map.insert("coordinator", BuiltInRole {
 ```
 
 **修改 `config_file_contents()`**：
+
 ```rust
 fn config_file_contents(filename: &str) -> Option<&'static str> {
     match filename {
@@ -512,6 +536,7 @@ fn config_file_contents(filename: &str) -> Option<&'static str> {
 #### `core/src/tools/spec.rs`
 
 **修改 `create_spawn_agent_tool()`（Line 817）**：
+
 - 在 `agent_type` 参数的 description 中加入新角色："plan", "verify", "coordinator"
 - 或者通过 `spawn_tool_spec::build()` 自动从 role configs 生成
 
@@ -562,11 +587,13 @@ You are the lead of team `{team_id}`. You coordinate work across these members:
 {members_list}
 
 ## Communication
+
 - Use `send_message` to talk to members: `send_message(to="member_name", team_id="{team_id}", message="...")`
 - Use `send_message(broadcast=true, team_id="{team_id}", message="...")` to broadcast
 - Use `wait` to check member status
 
 ## Workflow
+
 1. **Understand**: Read the user's request carefully. Do NOT delegate understanding.
 2. **Plan**: Break the task into independent sub-tasks.
 3. **Dispatch**: Send precise, specific instructions to each member via `send_message`.
@@ -575,6 +602,7 @@ You are the lead of team `{team_id}`. You coordinate work across these members:
 6. **Cleanup**: Use `delete_team` when all work is done.
 
 ## Decision Matrix
+
 - Independent read-only tasks → spawn/message in parallel
 - Tasks modifying same files → serialize (one after another)
 - Need more info → spawn explorer agent first, then decide
@@ -751,7 +779,7 @@ cargo clippy -p codex-core -- -D warnings
 ```rust
 if config.collab_tools {
     let multi_agent_handler = Arc::new(MultiAgentHandler);
-    
+
     // 7 个核心工具
     let tools = [
         (create_spawn_agent_tool(config), "spawn_agent"),
@@ -762,7 +790,7 @@ if config.collab_tools {
         (create_team_tool(config), "create_team"),
         (create_delete_team_tool(), "delete_team"),
     ];
-    
+
     for (spec, name) in tools {
         builder.push_spec_with_parallel_support(spec, true);
         builder.register_handler(name, multi_agent_handler.clone());
@@ -775,7 +803,7 @@ if config.collab_tools {
 ```rust
 async fn handle(&self, invocation: ToolInvocation) -> Result<ToolOutput, FunctionCallError> {
     let (session, turn, call_id, arguments, tool_name) = extract_invocation(invocation);
-    
+
     match tool_name.as_str() {
         "spawn_agent"   => spawn::handle(session, turn, call_id, arguments).await,
         "send_message"  => send_message::handle(session, turn, call_id, arguments).await,
@@ -819,11 +847,13 @@ mod tests;
 ### 7.2 清理残留
 
 **删除未使用的 helper 函数**（在 `multi_agents.rs` 中检查）：
+
 - 如果 `dispatch_teammate_idle_hook()` 不再被任何模块调用，删除它
 - 检查 `TEAM_TASKS_DIR` 常量是否已删除
 - 检查 `PersistedTeamConfig` 中是否有 tasks 相关字段需要清理
 
 **清理 import**：
+
 - 运行 `cargo clippy` 检查 unused import warnings
 - 移除所有 `#[allow(dead_code)]` 如果对应代码已删除
 
@@ -888,11 +918,11 @@ Task 7: 最终清理 & 验证             ← 依赖所有前置 Task
 
 ## 变更统计预估
 
-| 类别 | 数量 |
-|------|------|
-| 删除文件 | 16 个 .rs 文件 |
-| 新建文件 | 7 个（3 .toml + 1 .md + 3 .rs） |
-| 修改文件 | 4 个（multi_agents.rs, spec.rs, role.rs, spawn.rs） |
-| 净减少代码行 | ~1500 行（删除 ~2100 行，新增 ~600 行） |
-| 工具数量 | 18 → 7 |
-| Agent 角色 | 3 → 6 |
+| 类别         | 数量                                                |
+| ------------ | --------------------------------------------------- |
+| 删除文件     | 16 个 .rs 文件                                      |
+| 新建文件     | 7 个（3 .toml + 1 .md + 3 .rs）                     |
+| 修改文件     | 4 个（multi_agents.rs, spec.rs, role.rs, spawn.rs） |
+| 净减少代码行 | ~1500 行（删除 ~2100 行，新增 ~600 行）             |
+| 工具数量     | 18 → 7                                              |
+| Agent 角色   | 3 → 6                                               |
