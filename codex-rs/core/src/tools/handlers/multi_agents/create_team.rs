@@ -48,7 +48,7 @@ pub async fn handle(
     } = parse_arguments(&arguments)?;
     if let Some(team_id) = find_team_for_member(session.conversation_id)? {
         return Err(FunctionCallError::RespondToModel(format!(
-            "spawn_team is disabled for agent team teammates (team `{team_id}`). Ask the team lead to spawn teams."
+            "create_team is disabled for agent team teammates (team `{team_id}`). Ask the team lead to create teams."
         )));
     }
     if requested_members.is_empty() {
@@ -242,6 +242,25 @@ pub async fn handle(
             }
         }
 
+        if let Some(memory) = crate::agent::memory::read_agent_memory(
+            turn.config.codex_home.as_path(),
+            role_name.unwrap_or("default"),
+        )
+        .await
+        {
+            let memory_prompt = format!(
+                "# Agent Memory\nThe following is your persistent memory from previous sessions:\n\n{memory}"
+            );
+            if let Err(err) = session
+                .services
+                .agent_control
+                .inject_developer_message_without_turn(agent_id, memory_prompt)
+                .await
+            {
+                warn!("failed to inject agent memory: {err}");
+            }
+        }
+
         if let Err(err) = session
             .services
             .agent_control
@@ -314,13 +333,11 @@ pub async fn handle(
             .await;
         return Err(err);
     }
-    let initial_tasks = build_initial_team_tasks(&requested_members, &spawned_members, created_at);
     if let Err(err) = persist_team_state(
         turn.config.codex_home.as_path(),
         session.conversation_id,
         &team_id,
         &team_record,
-        Some(&initial_tasks),
     )
     .await
     {
@@ -341,6 +358,45 @@ pub async fn handle(
             )
             .await;
         return Err(err);
+    }
+
+    let coordinator_template = include_str!("../../../agent/builtins/coordinator_prompt.md");
+    let members_list = team_record
+        .members
+        .iter()
+        .map(|member| {
+            let agent_type = member
+                .agent_type
+                .as_deref()
+                .map(str::trim)
+                .filter(|agent_type| !agent_type.is_empty())
+                .unwrap_or("default");
+            format!(
+                "- **{}** (id: {}, role: {agent_type})",
+                member.name, member.agent_id,
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let coordinator_prompt = coordinator_template
+        .replace("{team_id}", &team_id)
+        .replace("{members_list}", &members_list);
+    let pending_item = codex_protocol::models::ResponseInputItem::Message {
+        role: "developer".to_string(),
+        content: vec![codex_protocol::models::ContentItem::InputText {
+            text: coordinator_prompt,
+        }],
+    };
+    let pending_items = vec![pending_item];
+    if let Err(items_without_active_turn) = session.inject_response_items(pending_items).await {
+        let turn_context = session.new_default_turn().await;
+        let items: Vec<codex_protocol::models::ResponseItem> = items_without_active_turn
+            .into_iter()
+            .map(codex_protocol::models::ResponseItem::from)
+            .collect();
+        session
+            .record_conversation_items(turn_context.as_ref(), &items)
+            .await;
     }
 
     let agent_statuses = team_member_status_entries(&spawned_members, &statuses);
@@ -369,7 +425,7 @@ pub async fn handle(
         })
         .collect::<Vec<_>>();
     let content = serde_json::to_string(&SpawnTeamResult { team_id, members }).map_err(|err| {
-        FunctionCallError::Fatal(format!("failed to serialize spawn_team result: {err}"))
+        FunctionCallError::Fatal(format!("failed to serialize create_team result: {err}"))
     })?;
 
     Ok(ToolOutput::Function {

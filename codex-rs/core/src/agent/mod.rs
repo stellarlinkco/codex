@@ -1,5 +1,6 @@
 pub(crate) mod control;
 mod guards;
+pub(crate) mod memory;
 pub(crate) mod role;
 pub(crate) mod status;
 

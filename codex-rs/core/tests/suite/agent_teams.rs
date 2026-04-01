@@ -172,31 +172,6 @@ fn text_from_output_value_supports_legacy_object_output() {
     );
 }
 
-fn first_task_id_for_assignee(tasks_dir: &Path, assignee: &str) -> Result<String> {
-    for entry in std::fs::read_dir(tasks_dir)? {
-        let entry = entry?;
-        let metadata = entry.metadata()?;
-        if !metadata.is_file() {
-            continue;
-        }
-        let raw = std::fs::read_to_string(entry.path())?;
-        let task: Value = serde_json::from_str(&raw)?;
-        if task
-            .get("assignee")
-            .and_then(|value| value.get("name"))
-            .and_then(Value::as_str)
-            == Some(assignee)
-        {
-            let task_id = task
-                .get("id")
-                .and_then(Value::as_str)
-                .context("task id missing")?;
-            return Ok(task_id.to_string());
-        }
-    }
-    anyhow::bail!("task for assignee `{assignee}` not found");
-}
-
 fn git(path: &Path, args: &[&str]) -> Result<()> {
     let status = Command::new("git")
         .args(args)
@@ -268,7 +243,7 @@ async fn agent_teams_tool_flow_persists_and_cleans_up() -> Result<()> {
         vec![
             sse(vec![
                 ev_response_created("resp-spawn-1"),
-                ev_function_call(spawn_call_id, "spawn_team", &spawn_args),
+                ev_function_call(spawn_call_id, "create_team", &spawn_args),
                 ev_completed("resp-spawn-1"),
             ]),
             sse(vec![
@@ -292,64 +267,7 @@ async fn agent_teams_tool_flow_persists_and_cleans_up() -> Result<()> {
     assert_eq!(team_config_path.exists(), true);
 
     let team_tasks_dir = test.codex_home_path().join("tasks").join(team_id);
-    assert_eq!(team_tasks_dir.exists(), true);
-    let planner_task_id = first_task_id_for_assignee(&team_tasks_dir, "planner")?;
-
-    let claim_call_id = "call-claim-task";
-    let claim_args = json!({
-        "team_id": team_id,
-        "task_id": planner_task_id.clone()
-    })
-    .to_string();
-    let claim_mock = mount_sse_sequence_match(
-        &server,
-        is_lead_request,
-        vec![
-            sse(vec![
-                ev_response_created("resp-claim-1"),
-                ev_function_call(claim_call_id, "team_task_claim", &claim_args),
-                ev_completed("resp-claim-1"),
-            ]),
-            sse(vec![
-                ev_assistant_message("msg-claim-1", "claimed"),
-                ev_completed("resp-claim-2"),
-            ]),
-        ],
-    )
-    .await;
-    test.submit_turn("claim planner task").await?;
-
-    let claim_output = tool_output_json(&claim_mock, claim_call_id).await?;
-    assert_eq!(claim_output["claimed"].as_bool(), Some(true));
-    assert_eq!(claim_output["task"]["state"].as_str(), Some("claimed"));
-
-    let complete_call_id = "call-complete-task";
-    let complete_args = json!({
-        "team_id": team_id,
-        "task_id": planner_task_id
-    })
-    .to_string();
-    let complete_mock = mount_sse_sequence_match(
-        &server,
-        is_lead_request,
-        vec![
-            sse(vec![
-                ev_response_created("resp-complete-1"),
-                ev_function_call(complete_call_id, "team_task_complete", &complete_args),
-                ev_completed("resp-complete-1"),
-            ]),
-            sse(vec![
-                ev_assistant_message("msg-complete-1", "completed"),
-                ev_completed("resp-complete-2"),
-            ]),
-        ],
-    )
-    .await;
-    test.submit_turn("complete planner task").await?;
-
-    let complete_output = tool_output_json(&complete_mock, complete_call_id).await?;
-    assert_eq!(complete_output["completed"].as_bool(), Some(true));
-    assert_eq!(complete_output["task"]["state"].as_str(), Some("completed"));
+    assert_eq!(team_tasks_dir.exists(), false);
 
     let cleanup_call_id = "call-cleanup-team";
     let cleanup_args = json!({ "team_id": team_id }).to_string();
@@ -359,7 +277,7 @@ async fn agent_teams_tool_flow_persists_and_cleans_up() -> Result<()> {
         vec![
             sse(vec![
                 ev_response_created("resp-cleanup-1"),
-                ev_function_call(cleanup_call_id, "team_cleanup", &cleanup_args),
+                ev_function_call(cleanup_call_id, "delete_team", &cleanup_args),
                 ev_completed("resp-cleanup-1"),
             ]),
             sse(vec![
@@ -420,7 +338,7 @@ async fn agent_teams_message_and_broadcast_flow() -> Result<()> {
         vec![
             sse(vec![
                 ev_response_created("resp-msg-spawn-1"),
-                ev_function_call(spawn_call_id, "spawn_team", &spawn_args),
+                ev_function_call(spawn_call_id, "create_team", &spawn_args),
                 ev_completed("resp-msg-spawn-1"),
             ]),
             sse(vec![
@@ -436,12 +354,12 @@ async fn agent_teams_message_and_broadcast_flow() -> Result<()> {
     assert_eq!(spawn_output["team_id"].as_str(), Some(team_id));
     assert_eq!(spawn_output["members"].as_array().map(Vec::len), Some(2));
     assert_eq!(team_config_path.exists(), true);
-    assert_eq!(team_tasks_dir.exists(), true);
+    assert_eq!(team_tasks_dir.exists(), false);
 
     let message_call_id = "call-team-message";
     let message_args = json!({
         "team_id": team_id,
-        "member_name": "planner",
+        "to": "planner",
         "message": "Please provide a short plan.",
         "interrupt": false
     })
@@ -452,7 +370,7 @@ async fn agent_teams_message_and_broadcast_flow() -> Result<()> {
         vec![
             sse(vec![
                 ev_response_created("resp-team-message-1"),
-                ev_function_call(message_call_id, "team_message", &message_args),
+                ev_function_call(message_call_id, "send_message", &message_args),
                 ev_completed("resp-team-message-1"),
             ]),
             sse(vec![
@@ -465,6 +383,7 @@ async fn agent_teams_message_and_broadcast_flow() -> Result<()> {
     test.submit_turn("message planner").await?;
 
     let message_output = tool_output_json(&message_mock, message_call_id).await?;
+    assert_eq!(message_output["route"].as_str(), Some("team_member"));
     assert_eq!(message_output["team_id"].as_str(), Some(team_id));
     assert_eq!(message_output["member_name"].as_str(), Some("planner"));
     assert_eq!(
@@ -475,6 +394,8 @@ async fn agent_teams_message_and_broadcast_flow() -> Result<()> {
     let broadcast_call_id = "call-team-broadcast";
     let broadcast_args = json!({
         "team_id": team_id,
+        "to": "*",
+        "broadcast": true,
         "message": "Status update in one sentence.",
         "interrupt": false
     })
@@ -485,7 +406,7 @@ async fn agent_teams_message_and_broadcast_flow() -> Result<()> {
         vec![
             sse(vec![
                 ev_response_created("resp-team-broadcast-1"),
-                ev_function_call(broadcast_call_id, "team_broadcast", &broadcast_args),
+                ev_function_call(broadcast_call_id, "send_message", &broadcast_args),
                 ev_completed("resp-team-broadcast-1"),
             ]),
             sse(vec![
@@ -498,6 +419,7 @@ async fn agent_teams_message_and_broadcast_flow() -> Result<()> {
     test.submit_turn("broadcast to team").await?;
 
     let broadcast_output = tool_output_json(&broadcast_mock, broadcast_call_id).await?;
+    assert_eq!(broadcast_output["route"].as_str(), Some("broadcast"));
     let sent_count = broadcast_output["sent"]
         .as_array()
         .map(Vec::len)
@@ -516,7 +438,7 @@ async fn agent_teams_message_and_broadcast_flow() -> Result<()> {
         vec![
             sse(vec![
                 ev_response_created("resp-msg-cleanup-1"),
-                ev_function_call(cleanup_call_id, "team_cleanup", &cleanup_args),
+                ev_function_call(cleanup_call_id, "delete_team", &cleanup_args),
                 ev_completed("resp-msg-cleanup-1"),
             ]),
             sse(vec![
@@ -656,7 +578,7 @@ async fn spawn_team_worktree_members_create_and_cleanup() -> Result<()> {
         vec![
             sse(vec![
                 ev_response_created("resp-worktree-team-spawn-1"),
-                ev_function_call(spawn_call_id, "spawn_team", &spawn_args),
+                ev_function_call(spawn_call_id, "create_team", &spawn_args),
                 ev_completed("resp-worktree-team-spawn-1"),
             ]),
             sse(vec![
@@ -686,7 +608,7 @@ async fn spawn_team_worktree_members_create_and_cleanup() -> Result<()> {
         vec![
             sse(vec![
                 ev_response_created("resp-worktree-team-cleanup-1"),
-                ev_function_call(cleanup_call_id, "team_cleanup", &cleanup_args),
+                ev_function_call(cleanup_call_id, "delete_team", &cleanup_args),
                 ev_completed("resp-worktree-team-cleanup-1"),
             ]),
             sse(vec![

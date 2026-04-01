@@ -190,6 +190,25 @@ pub async fn handle(
         }
     }
 
+    if let Some(memory) = crate::agent::memory::read_agent_memory(
+        turn.config.codex_home.as_path(),
+        role_name.unwrap_or("default"),
+    )
+    .await
+    {
+        let memory_prompt = format!(
+            "# Agent Memory\nThe following is your persistent memory from previous sessions:\n\n{memory}"
+        );
+        if let Err(err) = session
+            .services
+            .agent_control
+            .inject_developer_message_without_turn(agent_id, memory_prompt)
+            .await
+        {
+            warn!("failed to inject agent memory: {err}");
+        }
+    }
+
     if let Err(err) = session
         .services
         .agent_control

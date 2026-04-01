@@ -1,16 +1,20 @@
 use super::*;
 use std::collections::HashMap;
-use std::collections::HashSet;
 use std::sync::Arc;
 
+fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Deserialize)]
-struct CloseTeamArgs {
+struct DeleteTeamArgs {
     team_id: String,
-    members: Option<Vec<String>>,
+    #[serde(default = "default_true")]
+    cleanup: bool,
 }
 
 #[derive(Debug, Serialize)]
-struct CloseTeamMemberResult {
+struct DeleteTeamMemberResult {
     name: String,
     agent_id: String,
     ok: bool,
@@ -19,9 +23,12 @@ struct CloseTeamMemberResult {
 }
 
 #[derive(Debug, Serialize)]
-struct CloseTeamResult {
+struct DeleteTeamResult {
     team_id: String,
-    closed: Vec<CloseTeamMemberResult>,
+    removed_from_registry: bool,
+    removed_team_config: bool,
+    removed_task_dir: bool,
+    closed: Vec<DeleteTeamMemberResult>,
 }
 
 pub async fn handle(
@@ -30,65 +37,61 @@ pub async fn handle(
     call_id: String,
     arguments: String,
 ) -> Result<ToolOutput, FunctionCallError> {
-    let args: CloseTeamArgs = parse_arguments(&arguments)?;
+    let args: DeleteTeamArgs = parse_arguments(&arguments)?;
     let team_id = normalized_team_id(&args.team_id)?;
-    let team = get_team_record(session.conversation_id, &team_id)?;
-    if team.members.is_empty() {
+
+    if let Some(active_team_id) = find_team_for_member(session.conversation_id)? {
         return Err(FunctionCallError::RespondToModel(format!(
-            "team `{team_id}` has no members"
+            "delete_team is disabled for agent team teammates (team `{active_team_id}`). Ask the team lead to delete teams."
         )));
     }
-    let original_team = team.clone();
 
-    let selected_names = match args.members {
-        Some(names) => {
-            if names.is_empty() {
-                return Err(FunctionCallError::RespondToModel(
-                    "members must be non-empty when provided".to_string(),
-                ));
-            }
-            let mut selected = HashSet::new();
-            for name in names {
-                let name = name.trim().to_string();
-                if name.is_empty() {
-                    return Err(FunctionCallError::RespondToModel(
-                        "member name must be non-empty".to_string(),
-                    ));
-                }
-                selected.insert(name);
-            }
-            selected
-        }
-        None => team
-            .members
-            .iter()
-            .map(|member| member.name.clone())
-            .collect(),
+    let existing_team = get_team_record(session.conversation_id, &team_id).ok();
+    let persisted_config = if existing_team.is_some() {
+        read_persisted_team_config(turn.config.codex_home.as_path(), &team_id)
+            .await
+            .ok()
+    } else {
+        Some(read_persisted_team_config(turn.config.codex_home.as_path(), &team_id).await?)
     };
-
-    let selected_members = team
-        .members
-        .iter()
-        .filter(|member| selected_names.contains(&member.name))
-        .cloned()
-        .collect::<Vec<_>>();
-    if selected_members.is_empty() {
-        return Err(FunctionCallError::RespondToModel(
-            "no matching team members found".to_string(),
-        ));
+    if let Some(config) = persisted_config.as_ref()
+        && session.conversation_id.to_string() != config.lead_thread_id
+    {
+        return Err(FunctionCallError::RespondToModel(format!(
+            "delete_team must be run by the lead thread `{}`",
+            config.lead_thread_id
+        )));
     }
 
+    let original_team = existing_team.clone();
+    let members = match existing_team {
+        Some(team) => team.members,
+        None => {
+            let config = persisted_config.as_ref().ok_or_else(|| {
+                FunctionCallError::RespondToModel(format!("team `{team_id}` not found"))
+            })?;
+            config
+                .members
+                .iter()
+                .map(|member| {
+                    Ok(TeamMember {
+                        name: member.name.clone(),
+                        agent_id: agent_id(&member.agent_id)?,
+                        agent_type: member.agent_type.clone(),
+                    })
+                })
+                .collect::<Result<Vec<_>, FunctionCallError>>()?
+        }
+    };
+
     let event_call_id = prefixed_team_call_id(TEAM_CLOSE_CALL_PREFIX, &call_id);
-    let receiver_agents = team_member_refs(&selected_members);
+    let receiver_agents = team_member_refs(&members);
     session
         .send_event(
             &turn,
             CollabWaitingBeginEvent {
                 sender_thread_id: session.conversation_id,
-                receiver_thread_ids: selected_members
-                    .iter()
-                    .map(|member| member.agent_id)
-                    .collect(),
+                receiver_thread_ids: members.iter().map(|member| member.agent_id).collect(),
                 receiver_agents: receiver_agents.clone(),
                 call_id: event_call_id.clone(),
             }
@@ -97,14 +100,14 @@ pub async fn handle(
         .await;
 
     let mut statuses = HashMap::new();
-    let mut closed = Vec::with_capacity(selected_members.len());
-    let mut members_to_remove = Vec::new();
-    for member in &selected_members {
+    let mut closed = Vec::with_capacity(members.len());
+    for member in &members {
         let status_before = session
             .services
             .agent_control
             .get_status(member.agent_id)
             .await;
+
         let close_result = if matches!(status_before, AgentStatus::Shutdown | AgentStatus::NotFound)
         {
             let _ = session
@@ -119,7 +122,9 @@ pub async fn handle(
                 .agent_control
                 .shutdown_agent(member.agent_id)
                 .await
+                .map_err(|err| format!("{err}"))
         };
+
         let status_after = session
             .services
             .agent_control
@@ -133,34 +138,35 @@ pub async fn handle(
             (_, Ok(_), status_after) => status_after,
         };
         statuses.insert(member.agent_id, event_status);
+
         let cleanup_error =
             cleanup_agent_worktree(session.as_ref(), turn.as_ref(), member.agent_id)
                 .await
                 .err();
 
         match (close_result, cleanup_error) {
-            (Ok(_), None) => closed.push(CloseTeamMemberResult {
+            (Ok(_), None) => closed.push(DeleteTeamMemberResult {
                 name: member.name.clone(),
                 agent_id: member.agent_id.to_string(),
                 ok: true,
                 status: status_before,
                 error: None,
             }),
-            (Ok(_), Some(cleanup_err)) => closed.push(CloseTeamMemberResult {
+            (Ok(_), Some(cleanup_err)) => closed.push(DeleteTeamMemberResult {
                 name: member.name.clone(),
                 agent_id: member.agent_id.to_string(),
                 ok: false,
                 status: status_before,
                 error: Some(cleanup_err),
             }),
-            (Err(err), None) => closed.push(CloseTeamMemberResult {
+            (Err(err), None) => closed.push(DeleteTeamMemberResult {
                 name: member.name.clone(),
                 agent_id: member.agent_id.to_string(),
                 ok: false,
                 status: status_before,
-                error: Some(format!("{err}")),
+                error: Some(err),
             }),
-            (Err(err), Some(cleanup_err)) => closed.push(CloseTeamMemberResult {
+            (Err(err), Some(cleanup_err)) => closed.push(DeleteTeamMemberResult {
                 name: member.name.clone(),
                 agent_id: member.agent_id.to_string(),
                 ok: false,
@@ -168,45 +174,19 @@ pub async fn handle(
                 error: Some(format!("{err}; {cleanup_err}")),
             }),
         }
-        if closed.last().is_some_and(|result| result.ok) {
-            members_to_remove.push(member.name.clone());
-        }
     }
 
-    let mut persistence_error = None;
-    if !members_to_remove.is_empty() {
-        let remaining_team =
-            remove_members_from_team(session.conversation_id, &team_id, &members_to_remove)?;
-        let persistence_result = if let Some(team) = remaining_team.as_ref() {
-            persist_team_state(
-                turn.config.codex_home.as_path(),
-                session.conversation_id,
-                &team_id,
-                team,
-                None,
-            )
-            .await
-        } else {
-            let empty_team = TeamRecord {
-                members: Vec::new(),
-                created_at: original_team.created_at,
-            };
-            persist_team_state(
-                turn.config.codex_home.as_path(),
-                session.conversation_id,
-                &team_id,
-                &empty_team,
-                None,
-            )
-            .await
-        };
-        if let Err(err) = persistence_result {
+    remove_team_record(session.conversation_id, &team_id)?;
+    if args.cleanup
+        && let Err(err) = remove_team_persistence(turn.config.codex_home.as_path(), &team_id).await
+    {
+        if let Some(original_team) = original_team {
             let _ = restore_team_record(session.conversation_id, &team_id, original_team);
-            persistence_error = Some(err);
         }
-    };
+        return Err(err);
+    }
 
-    let agent_statuses = team_member_status_entries(&selected_members, &statuses);
+    let agent_statuses = team_member_status_entries(&members, &statuses);
     session
         .send_event(
             &turn,
@@ -220,12 +200,15 @@ pub async fn handle(
         )
         .await;
 
-    if let Some(err) = persistence_error {
-        return Err(err);
-    }
-
-    let content = serde_json::to_string(&CloseTeamResult { team_id, closed }).map_err(|err| {
-        FunctionCallError::Fatal(format!("failed to serialize close_team result: {err}"))
+    let content = serde_json::to_string(&DeleteTeamResult {
+        team_id,
+        removed_from_registry: true,
+        removed_team_config: args.cleanup,
+        removed_task_dir: args.cleanup,
+        closed,
+    })
+    .map_err(|err| {
+        FunctionCallError::Fatal(format!("failed to serialize delete_team result: {err}"))
     })?;
 
     Ok(ToolOutput::Function {

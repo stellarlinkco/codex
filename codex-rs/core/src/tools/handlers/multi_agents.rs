@@ -140,32 +140,6 @@ struct PersistedTeamMember {
     agent_type: Option<String>,
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-enum PersistedTaskState {
-    Pending,
-    Claimed,
-    Completed,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PersistedTeamTask {
-    id: String,
-    title: String,
-    state: PersistedTaskState,
-    depends_on: Vec<String>,
-    assignee: PersistedTeamTaskAssignee,
-    updated_at: i64,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct PersistedTeamTaskAssignee {
-    name: String,
-    agent_id: String,
-}
-
 fn now_unix_seconds() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -198,48 +172,6 @@ async fn read_persisted_team_config(
 
     serde_json::from_str::<PersistedTeamConfig>(&raw)
         .map_err(|err| team_persistence_error("parse team config", team_id, err))
-}
-
-fn assert_team_member_or_lead(
-    team_id: &str,
-    config: &PersistedTeamConfig,
-    caller_thread_id: ThreadId,
-) -> Result<(), FunctionCallError> {
-    let caller_thread_id = caller_thread_id.to_string();
-    if caller_thread_id == config.lead_thread_id
-        || config
-            .members
-            .iter()
-            .any(|member| member.agent_id == caller_thread_id)
-    {
-        return Ok(());
-    }
-
-    Err(FunctionCallError::RespondToModel(format!(
-        "thread `{caller_thread_id}` is not a member of team `{team_id}`"
-    )))
-}
-
-fn team_tasks_dir(codex_home: &Path, team_id: &str) -> PathBuf {
-    codex_home.join(TEAM_TASKS_DIR).join(team_id)
-}
-
-async fn lock_team_tasks(
-    codex_home: &Path,
-    team_id: &str,
-) -> Result<locks::FileLockGuard, FunctionCallError> {
-    let tasks_dir = team_tasks_dir(codex_home, team_id);
-    tokio::fs::create_dir_all(&tasks_dir)
-        .await
-        .map_err(|err| team_persistence_error("create team tasks directory", team_id, err))?;
-    let lock_path = tasks_dir.join("tasks.lock");
-    locks::lock_file_exclusive(&lock_path)
-        .await
-        .map_err(|err| team_persistence_error("lock team tasks", team_id, err))
-}
-
-fn team_task_path(codex_home: &Path, team_id: &str, task_id: &str) -> PathBuf {
-    team_tasks_dir(codex_home, team_id).join(format!("{task_id}.json"))
 }
 
 fn team_persistence_error(
@@ -301,57 +233,17 @@ fn persisted_team_config(
     }
 }
 
-fn build_initial_team_tasks(
-    requested_members: &[spawn_team::SpawnTeamMemberArgs],
-    spawned_members: &[TeamMember],
-    updated_at: i64,
-) -> Vec<PersistedTeamTask> {
-    requested_members
-        .iter()
-        .zip(spawned_members)
-        .map(|(requested, spawned)| PersistedTeamTask {
-            id: ThreadId::new().to_string(),
-            title: requested.task.trim().to_string(),
-            state: PersistedTaskState::Pending,
-            depends_on: Vec::new(),
-            assignee: PersistedTeamTaskAssignee {
-                name: spawned.name.clone(),
-                agent_id: spawned.agent_id.to_string(),
-            },
-            updated_at,
-        })
-        .collect()
-}
-
 async fn persist_team_state(
     codex_home: &Path,
     sender_thread_id: ThreadId,
     team_id: &str,
     team: &TeamRecord,
-    initial_tasks: Option<&[PersistedTeamTask]>,
 ) -> Result<(), FunctionCallError> {
     let config = persisted_team_config(sender_thread_id, team_id, team);
     let config_path = team_config_path(codex_home, team_id);
     write_json_atomic(&config_path, &config)
         .await
         .map_err(|err| team_persistence_error("write team config", team_id, err))?;
-
-    if let Some(tasks) = initial_tasks {
-        let tasks_dir = team_tasks_dir(codex_home, team_id);
-        remove_dir_if_exists(&tasks_dir)
-            .await
-            .map_err(|err| team_persistence_error("reset team tasks", team_id, err))?;
-        tokio::fs::create_dir_all(&tasks_dir)
-            .await
-            .map_err(|err| team_persistence_error("create team tasks directory", team_id, err))?;
-
-        for task in tasks {
-            let task_path = team_task_path(codex_home, team_id, &task.id);
-            write_json_atomic(&task_path, task)
-                .await
-                .map_err(|err| team_persistence_error("write team task", team_id, err))?;
-        }
-    }
 
     Ok(())
 }
@@ -363,7 +255,8 @@ async fn remove_team_persistence(
     remove_dir_if_exists(&team_dir(codex_home, team_id))
         .await
         .map_err(|err| team_persistence_error("remove team config directory", team_id, err))?;
-    remove_dir_if_exists(&team_tasks_dir(codex_home, team_id))
+    let tasks_dir = codex_home.join(TEAM_TASKS_DIR).join(team_id);
+    remove_dir_if_exists(&tasks_dir)
         .await
         .map_err(|err| team_persistence_error("remove team tasks directory", team_id, err))?;
     Ok(())
@@ -417,123 +310,7 @@ fn find_team_member(
         })
 }
 
-async fn read_team_tasks(
-    codex_home: &Path,
-    team_id: &str,
-) -> Result<Vec<PersistedTeamTask>, FunctionCallError> {
-    let tasks_dir = team_tasks_dir(codex_home, team_id);
-    let mut dir = match tokio::fs::read_dir(&tasks_dir).await {
-        Ok(dir) => dir,
-        Err(err) if err.kind() == ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => {
-            return Err(team_persistence_error(
-                "read team tasks directory",
-                team_id,
-                err,
-            ));
-        }
-    };
-
-    let mut tasks = Vec::new();
-    while let Some(entry) = dir
-        .next_entry()
-        .await
-        .map_err(|err| team_persistence_error("iterate team tasks directory", team_id, err))?
-    {
-        let metadata = entry
-            .metadata()
-            .await
-            .map_err(|err| team_persistence_error("read task metadata", team_id, err))?;
-        if !metadata.is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if path.extension().and_then(std::ffi::OsStr::to_str) != Some("json") {
-            continue;
-        }
-        let task_raw = tokio::fs::read_to_string(&path).await.map_err(|err| {
-            team_persistence_error(format!("read task file `{}`", path.display()), team_id, err)
-        })?;
-        let task: PersistedTeamTask = serde_json::from_str(&task_raw).map_err(|err| {
-            team_persistence_error(
-                format!("parse task file `{}`", path.display()),
-                team_id,
-                err,
-            )
-        })?;
-        tasks.push(task);
-    }
-    tasks.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(tasks)
-}
-
-async fn read_team_task(
-    codex_home: &Path,
-    team_id: &str,
-    task_id: &str,
-) -> Result<PersistedTeamTask, FunctionCallError> {
-    let task_id = required_path_segment(task_id, "task_id")?;
-    let task_path = team_task_path(codex_home, team_id, task_id);
-    let raw = match tokio::fs::read_to_string(&task_path).await {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == ErrorKind::NotFound => {
-            return Err(FunctionCallError::RespondToModel(format!(
-                "task `{task_id}` not found in team `{team_id}`"
-            )));
-        }
-        Err(err) => return Err(team_persistence_error("read team task", team_id, err)),
-    };
-
-    serde_json::from_str::<PersistedTeamTask>(&raw)
-        .map_err(|err| team_persistence_error("parse team task", team_id, err))
-}
-
-async fn write_team_task(
-    codex_home: &Path,
-    team_id: &str,
-    task: &PersistedTeamTask,
-) -> Result<(), FunctionCallError> {
-    let task_id = required_path_segment(&task.id, "task_id")?;
-    let task_path = team_task_path(codex_home, team_id, task_id);
-    write_json_atomic(&task_path, task)
-        .await
-        .map_err(|err| team_persistence_error("write team task", team_id, err))
-}
-
-fn dependencies_satisfied(task: &PersistedTeamTask, tasks: &[PersistedTeamTask]) -> bool {
-    task.depends_on.iter().all(|dependency| {
-        tasks.iter().any(|candidate| {
-            candidate.id == *dependency && candidate.state == PersistedTaskState::Completed
-        })
-    })
-}
-
-#[derive(Debug, Serialize)]
-struct TeamTaskOutput {
-    task_id: String,
-    title: String,
-    state: PersistedTaskState,
-    depends_on: Vec<String>,
-    assignee_name: String,
-    assignee_agent_id: String,
-    updated_at: i64,
-}
-
-impl From<PersistedTeamTask> for TeamTaskOutput {
-    fn from(value: PersistedTeamTask) -> Self {
-        Self {
-            task_id: value.id,
-            title: value.title,
-            state: value.state,
-            depends_on: value.depends_on,
-            assignee_name: value.assignee.name,
-            assignee_agent_id: value.assignee.agent_id,
-            updated_at: value.updated_at,
-        }
-    }
-}
-
-async fn send_input_to_member(
+async fn send_message_to_member(
     session: &std::sync::Arc<Session>,
     turn: &std::sync::Arc<TurnContext>,
     call_id: String,
@@ -565,7 +342,7 @@ async fn send_input_to_member(
     let result = session
         .services
         .agent_control
-        .send_input(receiver_thread_id, input_items)
+        .send_message(receiver_thread_id, input_items)
         .await
         .map_err(|err| collab_agent_error(receiver_thread_id, err));
     let status = session
@@ -628,27 +405,12 @@ impl ToolHandler for MultiAgentHandler {
 
         match tool_name.as_str() {
             "spawn_agent" => spawn::handle(session, turn, call_id, arguments).await,
-            "send_input" => send_input::handle(session, turn, call_id, arguments).await,
+            "send_message" => send_message::handle(session, turn, call_id, arguments).await,
             "resume_agent" => resume_agent::handle(session, turn, call_id, arguments).await,
             "wait" => wait::handle(session, turn, call_id, arguments).await,
             "close_agent" => close_agent::handle(session, turn, call_id, arguments).await,
-            "spawn_team" => spawn_team::handle(session, turn, call_id, arguments).await,
-            "wait_team" => wait_team::handle(session, turn, call_id, arguments).await,
-            "close_team" => close_team::handle(session, turn, call_id, arguments).await,
-            "team_task_list" => team_task_list::handle(session, turn, call_id, arguments).await,
-            "team_task_claim" => team_task_claim::handle(session, turn, call_id, arguments).await,
-            "team_task_claim_next" => {
-                team_task_claim_next::handle(session, turn, call_id, arguments).await
-            }
-            "team_task_complete" => {
-                team_task_complete::handle(session, turn, call_id, arguments).await
-            }
-            "team_message" => team_message::handle(session, turn, call_id, arguments).await,
-            "team_broadcast" => team_broadcast::handle(session, turn, call_id, arguments).await,
-            "team_ask_lead" => team_ask_lead::handle(session, turn, call_id, arguments).await,
-            "team_inbox_pop" => team_inbox_pop::handle(session, turn, call_id, arguments).await,
-            "team_inbox_ack" => team_inbox_ack::handle(session, turn, call_id, arguments).await,
-            "team_cleanup" => team_cleanup::handle(session, turn, call_id, arguments).await,
+            "create_team" => create_team::handle(session, turn, call_id, arguments).await,
+            "delete_team" => delete_team::handle(session, turn, call_id, arguments).await,
             other => Err(FunctionCallError::RespondToModel(format!(
                 "unsupported collab tool {other}"
             ))),
@@ -656,19 +418,9 @@ impl ToolHandler for MultiAgentHandler {
     }
 }
 
-mod locks;
-
-mod inbox;
-
-mod team_ask_lead;
-
-mod team_inbox_pop;
-
-mod team_inbox_ack;
-
 mod spawn;
 
-mod send_input;
+mod send_message;
 
 mod resume_agent;
 
@@ -678,7 +430,6 @@ mod wait;
 struct WaitForAgentsResult {
     statuses: Vec<(ThreadId, AgentStatus)>,
     timed_out: bool,
-    triggered_id: Option<ThreadId>,
 }
 
 fn normalize_wait_timeout(timeout_ms: Option<i64>) -> Result<i64, FunctionCallError> {
@@ -742,10 +493,6 @@ async fn wait_for_agents(
     let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
     match mode {
         WaitMode::Any => {
-            let mut triggered_id = receiver_thread_ids
-                .iter()
-                .find(|id| final_statuses.contains_key(id))
-                .copied();
             if final_statuses.is_empty() {
                 let mut futures = FuturesUnordered::new();
                 for (id, rx) in status_rxs {
@@ -757,7 +504,6 @@ async fn wait_for_agents(
                 loop {
                     match timeout_at(deadline, futures.next()).await {
                         Ok(Some(Some(result))) => {
-                            triggered_id = Some(result.0);
                             results.push(result);
                             break;
                         }
@@ -786,13 +532,9 @@ async fn wait_for_agents(
                 .filter_map(|id| final_statuses.get(id).cloned().map(|status| (*id, status)))
                 .collect::<Vec<_>>();
             let timed_out = statuses.is_empty();
-            if timed_out {
-                triggered_id = None;
-            }
             Ok(WaitForAgentsResult {
                 timed_out,
                 statuses,
-                triggered_id,
             })
         }
         WaitMode::All => {
@@ -823,7 +565,6 @@ async fn wait_for_agents(
             Ok(WaitForAgentsResult {
                 statuses,
                 timed_out,
-                triggered_id: None,
             })
         }
     }
@@ -1008,32 +749,6 @@ fn restore_team_record(
     Ok(())
 }
 
-fn remove_members_from_team(
-    sender_thread_id: ThreadId,
-    team_id: &str,
-    member_names: &[String],
-) -> Result<Option<TeamRecord>, FunctionCallError> {
-    let mut registry = team_registry()
-        .lock()
-        .map_err(|_| FunctionCallError::Fatal("team registry poisoned".to_string()))?;
-    let teams = registry.entry(sender_thread_id).or_default();
-    let team = teams
-        .get_mut(team_id)
-        .ok_or_else(|| FunctionCallError::RespondToModel(format!("team `{team_id}` not found")))?;
-
-    team.members
-        .retain(|member| !member_names.iter().any(|name| name == &member.name));
-    let remove_team = team.members.is_empty();
-    let remaining = (!remove_team).then(|| team.clone());
-    if remove_team {
-        teams.remove(team_id);
-    }
-    if teams.is_empty() {
-        registry.remove(&sender_thread_id);
-    }
-    Ok(remaining)
-}
-
 fn register_worktree_lease(agent_id: ThreadId, lease: WorktreeLease) {
     let mut registry = match worktree_leases().lock() {
         Ok(registry) => registry,
@@ -1163,59 +878,6 @@ async fn dispatch_teammate_idle_hook(
 
     session.record_hook_context(turn, &additional_context).await;
     blocked.map(|(hook_name, reason)| format!("teammate_idle hook '{hook_name}' blocked: {reason}"))
-}
-
-async fn dispatch_task_completed_hook(
-    session: &Session,
-    turn: &TurnContext,
-    team_id: &str,
-    task_id: &str,
-    task_subject: &str,
-    teammate_name: Option<&str>,
-) -> Option<String> {
-    let outcomes = session
-        .hooks()
-        .dispatch(HookPayload {
-            session_id: session.conversation_id,
-            transcript_path: session.transcript_path().await,
-            cwd: turn.cwd.clone(),
-            permission_mode: approval_policy_for_hooks(turn.approval_policy.value()).to_string(),
-            hook_event: HookEvent::TaskCompleted {
-                task_id: task_id.to_string(),
-                task_subject: task_subject.to_string(),
-                task_description: None,
-                teammate_name: teammate_name.map(std::string::ToString::to_string),
-                team_name: Some(team_id.to_string()),
-            },
-        })
-        .await;
-
-    let mut additional_context = Vec::new();
-    let mut blocked = None;
-    for outcome in outcomes {
-        let hook_name = outcome.hook_name;
-        let result = outcome.result;
-
-        if let Some(error) = result.error.as_deref() {
-            warn!(
-                hook_name = %hook_name,
-                error,
-                "task_completed hook failed; continuing"
-            );
-        }
-
-        if blocked.is_none()
-            && let HookResultControl::Block { reason } = result.control
-        {
-            blocked = Some((hook_name, reason));
-        }
-
-        additional_context.extend(result.additional_context);
-    }
-
-    session.record_hook_context(turn, &additional_context).await;
-    blocked
-        .map(|(hook_name, reason)| format!("task_completed hook '{hook_name}' blocked: {reason}"))
 }
 
 async fn dispatch_worktree_create_hook(
@@ -1579,25 +1241,9 @@ async fn cleanup_spawned_team_members(
     }
 }
 
-mod spawn_team;
+mod create_team;
 
-mod wait_team;
-
-mod close_team;
-
-mod team_task_list;
-
-mod team_task_claim;
-
-mod team_task_claim_next;
-
-mod team_task_complete;
-
-mod team_message;
-
-mod team_broadcast;
-
-mod team_cleanup;
+mod delete_team;
 
 pub mod close_agent {
     use super::*;

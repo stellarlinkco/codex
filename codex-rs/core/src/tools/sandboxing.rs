@@ -525,7 +525,7 @@ mod tests {
 
         assert_eq!(
             matching_write_roots([&child], &store.approved_write_roots),
-            Some(vec![root])
+            Some(store.approved_write_roots.clone())
         );
     }
 

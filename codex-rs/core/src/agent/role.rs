@@ -218,6 +218,56 @@ Rules:
                     }
                 ),
                 (
+                    "plan".to_string(),
+                    AgentRoleConfig {
+                        description: Some(
+                            "Read-only planning agent that designs implementation strategies."
+                                .to_string(),
+                        ),
+                        config_file: Some("plan.toml".to_string().parse().unwrap_or_default()),
+                        nickname_candidates: Some(vec![
+                            "Planner".to_string(),
+                            "Architect".to_string(),
+                            "Designer".to_string(),
+                            "Strategist".to_string(),
+                        ]),
+                    },
+                ),
+                (
+                    "verify".to_string(),
+                    AgentRoleConfig {
+                        description: Some(
+                            "Verification agent that runs tests and checks correctness."
+                                .to_string(),
+                        ),
+                        config_file: Some("verify.toml".to_string().parse().unwrap_or_default()),
+                        nickname_candidates: Some(vec![
+                            "Checker".to_string(),
+                            "Validator".to_string(),
+                            "Inspector".to_string(),
+                            "Auditor".to_string(),
+                        ]),
+                    },
+                ),
+                (
+                    "coordinator".to_string(),
+                    AgentRoleConfig {
+                        description: Some(
+                            "Orchestration agent that coordinates multi-agent workflows."
+                                .to_string(),
+                        ),
+                        config_file: Some(
+                            "coordinator.toml".to_string().parse().unwrap_or_default(),
+                        ),
+                        nickname_candidates: Some(vec![
+                            "Conductor".to_string(),
+                            "Director".to_string(),
+                            "Orchestrator".to_string(),
+                            "Manager".to_string(),
+                        ]),
+                    },
+                ),
+                (
                     "worker".to_string(),
                     AgentRoleConfig {
                         description: Some(r#"Use for execution and production work.
@@ -258,9 +308,15 @@ Rules:
     /// Resolves a built-in role `config_file` path to embedded content.
     pub(super) fn config_file_contents(path: &Path) -> Option<&'static str> {
         const EXPLORER: &str = include_str!("builtins/explorer.toml");
+        const PLAN: &str = include_str!("builtins/plan.toml");
+        const VERIFY: &str = include_str!("builtins/verify.toml");
+        const COORDINATOR: &str = include_str!("builtins/coordinator.toml");
         const AWAITER: &str = include_str!("builtins/awaiter.toml");
         match path.to_str()? {
             "explorer.toml" => Some(EXPLORER),
+            "plan.toml" => Some(PLAN),
+            "verify.toml" => Some(VERIFY),
+            "coordinator.toml" => Some(COORDINATOR),
             "awaiter.toml" => Some(AWAITER),
             _ => None,
         }
@@ -846,6 +902,43 @@ enabled = false
         assert_eq!(
             built_in::config_file_contents(Path::new("missing.toml")),
             None
+        );
+    }
+
+    #[test]
+    fn built_in_configs_include_plan_verify_and_coordinator_roles() {
+        let roles = built_in::configs();
+
+        let plan = roles.get("plan").expect("plan role is present");
+        assert_eq!(
+            plan.config_file.as_deref().and_then(Path::to_str),
+            Some("plan.toml")
+        );
+        assert_eq!(
+            built_in::config_file_contents(Path::new("plan.toml")).is_some(),
+            true
+        );
+
+        let verify = roles.get("verify").expect("verify role is present");
+        assert_eq!(
+            verify.config_file.as_deref().and_then(Path::to_str),
+            Some("verify.toml")
+        );
+        assert_eq!(
+            built_in::config_file_contents(Path::new("verify.toml")).is_some(),
+            true
+        );
+
+        let coordinator = roles
+            .get("coordinator")
+            .expect("coordinator role is present");
+        assert_eq!(
+            coordinator.config_file.as_deref().and_then(Path::to_str),
+            Some("coordinator.toml")
+        );
+        assert_eq!(
+            built_in::config_file_contents(Path::new("coordinator.toml")).is_some(),
+            true
         );
     }
 }

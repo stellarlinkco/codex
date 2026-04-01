@@ -32,7 +32,6 @@ use std::process::Command as StdCommand;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
-use tokio::task::JoinSet;
 use tokio::time::timeout;
 
 fn invocation(
@@ -107,6 +106,10 @@ fn list_worktree_paths(codex_home: &Path, lead_thread_id: ThreadId) -> Vec<PathB
     }
     worktrees.sort();
     worktrees
+}
+
+fn team_tasks_dir(codex_home: &Path, team_id: &str) -> PathBuf {
+    codex_home.join("tasks").join(team_id)
 }
 
 #[test]
@@ -317,6 +320,114 @@ async fn spawn_agent_uses_explorer_role_and_inherits_approval_policy() {
     assert_eq!(snapshot.model, expected_model);
     assert_eq!(snapshot.reasoning_effort, None);
     assert_eq!(snapshot.approval_policy, AskForApproval::OnRequest);
+}
+
+#[tokio::test]
+async fn spawn_agent_injects_role_memory_when_present() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+    let codex_home = turn.config.codex_home.clone();
+
+    let memory_path = codex_home
+        .join("agent-memory")
+        .join("plan")
+        .join("MEMORY.md");
+    tokio::fs::create_dir_all(memory_path.parent().expect("memory parent"))
+        .await
+        .expect("create memory dir");
+    tokio::fs::write(&memory_path, "remember-me")
+        .await
+        .expect("write memory file");
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "hello",
+            "agent_type": "plan"
+        })),
+    );
+    let output = MultiAgentHandler
+        .handle(invocation)
+        .await
+        .expect("spawn_agent should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(content),
+        ..
+    } = output
+    else {
+        panic!("expected function output");
+    };
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let spawned_agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
+
+    let thread = manager
+        .get_thread(spawned_agent_id)
+        .await
+        .expect("spawned agent thread should exist");
+    let history = thread.codex.session.clone_history().await;
+    let has_memory = history.raw_items().iter().any(|item| match item {
+        ResponseItem::Message { role, content, .. } if role == "developer" => {
+            content.iter().any(|item| match item {
+                ContentItem::InputText { text } => {
+                    text.contains("# Agent Memory") && text.contains("remember-me")
+                }
+                _ => false,
+            })
+        }
+        _ => false,
+    });
+    assert_eq!(has_memory, true);
+}
+
+#[tokio::test]
+async fn spawn_agent_accepts_verify_role() {
+    #[derive(Debug, Deserialize)]
+    struct SpawnAgentResult {
+        agent_id: String,
+    }
+
+    let (mut session, turn) = make_session_and_context().await;
+    let manager = thread_manager();
+    session.services.agent_control = manager.agent_control();
+
+    let invocation = invocation(
+        Arc::new(session),
+        Arc::new(turn),
+        "spawn_agent",
+        function_payload(json!({
+            "message": "verify this",
+            "agent_type": "verify"
+        })),
+    );
+    let output = MultiAgentHandler
+        .handle(invocation)
+        .await
+        .expect("spawn_agent should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(content),
+        success,
+        ..
+    } = output
+    else {
+        panic!("expected function output");
+    };
+    assert_eq!(success, Some(true));
+    let result: SpawnAgentResult =
+        serde_json::from_str(&content).expect("spawn_agent result should be json");
+    let agent_id = agent_id(&result.agent_id).expect("agent_id should be valid");
+
+    let status = manager.agent_control().get_status(agent_id).await;
+    assert_ne!(status, AgentStatus::NotFound);
+    let _ = manager.agent_control().shutdown_agent(agent_id).await;
 }
 
 #[tokio::test]
@@ -757,13 +868,13 @@ async fn spawn_agent_rejects_when_depth_limit_exceeded() {
 }
 
 #[tokio::test]
-async fn send_input_rejects_empty_message() {
+async fn send_message_rejects_empty_message() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
         Arc::new(session),
         Arc::new(turn),
-        "send_input",
-        function_payload(json!({"id": ThreadId::new().to_string(), "message": ""})),
+        "send_message",
+        function_payload(json!({"to": ThreadId::new().to_string(), "message": ""})),
     );
     let Err(err) = MultiAgentHandler.handle(invocation).await else {
         panic!("empty message should be rejected");
@@ -775,14 +886,14 @@ async fn send_input_rejects_empty_message() {
 }
 
 #[tokio::test]
-async fn send_input_rejects_when_message_and_items_are_both_set() {
+async fn send_message_rejects_when_message_and_items_are_both_set() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
         Arc::new(session),
         Arc::new(turn),
-        "send_input",
+        "send_message",
         function_payload(json!({
-            "id": ThreadId::new().to_string(),
+            "to": ThreadId::new().to_string(),
             "message": "hello",
             "items": [{"type": "mention", "name": "drive", "path": "app://drive"}]
         })),
@@ -799,13 +910,13 @@ async fn send_input_rejects_when_message_and_items_are_both_set() {
 }
 
 #[tokio::test]
-async fn send_input_rejects_invalid_id() {
+async fn send_message_rejects_invalid_id() {
     let (session, turn) = make_session_and_context().await;
     let invocation = invocation(
         Arc::new(session),
         Arc::new(turn),
-        "send_input",
-        function_payload(json!({"id": "not-a-uuid", "message": "hi"})),
+        "send_message",
+        function_payload(json!({"to": "not-a-uuid", "message": "hi"})),
     );
     let Err(err) = MultiAgentHandler.handle(invocation).await else {
         panic!("invalid id should be rejected");
@@ -817,7 +928,7 @@ async fn send_input_rejects_invalid_id() {
 }
 
 #[tokio::test]
-async fn send_input_reports_missing_agent() {
+async fn send_message_reports_missing_agent() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -825,8 +936,8 @@ async fn send_input_reports_missing_agent() {
     let invocation = invocation(
         Arc::new(session),
         Arc::new(turn),
-        "send_input",
-        function_payload(json!({"id": agent_id.to_string(), "message": "hi"})),
+        "send_message",
+        function_payload(json!({"to": agent_id.to_string(), "message": "hi"})),
     );
     let Err(err) = MultiAgentHandler.handle(invocation).await else {
         panic!("missing agent should be reported");
@@ -838,7 +949,7 @@ async fn send_input_reports_missing_agent() {
 }
 
 #[tokio::test]
-async fn send_input_interrupts_before_prompt() {
+async fn send_message_interrupts_before_prompt() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -848,9 +959,9 @@ async fn send_input_interrupts_before_prompt() {
     let invocation = invocation(
         Arc::new(session),
         Arc::new(turn),
-        "send_input",
+        "send_message",
         function_payload(json!({
-            "id": agent_id.to_string(),
+            "to": agent_id.to_string(),
             "message": "hi",
             "interrupt": true
         })),
@@ -858,7 +969,7 @@ async fn send_input_interrupts_before_prompt() {
     MultiAgentHandler
         .handle(invocation)
         .await
-        .expect("send_input should succeed");
+        .expect("send_message should succeed");
 
     let ops = manager.captured_ops();
     let ops_for_agent: Vec<&Op> = ops
@@ -877,7 +988,7 @@ async fn send_input_interrupts_before_prompt() {
 }
 
 #[tokio::test]
-async fn send_input_accepts_structured_items() {
+async fn send_message_accepts_structured_items() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -887,9 +998,9 @@ async fn send_input_accepts_structured_items() {
     let invocation = invocation(
         Arc::new(session),
         Arc::new(turn),
-        "send_input",
+        "send_message",
         function_payload(json!({
-            "id": agent_id.to_string(),
+            "to": agent_id.to_string(),
             "items": [
                 {"type": "mention", "name": "drive", "path": "app://google_drive"},
                 {"type": "text", "text": "read the folder"}
@@ -899,7 +1010,7 @@ async fn send_input_accepts_structured_items() {
     MultiAgentHandler
         .handle(invocation)
         .await
-        .expect("send_input should succeed");
+        .expect("send_message should succeed");
 
     let expected = Op::UserInput {
         items: vec![
@@ -928,7 +1039,7 @@ async fn send_input_accepts_structured_items() {
 }
 
 #[tokio::test]
-async fn send_input_includes_receiver_metadata_in_events() {
+async fn send_message_includes_receiver_metadata_in_events() {
     let (mut session, turn, rx) = make_session_and_context_with_rx().await;
     let manager = thread_manager();
     Arc::get_mut(&mut session)
@@ -963,14 +1074,14 @@ async fn send_input_includes_receiver_metadata_in_events() {
         .handle(invocation(
             session.clone(),
             turn,
-            "send_input",
+            "send_message",
             function_payload(json!({
-                "id": agent_id.to_string(),
+                "to": agent_id.to_string(),
                 "message": "hi"
             })),
         ))
         .await
-        .expect("send_input should succeed");
+        .expect("send_message should succeed");
 
     let interaction_end = timeout(Duration::from_secs(5), async {
         loop {
@@ -986,7 +1097,7 @@ async fn send_input_includes_receiver_metadata_in_events() {
         }
     })
     .await
-    .expect("send_input should emit a CollabAgentInteractionEnd event");
+    .expect("send_message should emit a CollabAgentInteractionEnd event");
 
     assert_eq!(interaction_end.receiver_thread_id, agent_id);
     assert_eq!(interaction_end.receiver_agent_nickname, expected_nickname);
@@ -1139,13 +1250,13 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
     let send_invocation = invocation(
         session,
         turn,
-        "send_input",
-        function_payload(json!({"id": agent_id.to_string(), "message": "hello"})),
+        "send_message",
+        function_payload(json!({"to": agent_id.to_string(), "message": "hello"})),
     );
     let output = MultiAgentHandler
         .handle(send_invocation)
         .await
-        .expect("send_input should succeed after resume");
+        .expect("send_message should succeed after resume");
     let ToolOutput::Function {
         body: FunctionCallOutputBody::Text(content),
         success,
@@ -1155,7 +1266,7 @@ async fn resume_agent_restores_closed_agent_and_accepts_send_input() {
         panic!("expected function output");
     };
     let result: serde_json::Value =
-        serde_json::from_str(&content).expect("send_input result should be json");
+        serde_json::from_str(&content).expect("send_message result should be json");
     let submission_id = result
         .get("submission_id")
         .and_then(|value| value.as_str())
@@ -1864,7 +1975,7 @@ async fn spawn_team_reaps_shutdown_agent_on_thread_limit() {
     let spawn_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "spawn_team",
+        "create_team",
         function_payload(json!({
             "members": [
                 {"name": "worker", "task": "work"}
@@ -1990,41 +2101,7 @@ struct SpawnTeamMemberResult {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum WaitTeamMode {
-    Any,
-    All,
-}
-
-#[derive(Debug, Deserialize)]
-struct WaitTeamTriggeredMember {
-    name: String,
-    agent_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct WaitTeamMemberStatus {
-    name: String,
-    agent_id: String,
-    state: AgentStatus,
-}
-
-#[derive(Debug, Deserialize)]
-struct WaitTeamResult {
-    completed: bool,
-    mode: WaitTeamMode,
-    triggered_member: Option<WaitTeamTriggeredMember>,
-    member_statuses: Vec<WaitTeamMemberStatus>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CloseTeamResult {
-    team_id: String,
-    closed: Vec<CloseTeamMemberResult>,
-}
-
-#[derive(Debug, Deserialize)]
-struct CloseTeamMemberResult {
+struct DeleteTeamMemberResult {
     name: String,
     agent_id: String,
     ok: bool,
@@ -2033,131 +2110,16 @@ struct CloseTeamMemberResult {
 }
 
 #[derive(Debug, Deserialize)]
-struct TeamTaskResult {
-    task_id: String,
-    title: String,
-    state: PersistedTaskState,
-    depends_on: Vec<String>,
-    assignee_name: String,
-    assignee_agent_id: String,
-    updated_at: i64,
-}
-
-#[derive(Debug, Deserialize)]
-struct TeamTaskListResult {
-    team_id: String,
-    tasks: Vec<TeamTaskResult>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TeamTaskClaimResult {
-    team_id: String,
-    claimed: bool,
-    task: TeamTaskResult,
-}
-
-#[derive(Debug, Deserialize)]
-struct TeamTaskClaimNextResult {
-    team_id: String,
-    claimed: bool,
-    task: Option<TeamTaskResult>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TeamTaskCompleteResult {
-    team_id: String,
-    completed: bool,
-    task: TeamTaskResult,
-}
-
-#[derive(Debug, Deserialize)]
-struct TeamMessageResult {
-    team_id: String,
-    member_name: String,
-    agent_id: String,
-    submission_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TeamBroadcastSent {
-    member_name: String,
-    agent_id: String,
-    submission_id: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TeamBroadcastFailed {
-    member_name: String,
-    agent_id: String,
-    error: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct TeamBroadcastResult {
-    team_id: String,
-    sent: Vec<TeamBroadcastSent>,
-    failed: Vec<TeamBroadcastFailed>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TeamAskLeadResult {
-    team_id: String,
-    lead_thread_id: String,
-    submission_id: String,
-    delivered: bool,
-    inbox_entry_id: String,
-    error: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TeamInboxMessage {
-    id: String,
-    created_at: i64,
-    from_thread_id: String,
-    from_name: Option<String>,
-    input_items: Vec<UserInput>,
-    prompt: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TeamInboxPopResult {
-    team_id: String,
-    thread_id: String,
-    messages: Vec<TeamInboxMessage>,
-    ack_token: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct TeamInboxAckResult {
-    team_id: String,
-    thread_id: String,
-    acked: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct TeamCleanupMemberResult {
-    name: String,
-    agent_id: String,
-    ok: bool,
-    status: AgentStatus,
-    error: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TeamCleanupResult {
+struct DeleteTeamResult {
     team_id: String,
     removed_from_registry: bool,
     removed_team_config: bool,
     removed_task_dir: bool,
-    closed: Vec<TeamCleanupMemberResult>,
+    closed: Vec<DeleteTeamMemberResult>,
 }
 
 #[tokio::test]
-async fn close_team_releases_slot_for_already_shutdown_member() {
+async fn delete_team_releases_slot_for_already_shutdown_member() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         agent_id: String,
@@ -2176,7 +2138,7 @@ async fn close_team_releases_slot_for_already_shutdown_member() {
     let spawn_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "spawn_team",
+        "create_team",
         function_payload(json!({
             "members": [
                 {"name": "worker", "task": "work"}
@@ -2227,18 +2189,18 @@ async fn close_team_releases_slot_for_already_shutdown_member() {
     assert_eq!(spawned_threads.len(), 1);
     assert_eq!(spawned_threads.contains(&member_thread_id), true);
 
-    let close_invocation = invocation(
+    let delete_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "close_team",
+        "delete_team",
         function_payload(json!({
             "team_id": spawn_result.team_id
         })),
     );
     MultiAgentHandler
-        .handle(close_invocation)
+        .handle(delete_invocation)
         .await
-        .expect("close_team should succeed");
+        .expect("delete_team should succeed");
 
     let spawned_threads = session.services.agent_control.spawned_thread_ids();
     assert_eq!(spawned_threads.contains(&member_thread_id), false);
@@ -2252,7 +2214,7 @@ async fn close_team_releases_slot_for_already_shutdown_member() {
     let unblocked_output = MultiAgentHandler
         .handle(unblocked_invocation)
         .await
-        .expect("spawn_agent should succeed after close_team releases slot");
+        .expect("spawn_agent should succeed after delete_team releases slot");
     let ToolOutput::Function {
         body: FunctionCallOutputBody::Text(unblocked_content),
         success: unblocked_success,
@@ -2272,7 +2234,7 @@ async fn close_team_releases_slot_for_already_shutdown_member() {
 }
 
 #[tokio::test]
-async fn team_cleanup_fails_when_teammate_is_active() {
+async fn delete_team_closes_active_teammate_and_releases_slot() {
     #[derive(Debug, Deserialize)]
     struct SpawnAgentResult {
         agent_id: String,
@@ -2291,7 +2253,7 @@ async fn team_cleanup_fails_when_teammate_is_active() {
     let spawn_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "spawn_team",
+        "create_team",
         function_payload(json!({
             "members": [
                 {"name": "worker", "task": "work"}
@@ -2320,45 +2282,17 @@ async fn team_cleanup_fails_when_teammate_is_active() {
     assert_eq!(spawned_threads.len(), 1);
     assert_eq!(spawned_threads.contains(&member_thread_id), true);
 
-    let cleanup_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "team_cleanup",
-        function_payload(json!({
-            "team_id": spawn_result.team_id
-        })),
-    );
-    let Err(err) = MultiAgentHandler.handle(cleanup_invocation).await else {
-        panic!("team_cleanup should fail when teammates are active");
-    };
-    let FunctionCallError::RespondToModel(message) = err else {
-        panic!("expected RespondToModel error");
-    };
-    assert!(message.contains("team_cleanup found active teammates"));
-
     MultiAgentHandler
         .handle(invocation(
             session.clone(),
             turn.clone(),
-            "close_team",
+            "delete_team",
             function_payload(json!({
                 "team_id": spawn_result.team_id
             })),
         ))
         .await
-        .expect("close_team should succeed");
-
-    MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "team_cleanup",
-            function_payload(json!({
-                "team_id": spawn_result.team_id
-            })),
-        ))
-        .await
-        .expect("team_cleanup should succeed after close_team");
+        .expect("delete_team should succeed");
 
     let spawned_threads = session.services.agent_control.spawned_thread_ids();
     assert_eq!(spawned_threads.contains(&member_thread_id), false);
@@ -2372,7 +2306,7 @@ async fn team_cleanup_fails_when_teammate_is_active() {
     let unblocked_output = MultiAgentHandler
         .handle(unblocked_invocation)
         .await
-        .expect("spawn_agent should succeed after team_cleanup releases slot");
+        .expect("spawn_agent should succeed after delete_team releases slot");
     let ToolOutput::Function {
         body: FunctionCallOutputBody::Text(unblocked_content),
         success: unblocked_success,
@@ -2464,7 +2398,7 @@ async fn spawn_is_rejected_for_agent_team_teammates() {
     let spawn_team_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "spawn_team",
+        "create_team",
         function_payload(json!({"members": [{"name": "worker", "task": "work"}]})),
     );
     let Err(err) = MultiAgentHandler.handle(spawn_team_invocation).await else {
@@ -2473,7 +2407,7 @@ async fn spawn_is_rejected_for_agent_team_teammates() {
     let FunctionCallError::RespondToModel(message) = err else {
         panic!("expected RespondToModel error");
     };
-    assert!(message.contains("spawn_team is disabled for agent team teammates"));
+    assert!(message.contains("create_team is disabled for agent team teammates"));
 
     remove_team_record(lead_thread_id, "team-1").expect("cleanup should succeed");
 }
@@ -2489,7 +2423,7 @@ async fn spawn_team_wait_team_and_close_team_flow() {
     let spawn_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "spawn_team",
+        "create_team",
         function_payload(json!({
             "members": [
                 {"name": "planner", "task": "plan the work"},
@@ -2541,43 +2475,10 @@ async fn spawn_team_wait_team_and_close_team_flow() {
 
     let persisted_tasks_dir =
         team_tasks_dir(turn.config.codex_home.as_path(), &spawn_result.team_id);
-    let mut persisted_tasks = Vec::new();
-    let mut tasks_dir = tokio::fs::read_dir(&persisted_tasks_dir)
-        .await
-        .expect("team tasks dir should exist");
-    while let Some(entry) = tasks_dir
-        .next_entry()
-        .await
-        .expect("tasks dir read should succeed")
-    {
-        let metadata = entry
-            .metadata()
-            .await
-            .expect("task metadata read should succeed");
-        if !metadata.is_file() {
-            continue;
-        }
-        let task_raw = tokio::fs::read_to_string(entry.path())
-            .await
-            .expect("task file should be readable");
-        let task: PersistedTeamTask =
-            serde_json::from_str(&task_raw).expect("task file should be json");
-        persisted_tasks.push(task);
-    }
-    assert_eq!(persisted_tasks.len(), 2);
-    let mut task_titles = persisted_tasks
-        .iter()
-        .map(|task| task.title.clone())
-        .collect::<Vec<_>>();
-    task_titles.sort();
     assert_eq!(
-        task_titles,
-        vec!["execute the task".to_string(), "plan the work".to_string()]
+        tokio::fs::metadata(&persisted_tasks_dir).await.is_err(),
+        true
     );
-    for task in persisted_tasks {
-        assert_eq!(task.state, PersistedTaskState::Pending);
-        assert_eq!(task.depends_on.is_empty(), true);
-    }
 
     for member in &spawn_result.members {
         let agent_id = agent_id(&member.agent_id).expect("valid agent id");
@@ -2591,7 +2492,7 @@ async fn spawn_team_wait_team_and_close_team_flow() {
     let wait_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "wait_team",
+        "wait",
         function_payload(json!({
             "team_id": spawn_result.team_id,
             "mode": "all",
@@ -2601,7 +2502,7 @@ async fn spawn_team_wait_team_and_close_team_flow() {
     let wait_output = MultiAgentHandler
         .handle(wait_invocation)
         .await
-        .expect("wait_team should succeed");
+        .expect("wait should succeed");
     let ToolOutput::Function {
         body: FunctionCallOutputBody::Text(wait_content),
         success: wait_success,
@@ -2610,111 +2511,48 @@ async fn spawn_team_wait_team_and_close_team_flow() {
     else {
         panic!("expected function output");
     };
-    let wait_result: WaitTeamResult =
-        serde_json::from_str(&wait_content).expect("wait_team result should be json");
-    assert_eq!(wait_success, Some(true));
-    assert_eq!(wait_result.completed, true);
-    assert!(matches!(wait_result.mode, WaitTeamMode::All));
-    assert!(wait_result.triggered_member.is_none());
-    assert_eq!(wait_result.member_statuses.len(), 2);
-    for status in &wait_result.member_statuses {
+    let wait_result: WaitResult =
+        serde_json::from_str(&wait_content).expect("wait result should be json");
+    assert_eq!(wait_result.timed_out, false);
+    for status in wait_result.status.values() {
         assert!(matches!(
-            status.state,
+            status,
             AgentStatus::NotFound | AgentStatus::Shutdown
         ));
     }
+    assert_eq!(wait_success, None);
 
-    let close_invocation = invocation(
-        session.clone(),
+    MultiAgentHandler
+        .handle(invocation(
+            session.clone(),
+            turn.clone(),
+            "delete_team",
+            function_payload(json!({
+                "team_id": spawn_result.team_id
+            })),
+        ))
+        .await
+        .expect("delete_team should succeed");
+
+    let wait_missing_invocation = invocation(
+        session,
         turn.clone(),
-        "close_team",
+        "wait",
         function_payload(json!({
             "team_id": spawn_result.team_id
         })),
     );
-    let close_output = MultiAgentHandler
-        .handle(close_invocation)
-        .await
-        .expect("close_team should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(close_content),
-        success: close_success,
-        ..
-    } = close_output
-    else {
-        panic!("expected function output");
-    };
-    let close_result: CloseTeamResult =
-        serde_json::from_str(&close_content).expect("close_team result should be json");
-    assert_eq!(close_success, Some(true));
-    assert_eq!(close_result.closed.len(), 2);
-    assert_eq!(
-        close_result
-            .closed
-            .iter()
-            .map(|member| member.name.clone())
-            .collect::<Vec<_>>(),
-        vec!["planner".to_string(), "worker".to_string()]
-    );
-    for member in &close_result.closed {
-        assert_eq!(member.ok, true);
-        assert_eq!(member.error, None);
-        assert!(!member.agent_id.is_empty());
-        assert!(matches!(
-            member.status,
-            AgentStatus::PendingInit | AgentStatus::Running | AgentStatus::NotFound
-        ));
-    }
-
-    let wait_missing_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "wait_team",
-        function_payload(json!({
-            "team_id": close_result.team_id
-        })),
-    );
     let Err(err) = MultiAgentHandler.handle(wait_missing_invocation).await else {
-        panic!("wait_team should fail after close_team removed the team");
+        panic!("wait should fail after delete_team removed the team");
     };
     assert_eq!(
         err,
-        FunctionCallError::RespondToModel(format!("team `{}` not found", close_result.team_id))
+        FunctionCallError::RespondToModel(format!("team `{}` not found", spawn_result.team_id))
     );
     assert_eq!(
         tokio::fs::metadata(team_dir(
             turn.config.codex_home.as_path(),
-            &close_result.team_id
-        ))
-        .await
-        .is_ok(),
-        true
-    );
-    assert_eq!(
-        tokio::fs::metadata(team_tasks_dir(
-            turn.config.codex_home.as_path(),
-            &close_result.team_id,
-        ))
-        .await
-        .is_ok(),
-        true
-    );
-
-    MultiAgentHandler
-        .handle(invocation(
-            session,
-            turn.clone(),
-            "team_cleanup",
-            function_payload(json!({
-                "team_id": close_result.team_id
-            })),
-        ))
-        .await
-        .expect("team_cleanup should succeed");
-    assert_eq!(
-        tokio::fs::metadata(team_dir(
-            turn.config.codex_home.as_path(),
-            &close_result.team_id
+            &spawn_result.team_id
         ))
         .await
         .is_err(),
@@ -2723,7 +2561,7 @@ async fn spawn_team_wait_team_and_close_team_flow() {
     assert_eq!(
         tokio::fs::metadata(team_tasks_dir(
             turn.config.codex_home.as_path(),
-            &close_result.team_id,
+            &spawn_result.team_id,
         ))
         .await
         .is_err(),
@@ -2744,7 +2582,7 @@ async fn wait_team_any_includes_non_final_member_statuses_in_events() {
         .handle(invocation(
             session.clone(),
             turn.clone(),
-            "spawn_team",
+            "create_team",
             function_payload(json!({
                 "members": [
                     {"name": "planner", "task": "plan the work"},
@@ -2787,7 +2625,7 @@ async fn wait_team_any_includes_non_final_member_statuses_in_events() {
         .handle(invocation(
             session.clone(),
             turn.clone(),
-            "wait_team",
+            "wait",
             function_payload(json!({
                 "team_id": spawn_result.team_id,
                 "mode": "any",
@@ -2795,7 +2633,7 @@ async fn wait_team_any_includes_non_final_member_statuses_in_events() {
             })),
         ))
         .await
-        .expect("wait_team should succeed");
+        .expect("wait should succeed");
 
     let waiting_end = timeout(Duration::from_secs(5), async {
         loop {
@@ -2811,7 +2649,7 @@ async fn wait_team_any_includes_non_final_member_statuses_in_events() {
         }
     })
     .await
-    .expect("wait_team should emit a CollabWaitingEnd event");
+    .expect("wait should emit a CollabWaitingEnd event");
 
     let worker_status = waiting_end
         .agent_statuses
@@ -2831,7 +2669,7 @@ async fn wait_team_any_includes_non_final_member_statuses_in_events() {
 }
 
 #[tokio::test]
-async fn team_cleanup_only_removes_requested_team_when_multiple_teams_exist() {
+async fn delete_team_only_removes_requested_team_when_multiple_teams_exist() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -2842,7 +2680,7 @@ async fn team_cleanup_only_removes_requested_team_when_multiple_teams_exist() {
         .handle(invocation(
             session.clone(),
             turn.clone(),
-            "spawn_team",
+            "create_team",
             function_payload(json!({
                 "team_id": "team-a",
                 "members": [{"name": "planner", "task": "plan"}]
@@ -2871,7 +2709,7 @@ async fn team_cleanup_only_removes_requested_team_when_multiple_teams_exist() {
         .handle(invocation(
             session.clone(),
             turn.clone(),
-            "spawn_team",
+            "create_team",
             function_payload(json!({
                 "team_id": "team-b",
                 "members": [{"name": "worker", "task": "work"}]
@@ -2906,20 +2744,11 @@ async fn team_cleanup_only_removes_requested_team_when_multiple_teams_exist() {
         .handle(invocation(
             session.clone(),
             turn.clone(),
-            "close_team",
+            "delete_team",
             function_payload(json!({"team_id": spawn_team_a_result.team_id})),
         ))
         .await
-        .expect("close_team team-a should succeed");
-    MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "team_cleanup",
-            function_payload(json!({"team_id": spawn_team_a_result.team_id})),
-        ))
-        .await
-        .expect("team_cleanup team-a should succeed");
+        .expect("delete_team team-a should succeed");
 
     let team_a_dir_exists = tokio::fs::metadata(team_dir(
         turn.config.codex_home.as_path(),
@@ -2941,16 +2770,16 @@ async fn team_cleanup_only_removes_requested_team_when_multiple_teams_exist() {
     ))
     .await
     .is_ok();
-    assert_eq!(team_b_tasks_exist, true);
+    assert_eq!(team_b_tasks_exist, false);
 
     let wait_team_a_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "wait_team",
+        "wait",
         function_payload(json!({"team_id": spawn_team_a_result.team_id})),
     );
     let Err(err) = MultiAgentHandler.handle(wait_team_a_invocation).await else {
-        panic!("wait_team should fail after team-a cleanup removed the team");
+        panic!("wait should fail after team-a delete_team removed the team");
     };
     assert_eq!(
         err,
@@ -2970,7 +2799,7 @@ async fn team_cleanup_only_removes_requested_team_when_multiple_teams_exist() {
         .handle(invocation(
             session.clone(),
             turn.clone(),
-            "wait_team",
+            "wait",
             function_payload(json!({
                 "team_id": spawn_team_b_result.team_id,
                 "mode": "all",
@@ -2978,7 +2807,7 @@ async fn team_cleanup_only_removes_requested_team_when_multiple_teams_exist() {
             })),
         ))
         .await
-        .expect("wait_team team-b should succeed");
+        .expect("wait team-b should succeed");
     let ToolOutput::Function {
         body: FunctionCallOutputBody::Text(wait_team_b_content),
         success: wait_team_b_success,
@@ -2987,13 +2816,19 @@ async fn team_cleanup_only_removes_requested_team_when_multiple_teams_exist() {
     else {
         panic!("expected function output");
     };
-    let wait_team_b_result: WaitTeamResult =
-        serde_json::from_str(&wait_team_b_content).expect("wait_team result should be json");
-    assert_eq!(wait_team_b_success, Some(true));
-    assert_eq!(wait_team_b_result.completed, true);
-    assert_eq!(wait_team_b_result.member_statuses.len(), 1);
+    let wait_team_b_result: WaitResult =
+        serde_json::from_str(&wait_team_b_content).expect("wait result should be json");
+    assert_eq!(wait_team_b_success, None);
+    assert_eq!(wait_team_b_result.timed_out, false);
+    assert_eq!(wait_team_b_result.status.len(), 1);
+    let state = wait_team_b_result
+        .status
+        .values()
+        .next()
+        .cloned()
+        .unwrap_or(AgentStatus::NotFound);
     assert!(matches!(
-        wait_team_b_result.member_statuses[0].state,
+        state,
         AgentStatus::NotFound | AgentStatus::Shutdown
     ));
 
@@ -3001,20 +2836,11 @@ async fn team_cleanup_only_removes_requested_team_when_multiple_teams_exist() {
         .handle(invocation(
             session.clone(),
             turn.clone(),
-            "close_team",
+            "delete_team",
             function_payload(json!({"team_id": spawn_team_b_result.team_id})),
         ))
         .await
-        .expect("close_team team-b should succeed");
-    MultiAgentHandler
-        .handle(invocation(
-            session,
-            turn,
-            "team_cleanup",
-            function_payload(json!({"team_id": spawn_team_b_result.team_id})),
-        ))
-        .await
-        .expect("team_cleanup team-b should succeed");
+        .expect("delete_team team-b should succeed");
 }
 
 #[tokio::test]
@@ -3029,7 +2855,7 @@ async fn spawn_team_accepts_backendground_alias() {
     let spawn_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "spawn_team",
+        "create_team",
         function_payload(json!({
             "team_id": team_id,
             "members": [
@@ -3059,26 +2885,26 @@ async fn spawn_team_accepts_backendground_alias() {
     assert_eq!(spawn_result.team_id, team_id);
     assert_eq!(spawn_result.members.len(), 1);
 
-    let close_invocation = invocation(
+    let delete_invocation = invocation(
         session,
         turn,
-        "close_team",
+        "delete_team",
         function_payload(json!({
             "team_id": spawn_result.team_id
         })),
     );
-    let close_output = MultiAgentHandler
-        .handle(close_invocation)
+    let delete_output = MultiAgentHandler
+        .handle(delete_invocation)
         .await
-        .expect("close_team should succeed");
+        .expect("delete_team should succeed");
     let ToolOutput::Function {
-        success: close_success,
+        success: delete_success,
         ..
-    } = close_output
+    } = delete_output
     else {
         panic!("expected function output");
     };
-    assert_eq!(close_success, Some(true));
+    assert_eq!(delete_success, Some(true));
 }
 
 #[tokio::test]
@@ -3093,7 +2919,7 @@ async fn spawn_team_accepts_background_field() {
     let spawn_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "spawn_team",
+        "create_team",
         function_payload(json!({
             "team_id": team_id,
             "members": [
@@ -3123,26 +2949,26 @@ async fn spawn_team_accepts_background_field() {
     assert_eq!(spawn_result.team_id, team_id);
     assert_eq!(spawn_result.members.len(), 1);
 
-    let close_invocation = invocation(
+    let delete_invocation = invocation(
         session,
         turn,
-        "close_team",
+        "delete_team",
         function_payload(json!({
             "team_id": spawn_result.team_id
         })),
     );
-    let close_output = MultiAgentHandler
-        .handle(close_invocation)
+    let delete_output = MultiAgentHandler
+        .handle(delete_invocation)
         .await
-        .expect("close_team should succeed");
+        .expect("delete_team should succeed");
     let ToolOutput::Function {
-        success: close_success,
+        success: delete_success,
         ..
-    } = close_output
+    } = delete_output
     else {
         panic!("expected function output");
     };
-    assert_eq!(close_success, Some(true));
+    assert_eq!(delete_success, Some(true));
 }
 
 #[tokio::test]
@@ -3156,7 +2982,7 @@ async fn spawn_team_background_member_auto_closes_after_shutdown() {
     let spawn_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "spawn_team",
+        "create_team",
         function_payload(json!({
             "members": [
                 {"name": "worker", "task": "work", "background": true}
@@ -3221,18 +3047,18 @@ async fn spawn_team_background_member_auto_closes_after_shutdown() {
     .await
     .expect("background member should be auto-closed");
 
-    let cleanup_invocation = invocation(
+    let delete_invocation = invocation(
         session,
         turn,
-        "team_cleanup",
+        "delete_team",
         function_payload(json!({
             "team_id": spawn_result.team_id
         })),
     );
     MultiAgentHandler
-        .handle(cleanup_invocation)
+        .handle(delete_invocation)
         .await
-        .expect("team_cleanup should succeed");
+        .expect("delete_team should succeed");
 }
 
 #[tokio::test]
@@ -3250,7 +3076,7 @@ async fn spawn_team_worktree_failure_cleans_already_spawned_members() {
     let spawn_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "spawn_team",
+        "create_team",
         function_payload(json!({
             "team_id": team_id,
             "members": [
@@ -3290,13 +3116,13 @@ async fn spawn_team_worktree_failure_cleans_already_spawned_members() {
     let wait_invocation = invocation(
         session,
         turn,
-        "wait_team",
+        "wait",
         function_payload(json!({
             "team_id": team_id
         })),
     );
     let Err(wait_err) = MultiAgentHandler.handle(wait_invocation).await else {
-        panic!("wait_team should fail because the failed team was never persisted");
+        panic!("wait should fail because the failed team was never created");
     };
     assert_eq!(
         wait_err,
@@ -3305,7 +3131,7 @@ async fn spawn_team_worktree_failure_cleans_already_spawned_members() {
 }
 
 #[tokio::test]
-async fn close_team_cleans_worktree_leases_for_worktree_members() {
+async fn delete_team_cleans_worktree_leases_for_worktree_members() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -3322,7 +3148,7 @@ async fn close_team_cleans_worktree_leases_for_worktree_members() {
     let spawn_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "spawn_team",
+        "create_team",
         function_payload(json!({
             "team_id": team_id,
             "members": [
@@ -3369,31 +3195,34 @@ async fn close_team_cleans_worktree_leases_for_worktree_members() {
         assert_eq!(worktree_path.starts_with(&turn.cwd), false);
     }
 
-    let close_invocation = invocation(
+    let delete_invocation = invocation(
         session,
         turn,
-        "close_team",
+        "delete_team",
         function_payload(json!({
             "team_id": spawn_result.team_id
         })),
     );
-    let close_output = MultiAgentHandler
-        .handle(close_invocation)
+    let delete_output = MultiAgentHandler
+        .handle(delete_invocation)
         .await
-        .expect("close_team should succeed");
+        .expect("delete_team should succeed");
     let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(close_content),
-        success: close_success,
+        body: FunctionCallOutputBody::Text(delete_content),
+        success: delete_success,
         ..
-    } = close_output
+    } = delete_output
     else {
         panic!("expected function output");
     };
-    let close_result: CloseTeamResult =
-        serde_json::from_str(&close_content).expect("close_team result should be json");
-    assert_eq!(close_result.closed.len(), 2);
-    assert_eq!(close_success, Some(true));
-    for member in &close_result.closed {
+    let delete_result: DeleteTeamResult =
+        serde_json::from_str(&delete_content).expect("delete_team result should be json");
+    assert_eq!(delete_result.closed.len(), 2);
+    assert_eq!(delete_success, Some(true));
+    for member in &delete_result.closed {
+        assert!(!member.name.trim().is_empty());
+        assert!(!member.agent_id.trim().is_empty());
+        let _ = &member.status;
         assert_eq!(member.ok, true);
         assert_eq!(member.error, None);
     }
@@ -3407,7 +3236,7 @@ async fn close_team_cleans_worktree_leases_for_worktree_members() {
 }
 
 #[tokio::test]
-async fn close_team_partial_close_removes_only_selected_member_worktree() {
+async fn delete_team_removes_worktrees_when_members_are_already_shutdown() {
     let (mut session, mut turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -3424,165 +3253,7 @@ async fn close_team_partial_close_removes_only_selected_member_worktree() {
     let spawn_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "spawn_team",
-        function_payload(json!({
-            "team_id": team_id,
-            "members": [
-                {"name": "planner", "task": "plan", "worktree": true},
-                {"name": "worker", "task": "work", "worktree": true}
-            ]
-        })),
-    );
-    let spawn_output = MultiAgentHandler
-        .handle(spawn_invocation)
-        .await
-        .expect("spawn_team with worktree members should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(spawn_content),
-        success: spawn_success,
-        ..
-    } = spawn_output
-    else {
-        panic!("expected function output");
-    };
-    let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-    assert_eq!(spawn_result.members.len(), 2);
-    assert_eq!(spawn_success, Some(true));
-    assert_eq!(
-        list_worktree_paths(codex_home.as_path(), lead_thread_id).len(),
-        2
-    );
-
-    let partial_close_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "close_team",
-        function_payload(json!({
-            "team_id": spawn_result.team_id,
-            "members": ["planner"]
-        })),
-    );
-    let partial_close_output = MultiAgentHandler
-        .handle(partial_close_invocation)
-        .await
-        .expect("close_team should close selected member");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(partial_close_content),
-        success: partial_close_success,
-        ..
-    } = partial_close_output
-    else {
-        panic!("expected function output");
-    };
-    let partial_close_result: CloseTeamResult =
-        serde_json::from_str(&partial_close_content).expect("close_team result should be json");
-    assert_eq!(partial_close_success, Some(true));
-    assert_eq!(partial_close_result.closed.len(), 1);
-    assert_eq!(partial_close_result.closed[0].name, "planner".to_string());
-    assert_eq!(partial_close_result.closed[0].ok, true);
-    assert_eq!(partial_close_result.closed[0].error, None);
-    assert_eq!(
-        list_worktree_paths(codex_home.as_path(), lead_thread_id).len(),
-        1
-    );
-
-    let persisted_config_path = team_config_path(codex_home.as_path(), &spawn_result.team_id);
-    let persisted_config_raw = tokio::fs::read_to_string(&persisted_config_path)
-        .await
-        .expect("team config should remain after partial close");
-    let persisted_config: PersistedTeamConfig =
-        serde_json::from_str(&persisted_config_raw).expect("team config should be valid json");
-    assert_eq!(persisted_config.members.len(), 1);
-    assert_eq!(persisted_config.members[0].name, "worker".to_string());
-
-    let final_close_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "close_team",
-        function_payload(json!({
-            "team_id": spawn_result.team_id
-        })),
-    );
-    let final_close_output = MultiAgentHandler
-        .handle(final_close_invocation)
-        .await
-        .expect("close remaining team member");
-    let ToolOutput::Function {
-        success: final_close_success,
-        ..
-    } = final_close_output
-    else {
-        panic!("expected function output");
-    };
-    assert_eq!(final_close_success, Some(true));
-    assert_eq!(
-        list_worktree_paths(codex_home.as_path(), lead_thread_id).is_empty(),
-        true
-    );
-    assert_eq!(
-        tokio::fs::metadata(team_config_path(
-            codex_home.as_path(),
-            &spawn_result.team_id
-        ))
-        .await
-        .is_ok(),
-        true
-    );
-    assert_eq!(
-        tokio::fs::metadata(team_tasks_dir(codex_home.as_path(), &spawn_result.team_id))
-            .await
-            .is_ok(),
-        true
-    );
-
-    MultiAgentHandler
-        .handle(invocation(
-            session,
-            turn,
-            "team_cleanup",
-            function_payload(json!({
-                "team_id": spawn_result.team_id
-            })),
-        ))
-        .await
-        .expect("team_cleanup should succeed");
-    assert_eq!(
-        tokio::fs::metadata(team_config_path(
-            codex_home.as_path(),
-            &spawn_result.team_id
-        ))
-        .await
-        .is_err(),
-        true
-    );
-    assert_eq!(
-        tokio::fs::metadata(team_tasks_dir(codex_home.as_path(), &spawn_result.team_id))
-            .await
-            .is_err(),
-        true
-    );
-}
-
-#[tokio::test]
-async fn team_cleanup_removes_worktrees_when_members_are_already_shutdown() {
-    let (mut session, mut turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let repo_dir = tempfile::tempdir().expect("temp dir");
-    turn.cwd = repo_dir.path().to_path_buf();
-
-    init_git_repo(turn.cwd.as_path());
-    let lead_thread_id = session.conversation_id;
-    let codex_home = turn.config.codex_home.clone();
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-    let team_id = ThreadId::new().to_string();
-
-    let spawn_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "spawn_team",
+        "create_team",
         function_payload(json!({
             "team_id": team_id,
             "members": [
@@ -3621,69 +3292,63 @@ async fn team_cleanup_removes_worktrees_when_members_are_already_shutdown() {
             .expect("shutdown member before cleanup");
     }
 
-    MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "close_team",
-            function_payload(json!({
-                "team_id": spawn_result.team_id
-            })),
-        ))
+    let delete_invocation = invocation(
+        session,
+        turn,
+        "delete_team",
+        function_payload(json!({
+            "team_id": spawn_result.team_id
+        })),
+    );
+    let delete_output = MultiAgentHandler
+        .handle(delete_invocation)
         .await
-        .expect("close_team should succeed");
+        .expect("delete_team should succeed");
+    let ToolOutput::Function {
+        body: FunctionCallOutputBody::Text(delete_content),
+        success: delete_success,
+        ..
+    } = delete_output
+    else {
+        panic!("expected function output");
+    };
+    let delete_result: DeleteTeamResult =
+        serde_json::from_str(&delete_content).expect("delete_team result should be json");
+    assert_eq!(delete_success, Some(true));
+    assert_eq!(delete_result.removed_from_registry, true);
+    assert_eq!(delete_result.removed_team_config, true);
+    assert_eq!(delete_result.removed_task_dir, true);
+    assert_eq!(delete_result.closed.len(), 2);
+    for member in &delete_result.closed {
+        assert!(!member.name.trim().is_empty());
+        assert!(!member.agent_id.trim().is_empty());
+        let _ = &member.status;
+        assert_eq!(member.ok, true);
+        assert_eq!(member.error, None);
+    }
     assert_eq!(
         list_worktree_paths(codex_home.as_path(), lead_thread_id).is_empty(),
         true
     );
-
-    let cleanup_invocation = invocation(
-        session,
-        turn,
-        "team_cleanup",
-        function_payload(json!({
-            "team_id": spawn_result.team_id
-        })),
-    );
-    let cleanup_output = MultiAgentHandler
-        .handle(cleanup_invocation)
-        .await
-        .expect("team_cleanup should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(cleanup_content),
-        success: cleanup_success,
-        ..
-    } = cleanup_output
-    else {
-        panic!("expected function output");
-    };
-    let cleanup_result: TeamCleanupResult =
-        serde_json::from_str(&cleanup_content).expect("team_cleanup result should be json");
-    assert_eq!(cleanup_success, Some(true));
-    assert_eq!(cleanup_result.closed.is_empty(), true);
-    assert_eq!(cleanup_result.removed_from_registry, true);
     assert_eq!(
         tokio::fs::metadata(team_config_path(
             codex_home.as_path(),
-            &cleanup_result.team_id
+            &delete_result.team_id
         ))
         .await
         .is_err(),
         true
     );
     assert_eq!(
-        tokio::fs::metadata(team_tasks_dir(
-            codex_home.as_path(),
-            &cleanup_result.team_id
-        ))
-        .await
-        .is_err(),
+        tokio::fs::metadata(team_tasks_dir(codex_home.as_path(), &delete_result.team_id))
+            .await
+            .is_err(),
         true
     );
 }
 
 #[tokio::test]
-async fn wait_team_any_returns_triggered_member() {
+async fn create_team_injects_coordinator_prompt_into_lead_history() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -3693,84 +3358,64 @@ async fn wait_team_any_returns_triggered_member() {
     let spawn_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "spawn_team",
+        "create_team",
         function_payload(json!({
+            "team_id": "team-1",
             "members": [
-                {"name": "worker", "task": "do work"}
+                {"name": "planner", "task": "plan"}
             ]
         })),
     );
     let spawn_output = MultiAgentHandler
         .handle(spawn_invocation)
         .await
-        .expect("spawn_team should succeed");
+        .expect("create_team should succeed");
     let ToolOutput::Function {
         body: FunctionCallOutputBody::Text(spawn_content),
+        success: spawn_success,
         ..
     } = spawn_output
     else {
         panic!("expected function output");
     };
+    assert_eq!(spawn_success, Some(true));
     let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-    let member = &spawn_result.members[0];
-    let member_id = agent_id(&member.agent_id).expect("valid agent id");
-    let _ = manager
-        .agent_control()
-        .shutdown_agent(member_id)
-        .await
-        .expect("shutdown spawned team member");
+        serde_json::from_str(&spawn_content).expect("create_team result should be json");
+    assert_eq!(spawn_result.team_id, "team-1");
 
-    let wait_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "wait_team",
-        function_payload(json!({
-            "team_id": spawn_result.team_id,
-            "mode": "any",
-            "timeout_ms": 1_000
-        })),
-    );
-    let wait_output = MultiAgentHandler
-        .handle(wait_invocation)
-        .await
-        .expect("wait_team should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(wait_content),
-        ..
-    } = wait_output
-    else {
-        panic!("expected function output");
+    let pending = session.get_pending_input().await;
+    let history = session.clone_history().await;
+    let wants_prompt = |text: &str| {
+        text.contains("# Team Coordinator Instructions")
+            && text.contains("team-1")
+            && text.contains("planner")
     };
-    let wait_result: WaitTeamResult =
-        serde_json::from_str(&wait_content).expect("wait_team result should be json");
-    assert_eq!(wait_result.completed, true);
-    assert!(matches!(wait_result.mode, WaitTeamMode::Any));
-    let triggered = wait_result
-        .triggered_member
-        .expect("any mode should set triggered_member");
-    assert_eq!(triggered.name, "worker".to_string());
-    assert_eq!(triggered.agent_id, member.agent_id);
-    assert_eq!(wait_result.member_statuses.len(), 1);
-    assert_eq!(wait_result.member_statuses[0].name, "worker".to_string());
-    assert_eq!(wait_result.member_statuses[0].agent_id, member.agent_id);
-
-    let close_invocation = invocation(
-        session,
-        turn,
-        "close_team",
-        function_payload(json!({
-            "team_id": spawn_result.team_id
-        })),
-    );
-    MultiAgentHandler
-        .handle(close_invocation)
-        .await
-        .expect("close_team should clean up");
+    let pending_has_prompt = pending.iter().any(|item| match item {
+        codex_protocol::models::ResponseInputItem::Message { role, content }
+            if role == "developer" =>
+        {
+            content.iter().any(|item| match item {
+                ContentItem::InputText { text } => wants_prompt(text),
+                _ => false,
+            })
+        }
+        _ => false,
+    });
+    let history_has_prompt = history.raw_items().iter().any(|item| match item {
+        ResponseItem::Message { role, content, .. } if role == "developer" => {
+            content.iter().any(|item| match item {
+                ContentItem::InputText { text } => wants_prompt(text),
+                _ => false,
+            })
+        }
+        _ => false,
+    });
+    let has_prompt = pending_has_prompt || history_has_prompt;
+    assert_eq!(has_prompt, true);
 }
 
 #[tokio::test]
-async fn close_team_partial_close_updates_persisted_team_config() {
+async fn send_message_team_and_broadcast_send_inputs() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -3780,550 +3425,7 @@ async fn close_team_partial_close_updates_persisted_team_config() {
     let spawn_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "spawn_team",
-        function_payload(json!({
-            "members": [
-                {"name": "planner", "task": "plan"},
-                {"name": "worker", "task": "work"}
-            ]
-        })),
-    );
-    let spawn_output = MultiAgentHandler
-        .handle(spawn_invocation)
-        .await
-        .expect("spawn_team should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(spawn_content),
-        ..
-    } = spawn_output
-    else {
-        panic!("expected function output");
-    };
-    let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-
-    let partial_close_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "close_team",
-        function_payload(json!({
-            "team_id": spawn_result.team_id,
-            "members": ["planner"]
-        })),
-    );
-    let partial_close_output = MultiAgentHandler
-        .handle(partial_close_invocation)
-        .await
-        .expect("close_team should succeed for selected members");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(partial_close_content),
-        ..
-    } = partial_close_output
-    else {
-        panic!("expected function output");
-    };
-    let partial_close_result: CloseTeamResult =
-        serde_json::from_str(&partial_close_content).expect("close_team result should be json");
-    assert_eq!(partial_close_result.closed.len(), 1);
-    assert_eq!(partial_close_result.closed[0].name, "planner".to_string());
-
-    let persisted_config_path =
-        team_config_path(turn.config.codex_home.as_path(), &spawn_result.team_id);
-    let persisted_config_raw = tokio::fs::read_to_string(&persisted_config_path)
-        .await
-        .expect("team config should still exist");
-    let persisted_config: PersistedTeamConfig =
-        serde_json::from_str(&persisted_config_raw).expect("team config should be valid json");
-    assert_eq!(persisted_config.members.len(), 1);
-    assert_eq!(persisted_config.members[0].name, "worker".to_string());
-    assert_eq!(
-        tokio::fs::metadata(team_tasks_dir(
-            turn.config.codex_home.as_path(),
-            &spawn_result.team_id,
-        ))
-        .await
-        .is_ok(),
-        true
-    );
-
-    let full_close_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "close_team",
-        function_payload(json!({
-            "team_id": spawn_result.team_id
-        })),
-    );
-    MultiAgentHandler
-        .handle(full_close_invocation)
-        .await
-        .expect("close remaining team member");
-    assert_eq!(
-        tokio::fs::metadata(team_config_path(
-            turn.config.codex_home.as_path(),
-            &spawn_result.team_id,
-        ))
-        .await
-        .is_ok(),
-        true
-    );
-
-    MultiAgentHandler
-        .handle(invocation(
-            session,
-            turn.clone(),
-            "team_cleanup",
-            function_payload(json!({
-                "team_id": spawn_result.team_id
-            })),
-        ))
-        .await
-        .expect("team_cleanup should succeed");
-    assert_eq!(
-        tokio::fs::metadata(team_config_path(
-            turn.config.codex_home.as_path(),
-            &spawn_result.team_id,
-        ))
-        .await
-        .is_err(),
-        true
-    );
-    assert_eq!(
-        tokio::fs::metadata(team_tasks_dir(
-            turn.config.codex_home.as_path(),
-            &spawn_result.team_id,
-        ))
-        .await
-        .is_err(),
-        true
-    );
-}
-
-#[tokio::test]
-async fn team_task_lifecycle_and_team_cleanup_flow() {
-    let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-
-    let spawn_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "spawn_team",
-        function_payload(json!({
-            "members": [
-                {"name": "planner", "task": "plan"},
-                {"name": "worker", "task": "work"}
-            ]
-        })),
-    );
-    let spawn_output = MultiAgentHandler
-        .handle(spawn_invocation)
-        .await
-        .expect("spawn_team should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(spawn_content),
-        ..
-    } = spawn_output
-    else {
-        panic!("expected function output");
-    };
-    let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-
-    let list_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "team_task_list",
-        function_payload(json!({
-            "team_id": spawn_result.team_id
-        })),
-    );
-    let list_output = MultiAgentHandler
-        .handle(list_invocation)
-        .await
-        .expect("team_task_list should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(list_content),
-        ..
-    } = list_output
-    else {
-        panic!("expected function output");
-    };
-    let list_result: TeamTaskListResult =
-        serde_json::from_str(&list_content).expect("team_task_list should return json");
-    assert_eq!(list_result.tasks.len(), 2);
-    assert_eq!(list_result.team_id, spawn_result.team_id);
-    for task in &list_result.tasks {
-        assert_eq!(task.state, PersistedTaskState::Pending);
-        assert_eq!(task.depends_on.is_empty(), true);
-        assert_eq!(task.updated_at > 0, true);
-        assert_eq!(task.title.is_empty(), false);
-        assert_eq!(task.assignee_agent_id.is_empty(), false);
-    }
-
-    let claim_next_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "team_task_claim_next",
-        function_payload(json!({
-            "team_id": list_result.team_id,
-            "member_name": "planner"
-        })),
-    );
-    let claim_next_output = MultiAgentHandler
-        .handle(claim_next_invocation)
-        .await
-        .expect("team_task_claim_next should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(claim_next_content),
-        ..
-    } = claim_next_output
-    else {
-        panic!("expected function output");
-    };
-    let claim_next_result: TeamTaskClaimNextResult =
-        serde_json::from_str(&claim_next_content).expect("team_task_claim_next should return json");
-    assert_eq!(claim_next_result.claimed, true);
-    let claimed_task = claim_next_result
-        .task
-        .expect("team_task_claim_next should return task");
-    assert_eq!(claimed_task.assignee_name, "planner".to_string());
-    assert_eq!(claimed_task.state, PersistedTaskState::Claimed);
-
-    let complete_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "team_task_complete",
-        function_payload(json!({
-            "team_id": claim_next_result.team_id,
-            "task_id": claimed_task.task_id
-        })),
-    );
-    let complete_output = MultiAgentHandler
-        .handle(complete_invocation)
-        .await
-        .expect("team_task_complete should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(complete_content),
-        ..
-    } = complete_output
-    else {
-        panic!("expected function output");
-    };
-    let complete_result: TeamTaskCompleteResult =
-        serde_json::from_str(&complete_content).expect("team_task_complete should return json");
-    assert_eq!(complete_result.completed, true);
-    assert_eq!(complete_result.task.state, PersistedTaskState::Completed);
-
-    let worker_task_id = list_result
-        .tasks
-        .iter()
-        .find(|task| task.assignee_name == "worker")
-        .expect("expected worker task")
-        .task_id
-        .clone();
-    let claim_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "team_task_claim",
-        function_payload(json!({
-            "team_id": complete_result.team_id,
-            "task_id": worker_task_id
-        })),
-    );
-    let claim_output = MultiAgentHandler
-        .handle(claim_invocation)
-        .await
-        .expect("team_task_claim should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(claim_content),
-        ..
-    } = claim_output
-    else {
-        panic!("expected function output");
-    };
-    let claim_result: TeamTaskClaimResult =
-        serde_json::from_str(&claim_content).expect("team_task_claim should return json");
-    assert_eq!(claim_result.claimed, true);
-    assert_eq!(claim_result.task.state, PersistedTaskState::Claimed);
-    assert_eq!(claim_result.task.assignee_name, "worker".to_string());
-
-    MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "close_team",
-            function_payload(json!({
-                "team_id": claim_result.team_id
-            })),
-        ))
-        .await
-        .expect("close_team should succeed");
-
-    let cleanup_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "team_cleanup",
-        function_payload(json!({
-            "team_id": claim_result.team_id
-        })),
-    );
-    let cleanup_output = MultiAgentHandler
-        .handle(cleanup_invocation)
-        .await
-        .expect("team_cleanup should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(cleanup_content),
-        ..
-    } = cleanup_output
-    else {
-        panic!("expected function output");
-    };
-    let cleanup_result: TeamCleanupResult =
-        serde_json::from_str(&cleanup_content).expect("team_cleanup should return json");
-    assert_eq!(cleanup_result.removed_from_registry, true);
-    assert_eq!(cleanup_result.removed_team_config, true);
-    assert_eq!(cleanup_result.removed_task_dir, true);
-    assert_eq!(cleanup_result.closed.is_empty(), true);
-    assert_eq!(
-        tokio::fs::metadata(team_dir(
-            turn.config.codex_home.as_path(),
-            &cleanup_result.team_id,
-        ))
-        .await
-        .is_err(),
-        true
-    );
-    assert_eq!(
-        tokio::fs::metadata(team_tasks_dir(
-            turn.config.codex_home.as_path(),
-            &cleanup_result.team_id,
-        ))
-        .await
-        .is_err(),
-        true
-    );
-}
-
-#[tokio::test]
-async fn team_task_claim_and_complete_error_paths() {
-    let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-
-    let spawn_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "spawn_team",
-        function_payload(json!({
-            "members": [
-                {"name": "planner", "task": "plan"},
-                {"name": "worker", "task": "work"}
-            ]
-        })),
-    );
-    let spawn_output = MultiAgentHandler
-        .handle(spawn_invocation)
-        .await
-        .expect("spawn_team should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(spawn_content),
-        ..
-    } = spawn_output
-    else {
-        panic!("expected function output");
-    };
-    let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-    let team_id = spawn_result.team_id.clone();
-
-    let tasks = read_team_tasks(turn.config.codex_home.as_path(), &team_id)
-        .await
-        .expect("tasks should exist after spawn_team");
-    let planner_task = tasks
-        .iter()
-        .find(|task| task.assignee.name == "planner")
-        .expect("planner task should exist")
-        .clone();
-    let mut worker_task = tasks
-        .iter()
-        .find(|task| task.assignee.name == "worker")
-        .expect("worker task should exist")
-        .clone();
-    let planner_task_id = planner_task.id.clone();
-    let worker_task_id = worker_task.id.clone();
-    worker_task.depends_on = vec![planner_task.id.clone()];
-    write_team_task(turn.config.codex_home.as_path(), &team_id, &worker_task)
-        .await
-        .expect("write worker task dependencies");
-
-    let claim_worker_before_dependency_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "team_task_claim",
-        function_payload(json!({
-            "team_id": team_id.clone(),
-            "task_id": worker_task_id.clone()
-        })),
-    );
-    let Err(err) = MultiAgentHandler
-        .handle(claim_worker_before_dependency_invocation)
-        .await
-    else {
-        panic!("team_task_claim should fail with unresolved dependency");
-    };
-    assert_eq!(
-        err,
-        FunctionCallError::RespondToModel(format!(
-            "task `{worker_task_id}` has unresolved dependencies"
-        ))
-    );
-
-    let complete_planner_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "team_task_complete",
-        function_payload(json!({
-            "team_id": team_id.clone(),
-            "task_id": planner_task_id.clone()
-        })),
-    );
-    let complete_planner_output = MultiAgentHandler
-        .handle(complete_planner_invocation)
-        .await
-        .expect("team_task_complete for planner should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(complete_planner_content),
-        ..
-    } = complete_planner_output
-    else {
-        panic!("expected function output");
-    };
-    let complete_planner_result: TeamTaskCompleteResult =
-        serde_json::from_str(&complete_planner_content)
-            .expect("team_task_complete result should be json");
-    assert_eq!(complete_planner_result.completed, true);
-    assert_eq!(
-        complete_planner_result.task.state,
-        PersistedTaskState::Completed
-    );
-
-    let claim_worker_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "team_task_claim",
-        function_payload(json!({
-            "team_id": team_id.clone(),
-            "task_id": worker_task_id.clone()
-        })),
-    );
-    let claim_worker_output = MultiAgentHandler
-        .handle(claim_worker_invocation)
-        .await
-        .expect("team_task_claim should succeed after dependency completion");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(claim_worker_content),
-        ..
-    } = claim_worker_output
-    else {
-        panic!("expected function output");
-    };
-    let claim_worker_result: TeamTaskClaimResult =
-        serde_json::from_str(&claim_worker_content).expect("team_task_claim result should json");
-    assert_eq!(claim_worker_result.claimed, true);
-    assert_eq!(claim_worker_result.task.state, PersistedTaskState::Claimed);
-
-    let complete_worker_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "team_task_complete",
-        function_payload(json!({
-            "team_id": team_id.clone(),
-            "task_id": worker_task_id.clone()
-        })),
-    );
-    let complete_worker_output = MultiAgentHandler
-        .handle(complete_worker_invocation)
-        .await
-        .expect("team_task_complete for worker should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(complete_worker_content),
-        ..
-    } = complete_worker_output
-    else {
-        panic!("expected function output");
-    };
-    let complete_worker_result: TeamTaskCompleteResult =
-        serde_json::from_str(&complete_worker_content)
-            .expect("team_task_complete result should be json");
-    assert_eq!(complete_worker_result.completed, true);
-    assert_eq!(
-        complete_worker_result.task.state,
-        PersistedTaskState::Completed
-    );
-
-    let complete_worker_again_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "team_task_complete",
-        function_payload(json!({
-            "team_id": team_id.clone(),
-            "task_id": worker_task_id.clone()
-        })),
-    );
-    let Err(err) = MultiAgentHandler
-        .handle(complete_worker_again_invocation)
-        .await
-    else {
-        panic!("team_task_complete should fail for completed task");
-    };
-    assert_eq!(
-        err,
-        FunctionCallError::RespondToModel(format!("task `{worker_task_id}` is already completed"))
-    );
-
-    MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "close_team",
-            function_payload(json!({
-                "team_id": claim_worker_result.team_id
-            })),
-        ))
-        .await
-        .expect("close_team should succeed");
-
-    let cleanup_invocation = invocation(
-        session,
-        turn,
-        "team_cleanup",
-        function_payload(json!({
-            "team_id": claim_worker_result.team_id
-        })),
-    );
-    MultiAgentHandler
-        .handle(cleanup_invocation)
-        .await
-        .expect("team_cleanup should succeed");
-}
-
-#[tokio::test]
-async fn team_message_and_team_broadcast_send_inputs() {
-    let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-
-    let spawn_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "spawn_team",
+        "create_team",
         function_payload(json!({
             "members": [
                 {"name": "planner", "task": "plan"},
@@ -4353,17 +3455,18 @@ async fn team_message_and_team_broadcast_send_inputs() {
     let message_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "team_message",
+        "send_message",
         function_payload(json!({
             "team_id": spawn_result.team_id,
-            "member_name": "planner",
-            "message": "do planning"
+            "to": "planner",
+            "message": "do planning",
+            "interrupt": false
         })),
     );
     let message_output = MultiAgentHandler
         .handle(message_invocation)
         .await
-        .expect("team_message should succeed");
+        .expect("send_message should succeed");
     let ToolOutput::Function {
         body: FunctionCallOutputBody::Text(message_content),
         ..
@@ -4371,25 +3474,31 @@ async fn team_message_and_team_broadcast_send_inputs() {
     else {
         panic!("expected function output");
     };
-    let message_result: TeamMessageResult =
-        serde_json::from_str(&message_content).expect("team_message should return json");
-    assert_eq!(message_result.member_name, "planner".to_string());
-    assert!(!message_result.submission_id.is_empty());
-    assert!(!message_result.agent_id.is_empty());
+    let message_result: serde_json::Value =
+        serde_json::from_str(&message_content).expect("send_message result should be json");
+    assert_eq!(message_result["route"].as_str(), Some("team_member"));
+    assert_eq!(message_result["member_name"].as_str(), Some("planner"));
+    assert_eq!(
+        message_result["submission_id"].as_str().map(str::is_empty),
+        Some(false)
+    );
 
     let broadcast_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "team_broadcast",
+        "send_message",
         function_payload(json!({
-            "team_id": message_result.team_id,
-            "message": "status update"
+            "team_id": spawn_result.team_id,
+            "to": "*",
+            "message": "status update",
+            "broadcast": true,
+            "interrupt": false
         })),
     );
     let broadcast_output = MultiAgentHandler
         .handle(broadcast_invocation)
         .await
-        .expect("team_broadcast should succeed");
+        .expect("send_message broadcast should succeed");
     let ToolOutput::Function {
         body: FunctionCallOutputBody::Text(broadcast_content),
         ..
@@ -4397,21 +3506,41 @@ async fn team_message_and_team_broadcast_send_inputs() {
     else {
         panic!("expected function output");
     };
-    let broadcast_result: TeamBroadcastResult =
-        serde_json::from_str(&broadcast_content).expect("team_broadcast should return json");
+    let broadcast_result: serde_json::Value =
+        serde_json::from_str(&broadcast_content).expect("send_message result should be json");
+    assert_eq!(broadcast_result["route"].as_str(), Some("broadcast"));
     assert_eq!(
-        broadcast_result.sent.len() + broadcast_result.failed.len(),
+        broadcast_result["sent"]
+            .as_array()
+            .map(Vec::len)
+            .unwrap_or(0)
+            + broadcast_result["failed"]
+                .as_array()
+                .map(Vec::len)
+                .unwrap_or(0),
         spawn_result.members.len()
     );
-    for sent in &broadcast_result.sent {
-        assert_eq!(sent.member_name.is_empty(), false);
-        assert_eq!(sent.agent_id.is_empty(), false);
-        assert_eq!(sent.submission_id.is_empty(), false);
+    for sent in broadcast_result["sent"]
+        .as_array()
+        .expect("sent should be an array")
+    {
+        assert_eq!(sent["member_name"].as_str().map(str::is_empty), Some(false));
+        assert_eq!(sent["agent_id"].as_str().map(str::is_empty), Some(false));
+        assert_eq!(
+            sent["submission_id"].as_str().map(str::is_empty),
+            Some(false)
+        );
     }
-    for failed in &broadcast_result.failed {
-        assert_eq!(failed.member_name.is_empty(), false);
-        assert_eq!(failed.agent_id.is_empty(), false);
-        assert_eq!(failed.error.is_empty(), false);
+    for failed in broadcast_result["failed"]
+        .as_array()
+        .expect("failed should be an array")
+    {
+        assert_eq!(
+            failed["member_name"].as_str().map(str::is_empty),
+            Some(false)
+        );
+        assert_eq!(failed["agent_id"].as_str().map(str::is_empty), Some(false));
+        assert_eq!(failed["error"].as_str().map(str::is_empty), Some(false));
     }
 
     let user_input_count = manager
@@ -4421,34 +3550,21 @@ async fn team_message_and_team_broadcast_send_inputs() {
         .count();
     assert_eq!(user_input_count > 0, true);
 
-    let cleanup_invocation = invocation(
-        session.clone(),
-        turn.clone(),
-        "close_team",
-        function_payload(json!({
-            "team_id": broadcast_result.team_id
-        })),
-    );
-    MultiAgentHandler
-        .handle(cleanup_invocation)
-        .await
-        .expect("close_team should succeed");
-
     MultiAgentHandler
         .handle(invocation(
             session,
             turn,
-            "team_cleanup",
+            "delete_team",
             function_payload(json!({
-                "team_id": broadcast_result.team_id
+                "team_id": spawn_result.team_id
             })),
         ))
         .await
-        .expect("team_cleanup should succeed");
+        .expect("delete_team should succeed");
 }
 
 #[tokio::test]
-async fn team_message_uses_team_id_when_member_names_overlap() {
+async fn send_message_uses_team_id_when_member_names_overlap() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
@@ -4459,7 +3575,7 @@ async fn team_message_uses_team_id_when_member_names_overlap() {
         .handle(invocation(
             session.clone(),
             turn.clone(),
-            "spawn_team",
+            "create_team",
             function_payload(json!({
                 "team_id": "team-a",
                 "members": [{"name": "worker", "task": "plan"}]
@@ -4487,7 +3603,7 @@ async fn team_message_uses_team_id_when_member_names_overlap() {
         .handle(invocation(
             session.clone(),
             turn.clone(),
-            "spawn_team",
+            "create_team",
             function_payload(json!({
                 "team_id": "team-b",
                 "members": [{"name": "worker", "task": "execute"}]
@@ -4515,15 +3631,15 @@ async fn team_message_uses_team_id_when_member_names_overlap() {
         .handle(invocation(
             session.clone(),
             turn.clone(),
-            "team_message",
+            "send_message",
             function_payload(json!({
                 "team_id": spawn_team_a_result.team_id,
-                "member_name": "worker",
+                "to": "worker",
                 "message": "plan now"
             })),
         ))
         .await
-        .expect("team_message team-a should succeed");
+        .expect("send_message team-a should succeed");
     let ToolOutput::Function {
         body: FunctionCallOutputBody::Text(message_team_a_content),
         ..
@@ -4531,23 +3647,27 @@ async fn team_message_uses_team_id_when_member_names_overlap() {
     else {
         panic!("expected function output");
     };
-    let message_team_a_result: TeamMessageResult =
-        serde_json::from_str(&message_team_a_content).expect("team_message result should be json");
-    assert_eq!(message_team_a_result.agent_id, team_a_member_id);
+    let message_team_a_result: serde_json::Value =
+        serde_json::from_str(&message_team_a_content).expect("send_message result should be json");
+    assert_eq!(message_team_a_result["route"].as_str(), Some("team_member"));
+    assert_eq!(
+        message_team_a_result["agent_id"].as_str(),
+        Some(team_a_member_id.as_str())
+    );
 
     let message_team_b_output = MultiAgentHandler
         .handle(invocation(
             session.clone(),
             turn.clone(),
-            "team_message",
+            "send_message",
             function_payload(json!({
                 "team_id": spawn_team_b_result.team_id,
-                "member_name": "worker",
+                "to": "worker",
                 "message": "execute now"
             })),
         ))
         .await
-        .expect("team_message team-b should succeed");
+        .expect("send_message team-b should succeed");
     let ToolOutput::Function {
         body: FunctionCallOutputBody::Text(message_team_b_content),
         ..
@@ -4555,9 +3675,13 @@ async fn team_message_uses_team_id_when_member_names_overlap() {
     else {
         panic!("expected function output");
     };
-    let message_team_b_result: TeamMessageResult =
-        serde_json::from_str(&message_team_b_content).expect("team_message result should be json");
-    assert_eq!(message_team_b_result.agent_id, team_b_member_id);
+    let message_team_b_result: serde_json::Value =
+        serde_json::from_str(&message_team_b_content).expect("send_message result should be json");
+    assert_eq!(message_team_b_result["route"].as_str(), Some("team_member"));
+    assert_eq!(
+        message_team_b_result["agent_id"].as_str(),
+        Some(team_b_member_id.as_str())
+    );
 
     let team_a_user_input_count = manager
         .captured_ops()
@@ -4582,65 +3706,34 @@ async fn team_message_uses_team_id_when_member_names_overlap() {
         .handle(invocation(
             session.clone(),
             turn.clone(),
-            "close_team",
+            "delete_team",
             function_payload(json!({"team_id": spawn_team_a_result.team_id})),
         ))
         .await
-        .expect("close_team team-a should succeed");
-    MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "team_cleanup",
-            function_payload(json!({"team_id": spawn_team_a_result.team_id})),
-        ))
-        .await
-        .expect("team_cleanup team-a should succeed");
-    MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "close_team",
-            function_payload(json!({"team_id": spawn_team_b_result.team_id})),
-        ))
-        .await
-        .expect("close_team team-b should succeed");
+        .expect("delete_team team-a should succeed");
     MultiAgentHandler
         .handle(invocation(
             session,
             turn,
-            "team_cleanup",
+            "delete_team",
             function_payload(json!({"team_id": spawn_team_b_result.team_id})),
         ))
         .await
-        .expect("team_cleanup team-b should succeed");
+        .expect("delete_team team-b should succeed");
 }
 
 #[tokio::test]
-async fn team_message_persists_inbox_when_delivery_fails() {
-    #[derive(Debug, Deserialize)]
-    struct TeamMessageDurableResult {
-        team_id: String,
-        member_name: String,
-        agent_id: String,
-        submission_id: String,
-        delivered: bool,
-        inbox_entry_id: String,
-        error: Option<String>,
-    }
-
+async fn send_message_reports_delivery_failure_without_erroring() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
     let session = Arc::new(session);
     let turn = Arc::new(turn);
-    let lead_thread_id = session.conversation_id;
-    let codex_home = turn.config.codex_home.clone();
 
     let spawn_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "spawn_team",
+        "create_team",
         function_payload(json!({
             "members": [
                 {"name": "planner", "task": "plan"}
@@ -4667,6 +3760,7 @@ async fn team_message_persists_inbox_when_delivery_fails() {
         .agent_id
         .as_str();
     let member_id = agent_id(member_id).expect("valid thread id");
+    let member_id_str = member_id.to_string();
 
     manager
         .agent_control()
@@ -4677,17 +3771,17 @@ async fn team_message_persists_inbox_when_delivery_fails() {
     let message_invocation = invocation(
         session.clone(),
         turn.clone(),
-        "team_message",
+        "send_message",
         function_payload(json!({
             "team_id": spawn_result.team_id,
-            "member_name": "planner",
+            "to": "planner",
             "message": "do planning"
         })),
     );
     let message_output = MultiAgentHandler
         .handle(message_invocation)
         .await
-        .expect("team_message should succeed even if delivery fails");
+        .expect("send_message should succeed even if delivery fails");
     let ToolOutput::Function {
         body: FunctionCallOutputBody::Text(message_content),
         ..
@@ -4695,37 +3789,42 @@ async fn team_message_persists_inbox_when_delivery_fails() {
     else {
         panic!("expected function output");
     };
-    let message_result: TeamMessageDurableResult =
-        serde_json::from_str(&message_content).expect("team_message result should be json");
-    assert_eq!(message_result.member_name, "planner".to_string());
-    assert_eq!(message_result.agent_id, member_id.to_string());
-    assert_eq!(message_result.delivered, false);
-    assert_eq!(message_result.submission_id.is_empty(), true);
-    assert_eq!(message_result.inbox_entry_id.is_empty(), false);
-    assert_eq!(message_result.error.is_some(), true);
+    let message_result: serde_json::Value =
+        serde_json::from_str(&message_content).expect("send_message result should be json");
+    assert_eq!(message_result["route"].as_str(), Some("team_member"));
+    assert_eq!(message_result["member_name"].as_str(), Some("planner"));
+    assert_eq!(
+        message_result["agent_id"].as_str(),
+        Some(member_id_str.as_str())
+    );
+    assert_eq!(message_result["delivered"].as_bool(), Some(false));
+    assert_eq!(
+        message_result["submission_id"].as_str().map(str::is_empty),
+        Some(true)
+    );
+    assert_eq!(
+        message_result["error"].as_str().map(str::is_empty),
+        Some(false)
+    );
 
-    let inbox_file = inbox::inbox_dir(codex_home.as_path(), &message_result.team_id)
-        .join(format!("{member_id}.jsonl"));
-    let inbox_raw = tokio::fs::read_to_string(&inbox_file)
+    MultiAgentHandler
+        .handle(invocation(
+            session,
+            turn,
+            "delete_team",
+            function_payload(json!({"team_id": spawn_result.team_id})),
+        ))
         .await
-        .expect("inbox file should exist");
-    let first_line = inbox_raw.lines().next().expect("inbox should have 1 line");
-    let entry: inbox::TeamInboxEntry =
-        serde_json::from_str(first_line).expect("inbox line should be json");
-    assert_eq!(entry.id, message_result.inbox_entry_id);
-    assert_eq!(entry.from_thread_id, lead_thread_id.to_string());
-    assert_eq!(entry.from_name, Some("lead".to_string()));
-    assert_eq!(entry.to_thread_id, member_id.to_string());
-    assert_eq!(entry.prompt.contains("do planning"), true);
+        .expect("delete_team should succeed");
 }
 
 #[tokio::test]
-async fn team_ask_lead_persists_and_lead_can_pop_and_ack() {
+async fn send_message_ask_lead_delivers_or_reports_failure() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
     let lead_thread_id = session.conversation_id;
-    let codex_home = turn.config.codex_home.clone();
+    let lead_thread_id_str = lead_thread_id.to_string();
     let turn = Arc::new(turn);
 
     let mut session_arc = Arc::new(session);
@@ -4733,7 +3832,7 @@ async fn team_ask_lead_persists_and_lead_can_pop_and_ack() {
         .handle(invocation(
             session_arc.clone(),
             turn.clone(),
-            "spawn_team",
+            "create_team",
             function_payload(json!({
                 "team_id": ThreadId::new().to_string(),
                 "members": [
@@ -4763,20 +3862,21 @@ async fn team_ask_lead_persists_and_lead_can_pop_and_ack() {
 
     let mut session = unwrap_arc(session_arc, "only one session ref");
     session.conversation_id = member_id;
-
     session_arc = Arc::new(session);
+
     let ask_output = MultiAgentHandler
         .handle(invocation(
             session_arc.clone(),
             turn.clone(),
-            "team_ask_lead",
+            "send_message",
             function_payload(json!({
                 "team_id": team_id,
+                "to": "lead",
                 "message": "need guidance"
             })),
         ))
         .await
-        .expect("team_ask_lead should succeed");
+        .expect("send_message should succeed");
     let ToolOutput::Function {
         body: FunctionCallOutputBody::Text(ask_content),
         ..
@@ -4784,270 +3884,63 @@ async fn team_ask_lead_persists_and_lead_can_pop_and_ack() {
     else {
         panic!("expected function output");
     };
-    let ask_result: TeamAskLeadResult =
-        serde_json::from_str(&ask_content).expect("team_ask_lead result should be json");
-    assert_eq!(ask_result.team_id.is_empty(), false);
-    assert_eq!(ask_result.lead_thread_id, lead_thread_id.to_string());
-    if ask_result.delivered {
-        assert_eq!(ask_result.submission_id.is_empty(), false);
+
+    let ask_result: serde_json::Value =
+        serde_json::from_str(&ask_content).expect("send_message result should be json");
+    assert_eq!(ask_result["route"].as_str(), Some("ask_lead"));
+    assert_eq!(
+        ask_result["lead_thread_id"].as_str(),
+        Some(lead_thread_id_str.as_str())
+    );
+
+    let delivered = ask_result["delivered"].as_bool().expect("delivered bool");
+    if delivered {
+        assert_eq!(
+            ask_result["submission_id"].as_str().map(str::is_empty),
+            Some(false)
+        );
+        assert_eq!(ask_result["error"].as_str(), None);
     } else {
-        assert_eq!(ask_result.submission_id.is_empty(), true);
+        assert_eq!(
+            ask_result["submission_id"].as_str().map(str::is_empty),
+            Some(true)
+        );
+        assert_eq!(ask_result["error"].as_str().map(str::is_empty), Some(false));
     }
-    assert_eq!(ask_result.inbox_entry_id.is_empty(), false);
-    assert_eq!(ask_result.error.is_none(), ask_result.delivered);
+
+    let team_id = ask_result["team_id"].as_str().unwrap_or_default();
 
     let mut session = unwrap_arc(session_arc, "only one session ref");
     session.conversation_id = lead_thread_id;
-    session_arc = Arc::new(session);
-
-    let pop_output = MultiAgentHandler
-        .handle(invocation(
-            session_arc.clone(),
-            turn.clone(),
-            "team_inbox_pop",
-            function_payload(json!({
-                "team_id": ask_result.team_id,
-                "limit": 50
-            })),
-        ))
-        .await
-        .expect("team_inbox_pop should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(pop_content),
-        ..
-    } = pop_output
-    else {
-        panic!("expected function output");
-    };
-    let pop_result: TeamInboxPopResult =
-        serde_json::from_str(&pop_content).expect("team_inbox_pop result should be json");
-    assert_eq!(pop_result.thread_id, lead_thread_id.to_string());
-    assert_eq!(pop_result.messages.is_empty(), false);
-    assert_eq!(pop_result.ack_token.is_empty(), false);
-    assert_eq!(pop_result.messages[0].from_name, Some("worker".to_string()));
-    let message = &pop_result.messages[0];
-    assert_eq!(message.id.is_empty(), false);
-    assert_eq!(message.created_at > 0, true);
-    assert_eq!(message.from_thread_id, member_id.to_string());
-    assert_eq!(message.input_items.is_empty(), false);
-    assert_eq!(message.prompt.is_empty(), false);
-
-    let ack_output = MultiAgentHandler
-        .handle(invocation(
-            session_arc.clone(),
-            turn.clone(),
-            "team_inbox_ack",
-            function_payload(json!({
-                "team_id": pop_result.team_id,
-                "ack_token": pop_result.ack_token
-            })),
-        ))
-        .await
-        .expect("team_inbox_ack should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(ack_content),
-        ..
-    } = ack_output
-    else {
-        panic!("expected function output");
-    };
-    let ack_result: TeamInboxAckResult =
-        serde_json::from_str(&ack_content).expect("team_inbox_ack result should be json");
-    assert_eq!(ack_result.acked, true);
-    assert_eq!(ack_result.thread_id, lead_thread_id.to_string());
-
-    let pop_again_output = MultiAgentHandler
-        .handle(invocation(
-            session_arc,
-            turn,
-            "team_inbox_pop",
-            function_payload(json!({
-                "team_id": ask_result.team_id,
-                "limit": 50
-            })),
-        ))
-        .await
-        .expect("team_inbox_pop should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(pop_again_content),
-        ..
-    } = pop_again_output
-    else {
-        panic!("expected function output");
-    };
-    let pop_again_result: TeamInboxPopResult =
-        serde_json::from_str(&pop_again_content).expect("team_inbox_pop result should be json");
-    assert_eq!(pop_again_result.messages.is_empty(), true);
-
-    let _ = tokio::fs::remove_dir_all(inbox::inbox_dir(codex_home.as_path(), &ask_result.team_id))
-        .await;
-}
-
-#[tokio::test]
-async fn team_inbox_ack_noops_when_token_empty() {
-    let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
     let session = Arc::new(session);
-    let turn = Arc::new(turn);
-
-    let spawn_output = MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "spawn_team",
-            function_payload(json!({
-                "members": [
-                    {"name": "worker", "task": "work"}
-                ]
-            })),
-        ))
-        .await
-        .expect("spawn_team should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(spawn_content),
-        ..
-    } = spawn_output
-    else {
-        panic!("expected function output");
-    };
-    let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-
-    let ack_output = MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "team_inbox_ack",
-            function_payload(json!({
-                "team_id": spawn_result.team_id,
-                "ack_token": ""
-            })),
-        ))
-        .await
-        .expect("team_inbox_ack should succeed with empty token");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(ack_content),
-        ..
-    } = ack_output
-    else {
-        panic!("expected function output");
-    };
-    let ack_result: TeamInboxAckResult =
-        serde_json::from_str(&ack_content).expect("team_inbox_ack result should be json");
-    assert_eq!(ack_result.acked, false);
-
-    MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "close_team",
-            function_payload(json!({"team_id": ack_result.team_id})),
-        ))
-        .await
-        .expect("close_team should succeed");
 
     MultiAgentHandler
         .handle(invocation(
             session,
             turn,
-            "team_cleanup",
-            function_payload(json!({"team_id": ack_result.team_id})),
+            "delete_team",
+            function_payload(json!({"team_id": team_id})),
         ))
         .await
-        .expect("cleanup");
+        .expect("delete_team should succeed");
 }
 
 #[tokio::test]
-async fn team_inbox_ack_rejects_invalid_token() {
+async fn send_message_ask_lead_fails_when_called_by_lead() {
     let (mut session, turn) = make_session_and_context().await;
     let manager = thread_manager();
     session.services.agent_control = manager.agent_control();
-    let session = Arc::new(session);
+    let session_arc = Arc::new(session);
     let turn = Arc::new(turn);
 
-    let spawn_output = MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "spawn_team",
-            function_payload(json!({
-                "members": [
-                    {"name": "worker", "task": "work"}
-                ]
-            })),
-        ))
-        .await
-        .expect("spawn_team should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(spawn_content),
-        ..
-    } = spawn_output
-    else {
-        panic!("expected function output");
-    };
-    let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-
-    let Err(err) = MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "team_inbox_ack",
-            function_payload(json!({
-                "team_id": spawn_result.team_id,
-                "ack_token": "not-json"
-            })),
-        ))
-        .await
-    else {
-        panic!("team_inbox_ack should fail for invalid token");
-    };
-    let FunctionCallError::RespondToModel(message) = err else {
-        panic!("expected respond to model error");
-    };
-    assert_eq!(message.starts_with("ack_token is invalid:"), true);
-
-    MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "close_team",
-            function_payload(json!({"team_id": spawn_result.team_id})),
-        ))
-        .await
-        .expect("close_team should succeed");
-
-    MultiAgentHandler
-        .handle(invocation(
-            session,
-            turn,
-            "team_cleanup",
-            function_payload(json!({"team_id": spawn_result.team_id})),
-        ))
-        .await
-        .expect("cleanup");
-}
-
-#[tokio::test]
-async fn team_inbox_ack_rejects_team_id_mismatch() {
-    let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let lead_thread_id = session.conversation_id;
-    let turn = Arc::new(turn);
-
-    let mut session_arc = Arc::new(session);
     let spawn_output = MultiAgentHandler
         .handle(invocation(
             session_arc.clone(),
             turn.clone(),
-            "spawn_team",
+            "create_team",
             function_payload(json!({
                 "team_id": ThreadId::new().to_string(),
-                "members": [
-                    {"name": "worker", "task": "work"}
-                ]
+                "members": [{"name": "worker", "task": "work"}]
             })),
         ))
         .await
@@ -5062,501 +3955,28 @@ async fn team_inbox_ack_rejects_team_id_mismatch() {
     let spawn_result: SpawnTeamResult =
         serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
     let team_id = spawn_result.team_id.clone();
-    let member_id = spawn_result
-        .members
-        .first()
-        .expect("member")
-        .agent_id
-        .as_str();
-    let member_id = agent_id(member_id).expect("valid thread id");
 
-    let mut session = unwrap_arc(session_arc, "only one session ref");
-    session.conversation_id = member_id;
-    session_arc = Arc::new(session);
-    MultiAgentHandler
+    let Err(err) = MultiAgentHandler
         .handle(invocation(
             session_arc.clone(),
             turn.clone(),
-            "team_ask_lead",
+            "send_message",
             function_payload(json!({
                 "team_id": team_id,
-                "message": "need guidance"
-            })),
-        ))
-        .await
-        .expect("team_ask_lead should succeed");
-
-    let mut session = unwrap_arc(session_arc, "only one session ref");
-    session.conversation_id = lead_thread_id;
-    session_arc = Arc::new(session);
-    let pop_output = MultiAgentHandler
-        .handle(invocation(
-            session_arc.clone(),
-            turn.clone(),
-            "team_inbox_pop",
-            function_payload(json!({
-                "team_id": spawn_result.team_id,
-                "limit": 1
-            })),
-        ))
-        .await
-        .expect("team_inbox_pop should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(pop_content),
-        ..
-    } = pop_output
-    else {
-        panic!("expected function output");
-    };
-    let pop_result: TeamInboxPopResult =
-        serde_json::from_str(&pop_content).expect("team_inbox_pop result should be json");
-    let mut token: inbox::TeamInboxAckToken =
-        serde_json::from_str(&pop_result.ack_token).expect("ack_token json");
-    token.team_id = ThreadId::new().to_string();
-    let ack_token = serde_json::to_string(&token).expect("ack token serialize");
-
-    let Err(err) = MultiAgentHandler
-        .handle(invocation(
-            session_arc.clone(),
-            turn.clone(),
-            "team_inbox_ack",
-            function_payload(json!({
-                "team_id": pop_result.team_id,
-                "ack_token": ack_token
-            })),
-        ))
-        .await
-    else {
-        panic!("team_inbox_ack should fail for team_id mismatch");
-    };
-    assert_eq!(
-        err,
-        FunctionCallError::RespondToModel("ack_token team_id mismatch".to_string())
-    );
-
-    MultiAgentHandler
-        .handle(invocation(
-            session_arc.clone(),
-            turn.clone(),
-            "close_team",
-            function_payload(json!({"team_id": pop_result.team_id})),
-        ))
-        .await
-        .expect("close_team should succeed");
-
-    MultiAgentHandler
-        .handle(invocation(
-            session_arc,
-            turn,
-            "team_cleanup",
-            function_payload(json!({"team_id": pop_result.team_id})),
-        ))
-        .await
-        .expect("cleanup");
-}
-
-#[tokio::test]
-async fn team_inbox_ack_rejects_thread_id_mismatch() {
-    let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let lead_thread_id = session.conversation_id;
-    let turn = Arc::new(turn);
-
-    let mut session_arc = Arc::new(session);
-    let spawn_output = MultiAgentHandler
-        .handle(invocation(
-            session_arc.clone(),
-            turn.clone(),
-            "spawn_team",
-            function_payload(json!({
-                "team_id": ThreadId::new().to_string(),
-                "members": [
-                    {"name": "worker", "task": "work"}
-                ]
-            })),
-        ))
-        .await
-        .expect("spawn_team should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(spawn_content),
-        ..
-    } = spawn_output
-    else {
-        panic!("expected function output");
-    };
-    let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-    let team_id = spawn_result.team_id.clone();
-    let member_id = spawn_result
-        .members
-        .first()
-        .expect("member")
-        .agent_id
-        .as_str();
-    let member_id = agent_id(member_id).expect("valid thread id");
-
-    let mut session = unwrap_arc(session_arc, "only one session ref");
-    session.conversation_id = member_id;
-    session_arc = Arc::new(session);
-    MultiAgentHandler
-        .handle(invocation(
-            session_arc.clone(),
-            turn.clone(),
-            "team_ask_lead",
-            function_payload(json!({
-                "team_id": team_id,
-                "message": "need guidance"
-            })),
-        ))
-        .await
-        .expect("team_ask_lead should succeed");
-
-    let mut session = unwrap_arc(session_arc, "only one session ref");
-    session.conversation_id = lead_thread_id;
-    session_arc = Arc::new(session);
-    let pop_output = MultiAgentHandler
-        .handle(invocation(
-            session_arc.clone(),
-            turn.clone(),
-            "team_inbox_pop",
-            function_payload(json!({
-                "team_id": spawn_result.team_id,
-                "limit": 1
-            })),
-        ))
-        .await
-        .expect("team_inbox_pop should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(pop_content),
-        ..
-    } = pop_output
-    else {
-        panic!("expected function output");
-    };
-    let pop_result: TeamInboxPopResult =
-        serde_json::from_str(&pop_content).expect("team_inbox_pop result should be json");
-    let mut token: inbox::TeamInboxAckToken =
-        serde_json::from_str(&pop_result.ack_token).expect("ack_token json");
-    token.thread_id = ThreadId::new().to_string();
-    let ack_token = serde_json::to_string(&token).expect("ack token serialize");
-
-    let Err(err) = MultiAgentHandler
-        .handle(invocation(
-            session_arc.clone(),
-            turn.clone(),
-            "team_inbox_ack",
-            function_payload(json!({
-                "team_id": pop_result.team_id,
-                "ack_token": ack_token
-            })),
-        ))
-        .await
-    else {
-        panic!("team_inbox_ack should fail for thread_id mismatch");
-    };
-    assert_eq!(
-        err,
-        FunctionCallError::RespondToModel("ack_token thread_id mismatch".to_string())
-    );
-
-    MultiAgentHandler
-        .handle(invocation(
-            session_arc.clone(),
-            turn.clone(),
-            "close_team",
-            function_payload(json!({"team_id": pop_result.team_id})),
-        ))
-        .await
-        .expect("close_team should succeed");
-
-    MultiAgentHandler
-        .handle(invocation(
-            session_arc,
-            turn,
-            "team_cleanup",
-            function_payload(json!({"team_id": pop_result.team_id})),
-        ))
-        .await
-        .expect("cleanup");
-}
-
-#[tokio::test]
-async fn team_ask_lead_rejects_when_called_by_lead() {
-    let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-
-    let spawn_output = MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "spawn_team",
-            function_payload(json!({
-                "members": [
-                    {"name": "worker", "task": "work"}
-                ]
-            })),
-        ))
-        .await
-        .expect("spawn_team should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(spawn_content),
-        ..
-    } = spawn_output
-    else {
-        panic!("expected function output");
-    };
-    let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-
-    let Err(err) = MultiAgentHandler
-        .handle(invocation(
-            session,
-            turn,
-            "team_ask_lead",
-            function_payload(json!({
-                "team_id": spawn_result.team_id,
+                "to": "lead",
                 "message": "hello"
             })),
         ))
         .await
     else {
-        panic!("team_ask_lead should fail when called by lead");
+        panic!("send_message should fail when called by lead with to=lead");
     };
     assert_eq!(
         err,
-        FunctionCallError::RespondToModel("team_ask_lead cannot be called by the lead".to_string())
+        FunctionCallError::RespondToModel(
+            "send_message cannot be called by the lead when to=lead".to_string()
+        )
     );
-}
-
-#[tokio::test]
-async fn team_inbox_pop_rejects_non_member() {
-    let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let lead_thread_id = session.conversation_id;
-    let turn = Arc::new(turn);
-
-    let mut session_arc = Arc::new(session);
-    let spawn_output = MultiAgentHandler
-        .handle(invocation(
-            session_arc.clone(),
-            turn.clone(),
-            "spawn_team",
-            function_payload(json!({
-                "members": [
-                    {"name": "worker", "task": "work"}
-                ]
-            })),
-        ))
-        .await
-        .expect("spawn_team should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(spawn_content),
-        ..
-    } = spawn_output
-    else {
-        panic!("expected function output");
-    };
-    let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-    let team_id = spawn_result.team_id.clone();
-
-    let mut session = unwrap_arc(session_arc, "only one session ref");
-    session.conversation_id = ThreadId::new();
-    session_arc = Arc::new(session);
-
-    let caller_thread_id = session_arc.conversation_id;
-    let Err(err) = MultiAgentHandler
-        .handle(invocation(
-            session_arc.clone(),
-            turn.clone(),
-            "team_inbox_pop",
-            function_payload(json!({
-                "team_id": team_id
-            })),
-        ))
-        .await
-    else {
-        panic!("team_inbox_pop should fail for non-member");
-    };
-    assert_eq!(
-        err,
-        FunctionCallError::RespondToModel(format!(
-            "thread `{caller_thread_id}` is not a member of team `{team_id}`"
-        ))
-    );
-
-    // restore to avoid leaking registry keyed by wrong id
-    let mut session = unwrap_arc(session_arc, "only one session ref");
-    session.conversation_id = lead_thread_id;
-    let session = Arc::new(session);
-    MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            Arc::clone(&turn),
-            "close_team",
-            function_payload(json!({"team_id": team_id})),
-        ))
-        .await
-        .expect("close_team should succeed");
-
-    MultiAgentHandler
-        .handle(invocation(
-            session,
-            Arc::clone(&turn),
-            "team_cleanup",
-            function_payload(json!({"team_id": team_id})),
-        ))
-        .await
-        .expect("cleanup");
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn team_inbox_appends_are_not_corrupted_under_concurrency() {
-    let (_session, turn) = make_session_and_context().await;
-    let codex_home = turn.config.codex_home.clone();
-    let team_id = ThreadId::new().to_string();
-    let receiver = ThreadId::new();
-    let sender = ThreadId::new();
-    let items = vec![UserInput::Text {
-        text: "hello".to_string(),
-        text_elements: Vec::new(),
-    }];
-
-    let task_count = 20usize;
-    let per_task = 25usize;
-    let total = task_count * per_task;
-
-    let mut set = JoinSet::new();
-    for _ in 0..task_count {
-        let codex_home = codex_home.clone();
-        let team_id = team_id.clone();
-        let items = items.clone();
-        set.spawn(async move {
-            for _ in 0..per_task {
-                inbox::append_inbox_entry(
-                    codex_home.as_path(),
-                    &team_id,
-                    receiver,
-                    sender,
-                    Some("lead"),
-                    &items,
-                    "hello",
-                )
-                .await
-                .expect("append should succeed");
-            }
-        });
-    }
-    while let Some(result) = set.join_next().await {
-        result.expect("task should join");
-    }
-
-    let inbox_file =
-        inbox::inbox_dir(codex_home.as_path(), &team_id).join(format!("{receiver}.jsonl"));
-    let raw = tokio::fs::read_to_string(&inbox_file)
-        .await
-        .expect("inbox file");
-    let mut ids = std::collections::HashSet::new();
-    let mut count = 0usize;
-    for line in raw.lines() {
-        let entry: inbox::TeamInboxEntry = serde_json::from_str(line).expect("valid jsonl");
-        assert_eq!(ids.insert(entry.id), true);
-        count += 1;
-    }
-    assert_eq!(count, total);
-}
-
-#[tokio::test]
-async fn team_task_claim_is_exclusive_under_concurrency() {
-    let (mut session, turn) = make_session_and_context().await;
-    let manager = thread_manager();
-    session.services.agent_control = manager.agent_control();
-    let session = Arc::new(session);
-    let turn = Arc::new(turn);
-
-    let spawn_output = MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "spawn_team",
-            function_payload(json!({
-                "members": [
-                    {"name": "planner", "task": "plan"},
-                    {"name": "worker", "task": "work"}
-                ]
-            })),
-        ))
-        .await
-        .expect("spawn_team should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(spawn_content),
-        ..
-    } = spawn_output
-    else {
-        panic!("expected function output");
-    };
-    let spawn_result: SpawnTeamResult =
-        serde_json::from_str(&spawn_content).expect("spawn_team result should be json");
-
-    let list_output = MultiAgentHandler
-        .handle(invocation(
-            session.clone(),
-            turn.clone(),
-            "team_task_list",
-            function_payload(json!({"team_id": spawn_result.team_id})),
-        ))
-        .await
-        .expect("team_task_list should succeed");
-    let ToolOutput::Function {
-        body: FunctionCallOutputBody::Text(list_content),
-        ..
-    } = list_output
-    else {
-        panic!("expected function output");
-    };
-    let list_result: TeamTaskListResult =
-        serde_json::from_str(&list_content).expect("team_task_list result should be json");
-    let task_id = list_result.tasks.first().expect("task").task_id.clone();
-
-    let mut set = JoinSet::new();
-    for _ in 0..10 {
-        let session = session.clone();
-        let turn = turn.clone();
-        let team_id = list_result.team_id.clone();
-        let task_id = task_id.clone();
-        set.spawn(async move {
-            MultiAgentHandler
-                .handle(invocation(
-                    session,
-                    turn,
-                    "team_task_claim",
-                    function_payload(json!({"team_id": team_id, "task_id": task_id})),
-                ))
-                .await
-        });
-    }
-
-    let mut success = 0usize;
-    let mut already_claimed = 0usize;
-    while let Some(result) = set.join_next().await {
-        let output = result.expect("join");
-        match output {
-            Ok(_) => success += 1,
-            Err(FunctionCallError::RespondToModel(msg)) if msg.contains("already claimed") => {
-                already_claimed += 1
-            }
-            Err(other) => panic!("unexpected result: {other:?}"),
-        }
-    }
-
-    assert_eq!(success, 1);
-    assert_eq!(already_claimed, 9);
 }
 
 #[tokio::test]

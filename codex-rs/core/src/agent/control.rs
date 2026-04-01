@@ -467,6 +467,14 @@ impl AgentControl {
         result
     }
 
+    pub(crate) async fn send_message(
+        &self,
+        agent_id: ThreadId,
+        items: Vec<UserInput>,
+    ) -> CodexResult<String> {
+        self.send_input(agent_id, items).await
+    }
+
     /// Interrupt the current task for an existing agent thread.
     pub(crate) async fn interrupt_agent(&self, agent_id: ThreadId) -> CodexResult<String> {
         let state = self.upgrade()?;
