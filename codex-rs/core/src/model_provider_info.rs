@@ -9,6 +9,7 @@ use crate::auth::AuthMode;
 use crate::error::EnvVarError;
 use codex_api::Provider as ApiProvider;
 use codex_api::provider::RetryConfig as ApiRetryConfig;
+use codex_protocol::config_types::ModelProviderAuthInfo;
 use http::HeaderMap;
 use http::header::HeaderName;
 use http::header::HeaderValue;
@@ -80,6 +81,10 @@ pub struct ModelProviderInfo {
     /// this may be necessary when using this programmatically.
     pub experimental_bearer_token: Option<String>,
 
+    /// Command-backed bearer-token configuration for this provider.
+    #[serde(default)]
+    pub auth: Option<ModelProviderAuthInfo>,
+
     /// Which wire protocol this provider expects.
     #[serde(default)]
     pub wire_api: WireApi,
@@ -120,6 +125,36 @@ pub struct ModelProviderInfo {
 }
 
 impl ModelProviderInfo {
+    pub(crate) fn validate(&self) -> std::result::Result<(), String> {
+        let Some(auth) = self.auth.as_ref() else {
+            return Ok(());
+        };
+
+        if auth.command.trim().is_empty() {
+            return Err("provider auth.command must not be empty".to_string());
+        }
+
+        let mut conflicts = Vec::new();
+        if self.env_key.is_some() {
+            conflicts.push("env_key");
+        }
+        if self.experimental_bearer_token.is_some() {
+            conflicts.push("experimental_bearer_token");
+        }
+        if self.requires_openai_auth {
+            conflicts.push("requires_openai_auth");
+        }
+
+        if conflicts.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "provider auth cannot be combined with {}",
+                conflicts.join(", ")
+            ))
+        }
+    }
+
     fn build_header_map(&self) -> crate::error::Result<HeaderMap> {
         let capacity = self.http_headers.as_ref().map_or(0, HashMap::len)
             + self.env_http_headers.as_ref().map_or(0, HashMap::len);
@@ -235,6 +270,7 @@ impl ModelProviderInfo {
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: Some(
@@ -323,6 +359,7 @@ pub fn create_oss_provider_with_base_url(base_url: &str, wire_api: WireApi) -> M
         env_key: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
+        auth: None,
         wire_api,
         query_params: None,
         http_headers: None,
@@ -352,6 +389,7 @@ base_url = "http://localhost:11434/v1"
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -381,6 +419,7 @@ query_params = { api-version = "2025-04-01-preview" }
             env_key: Some("AZURE_OPENAI_API_KEY".into()),
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: Some(maplit::hashmap! {
                 "api-version".to_string() => "2025-04-01-preview".to_string(),
@@ -413,6 +452,7 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
             env_key: Some("API_KEY".into()),
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: Some(maplit::hashmap! {
@@ -430,6 +470,45 @@ env_http_headers = { "X-Example-Env-Header" = "EXAMPLE_ENV_VAR" }
 
         let provider: ModelProviderInfo = toml::from_str(azure_provider_toml).unwrap();
         assert_eq!(expected_provider, provider);
+    }
+
+    #[test]
+    fn test_deserialize_provider_auth_config() {
+        let provider_toml = r#"
+name = "Corp OpenAI"
+base_url = "https://gateway.example.com/openai"
+
+[auth]
+command = "gcloud"
+args = ["auth", "print-access-token"]
+timeout_ms = 5000
+refresh_interval_ms = 300000
+"#;
+
+        let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+        assert_eq!(
+            provider.auth.as_ref().map(|config| config.command.as_str()),
+            Some("gcloud")
+        );
+        assert!(provider.validate().is_ok());
+    }
+
+    #[test]
+    fn test_provider_auth_conflicts_with_env_key() {
+        let provider_toml = r#"
+name = "Corp OpenAI"
+base_url = "https://gateway.example.com/openai"
+env_key = "OPENAI_API_KEY"
+
+[auth]
+command = "gcloud"
+"#;
+
+        let provider: ModelProviderInfo = toml::from_str(provider_toml).unwrap();
+        let err = provider
+            .validate()
+            .expect_err("provider auth conflict should fail");
+        assert_eq!(err, "provider auth cannot be combined with env_key");
     }
 
     #[test]

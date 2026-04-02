@@ -2057,6 +2057,14 @@ impl Config {
         for (key, provider) in cfg.model_providers.into_iter() {
             model_providers.entry(key).or_insert(provider);
         }
+        for (key, provider) in &model_providers {
+            if let Err(message) = provider.validate() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("model_providers.{key}: {message}"),
+                ));
+            }
+        }
 
         let model_provider_id = model_provider
             .or(config_profile.model_provider)
@@ -5181,6 +5189,7 @@ model_verbosity = "high"
             wire_api: crate::WireApi::Responses,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             query_params: None,
             http_headers: None,
             env_http_headers: None,

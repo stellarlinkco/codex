@@ -39,6 +39,7 @@ fn anthropic_provider(base_url: String) -> ModelProviderInfo {
         env_key: Some("PATH".to_string()),
         env_key_instructions: None,
         experimental_bearer_token: None,
+        auth: None,
         wire_api: WireApi::Anthropic,
         query_params: None,
         http_headers: None,

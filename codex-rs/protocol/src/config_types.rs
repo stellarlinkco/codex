@@ -1,6 +1,9 @@
+use codex_utils_absolute_path::AbsolutePathBuf;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
+use std::num::NonZeroU64;
+use std::time::Duration;
 use strum_macros::Display;
 use strum_macros::EnumIter;
 use ts_rs::TS;
@@ -245,6 +248,81 @@ pub enum ForcedLoginMethod {
     Api,
 }
 
+const DEFAULT_PROVIDER_AUTH_TIMEOUT_MS: u64 = 5_000;
+const DEFAULT_PROVIDER_AUTH_REFRESH_INTERVAL_MS: u64 = 300_000;
+
+/// Configuration for obtaining a provider bearer token from a command.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, JsonSchema)]
+#[schemars(deny_unknown_fields)]
+pub struct ModelProviderAuthInfo {
+    /// Command to execute. Bare names are resolved via `PATH`; paths are resolved against `cwd`.
+    pub command: String,
+
+    /// Command arguments.
+    #[serde(default)]
+    pub args: Vec<String>,
+
+    /// Maximum time to wait for the token command to exit successfully.
+    #[serde(default = "default_provider_auth_timeout_ms")]
+    pub timeout_ms: NonZeroU64,
+
+    /// Maximum age for the cached token before rerunning the command.
+    #[serde(default = "default_provider_auth_refresh_interval_ms")]
+    pub refresh_interval_ms: NonZeroU64,
+
+    /// Working directory used when running the token command.
+    #[serde(default = "default_provider_auth_cwd")]
+    #[schemars(skip_serializing_if = "is_default_provider_auth_cwd")]
+    pub cwd: AbsolutePathBuf,
+}
+
+impl ModelProviderAuthInfo {
+    pub fn timeout(&self) -> Duration {
+        Duration::from_millis(self.timeout_ms.get())
+    }
+
+    pub fn refresh_interval(&self) -> Duration {
+        Duration::from_millis(self.refresh_interval_ms.get())
+    }
+}
+
+fn default_provider_auth_timeout_ms() -> NonZeroU64 {
+    non_zero_u64(
+        DEFAULT_PROVIDER_AUTH_TIMEOUT_MS,
+        "model_providers.<id>.auth.timeout_ms",
+    )
+}
+
+fn default_provider_auth_refresh_interval_ms() -> NonZeroU64 {
+    non_zero_u64(
+        DEFAULT_PROVIDER_AUTH_REFRESH_INTERVAL_MS,
+        "model_providers.<id>.auth.refresh_interval_ms",
+    )
+}
+
+fn non_zero_u64(value: u64, field_name: &str) -> NonZeroU64 {
+    match NonZeroU64::new(value) {
+        Some(value) => value,
+        None => panic!("{field_name} must be non-zero"),
+    }
+}
+
+fn default_provider_auth_cwd() -> AbsolutePathBuf {
+    let deserializer = serde::de::value::StrDeserializer::<serde::de::value::Error>::new(".");
+    if let Ok(cwd) = AbsolutePathBuf::deserialize(deserializer) {
+        return cwd;
+    }
+
+    match AbsolutePathBuf::current_dir() {
+        Ok(cwd) => cwd,
+        Err(err) => panic!("provider auth cwd must resolve: {err}"),
+    }
+}
+
+fn is_default_provider_auth_cwd(path: &AbsolutePathBuf) -> bool {
+    path == &default_provider_auth_cwd()
+}
+
 /// Represents the trust level for a project directory.
 /// This determines the approval policy and sandbox mode applied.
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Display, JsonSchema, TS)]
@@ -431,6 +509,22 @@ pub struct CollaborationModeMask {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+
+    #[test]
+    fn provider_auth_config_deserializes_defaults() {
+        let config: ModelProviderAuthInfo = serde_json::from_value(serde_json::json!({
+            "command": "gcloud",
+        }))
+        .expect("provider auth config should deserialize");
+
+        assert_eq!(config.command, "gcloud");
+        assert!(config.args.is_empty());
+        assert_eq!(config.timeout_ms.get(), DEFAULT_PROVIDER_AUTH_TIMEOUT_MS);
+        assert_eq!(
+            config.refresh_interval_ms.get(),
+            DEFAULT_PROVIDER_AUTH_REFRESH_INTERVAL_MS
+        );
+    }
 
     #[test]
     fn apply_mask_can_clear_optional_fields() {

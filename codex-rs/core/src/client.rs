@@ -96,6 +96,7 @@ use crate::error::Result;
 use crate::flags::CODEX_RS_SSE_FIXTURE;
 use crate::model_provider_info::ModelProviderInfo;
 use crate::model_provider_info::WireApi;
+use crate::provider_auth::auth_manager_for_provider;
 use crate::tools::spec::create_tools_json_for_responses_api;
 
 pub const OPENAI_BETA_HEADER: &str = "OpenAI-Beta";
@@ -224,6 +225,7 @@ impl ModelClient {
         include_timing_metrics: bool,
         beta_features_header: Option<String>,
     ) -> Self {
+        let auth_manager = auth_manager_for_provider(auth_manager, &provider);
         Self {
             state: Arc::new(ModelClientState {
                 auth_manager,

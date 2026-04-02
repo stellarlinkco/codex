@@ -1,3 +1,4 @@
+mod external_bearer;
 mod storage;
 
 use async_trait::async_trait;
@@ -35,6 +36,8 @@ use codex_client::CodexHttpClient;
 use codex_protocol::account::PlanType as AccountPlanType;
 use serde_json::Value;
 use thiserror::Error;
+
+use self::external_bearer::ExternalBearerAuth;
 
 /// Account type for the current user.
 ///
@@ -115,8 +118,40 @@ pub enum RefreshTokenError {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExternalAuthTokens {
     pub access_token: String,
-    pub chatgpt_account_id: String,
-    pub chatgpt_plan_type: Option<String>,
+    pub chatgpt_metadata: Option<ExternalAuthChatgptMetadata>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ExternalAuthChatgptMetadata {
+    pub account_id: String,
+    pub plan_type: Option<String>,
+}
+
+impl ExternalAuthTokens {
+    pub fn access_token_only(access_token: impl Into<String>) -> Self {
+        Self {
+            access_token: access_token.into(),
+            chatgpt_metadata: None,
+        }
+    }
+
+    pub fn chatgpt(
+        access_token: impl Into<String>,
+        chatgpt_account_id: impl Into<String>,
+        chatgpt_plan_type: Option<String>,
+    ) -> Self {
+        Self {
+            access_token: access_token.into(),
+            chatgpt_metadata: Some(ExternalAuthChatgptMetadata {
+                account_id: chatgpt_account_id.into(),
+                plan_type: chatgpt_plan_type,
+            }),
+        }
+    }
+
+    pub fn chatgpt_metadata(&self) -> Option<&ExternalAuthChatgptMetadata> {
+        self.chatgpt_metadata.as_ref()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -132,6 +167,10 @@ pub struct ExternalAuthRefreshContext {
 
 #[async_trait]
 pub trait ExternalAuthRefresher: Send + Sync {
+    async fn resolve(&self) -> std::io::Result<Option<ExternalAuthTokens>> {
+        Ok(None)
+    }
+
     async fn refresh(
         &self,
         context: ExternalAuthRefreshContext,
@@ -740,11 +779,16 @@ fn refresh_token_endpoint() -> String {
 
 impl AuthDotJson {
     fn from_external_tokens(external: &ExternalAuthTokens) -> std::io::Result<Self> {
+        let Some(chatgpt_metadata) = external.chatgpt_metadata() else {
+            return Err(std::io::Error::other(
+                "external auth tokens are missing ChatGPT metadata",
+            ));
+        };
         let mut token_info =
             parse_chatgpt_jwt_claims(&external.access_token).map_err(std::io::Error::other)?;
-        token_info.chatgpt_account_id = Some(external.chatgpt_account_id.clone());
-        token_info.chatgpt_plan_type = external
-            .chatgpt_plan_type
+        token_info.chatgpt_account_id = Some(chatgpt_metadata.account_id.clone());
+        token_info.chatgpt_plan_type = chatgpt_metadata
+            .plan_type
             .as_deref()
             .map(InternalPlanType::from_raw_value)
             .or(token_info.chatgpt_plan_type)
@@ -753,7 +797,7 @@ impl AuthDotJson {
             id_token: token_info,
             access_token: external.access_token.clone(),
             refresh_token: String::new(),
-            account_id: Some(external.chatgpt_account_id.clone()),
+            account_id: Some(chatgpt_metadata.account_id.clone()),
         };
 
         Ok(Self {
@@ -769,11 +813,11 @@ impl AuthDotJson {
         chatgpt_account_id: &str,
         chatgpt_plan_type: Option<&str>,
     ) -> std::io::Result<Self> {
-        let external = ExternalAuthTokens {
-            access_token: access_token.to_string(),
-            chatgpt_account_id: chatgpt_account_id.to_string(),
-            chatgpt_plan_type: chatgpt_plan_type.map(str::to_string),
-        };
+        let external = ExternalAuthTokens::chatgpt(
+            access_token,
+            chatgpt_account_id,
+            chatgpt_plan_type.map(str::to_string),
+        );
         Self::from_external_tokens(&external)
     }
 
@@ -805,6 +849,7 @@ struct CachedAuth {
     auth: Option<CodexAuth>,
     /// Callback used to refresh external auth by asking the parent app for new tokens.
     external_refresher: Option<Arc<dyn ExternalAuthRefresher>>,
+    external_bearer: Option<ExternalBearerAuth>,
 }
 
 impl Debug for CachedAuth {
@@ -817,6 +862,10 @@ impl Debug for CachedAuth {
             .field(
                 "external_refresher",
                 &self.external_refresher.as_ref().map(|_| "present"),
+            )
+            .field(
+                "external_bearer",
+                &self.external_bearer.as_ref().map(|_| "present"),
             )
             .finish()
     }
@@ -868,9 +917,10 @@ impl UnauthorizedRecovery {
     fn new(manager: Arc<AuthManager>) -> Self {
         let cached_auth = manager.auth_cached();
         let expected_account_id = cached_auth.as_ref().and_then(CodexAuth::get_account_id);
-        let mode = if cached_auth
-            .as_ref()
-            .is_some_and(CodexAuth::is_external_chatgpt_tokens)
+        let mode = if manager.has_external_bearer_auth()
+            || cached_auth
+                .as_ref()
+                .is_some_and(CodexAuth::is_external_chatgpt_tokens)
         {
             UnauthorizedRecoveryMode::External
         } else {
@@ -889,6 +939,10 @@ impl UnauthorizedRecovery {
     }
 
     pub fn has_next(&self) -> bool {
+        if self.manager.has_external_bearer_auth() {
+            return !matches!(self.step, UnauthorizedRecoveryStep::Done);
+        }
+
         if !self
             .manager
             .auth_cached()
@@ -988,6 +1042,7 @@ impl AuthManager {
             inner: RwLock::new(CachedAuth {
                 auth: managed_auth,
                 external_refresher: None,
+                external_bearer: None,
             }),
             enable_codex_api_key_env,
             auth_credentials_store_mode,
@@ -1000,6 +1055,7 @@ impl AuthManager {
         let cached = CachedAuth {
             auth: Some(auth),
             external_refresher: None,
+            external_bearer: None,
         };
 
         Arc::new(Self {
@@ -1019,10 +1075,27 @@ impl AuthManager {
         let cached = CachedAuth {
             auth: Some(auth),
             external_refresher: None,
+            external_bearer: None,
         };
         Arc::new(Self {
             codex_home,
             inner: RwLock::new(cached),
+            enable_codex_api_key_env: false,
+            auth_credentials_store_mode: AuthCredentialsStoreMode::File,
+            forced_chatgpt_workspace_id: RwLock::new(None),
+        })
+    }
+
+    pub(crate) fn external_bearer_only(
+        config: codex_protocol::config_types::ModelProviderAuthInfo,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            codex_home: PathBuf::from("non-existent"),
+            inner: RwLock::new(CachedAuth {
+                auth: None,
+                external_refresher: None,
+                external_bearer: Some(ExternalBearerAuth::new(config)),
+            }),
             enable_codex_api_key_env: false,
             auth_credentials_store_mode: AuthCredentialsStoreMode::File,
             forced_chatgpt_workspace_id: RwLock::new(None),
@@ -1037,6 +1110,10 @@ impl AuthManager {
     /// Current cached auth (clone). May be `None` if not logged in or load failed.
     /// Refreshes cached ChatGPT tokens if they are stale before returning.
     pub async fn auth(&self) -> Option<CodexAuth> {
+        if let Some(auth) = self.resolve_external_bearer_auth().await {
+            return Some(auth);
+        }
+
         let auth = self.auth_cached()?;
         if let Err(err) = self.refresh_if_stale(&auth).await {
             tracing::error!("Failed to refresh token: {}", err);
@@ -1154,6 +1231,14 @@ impl AuthManager {
             .read()
             .ok()
             .map(|guard| guard.external_refresher.is_some())
+            .unwrap_or(false)
+    }
+
+    fn has_external_bearer_auth(&self) -> bool {
+        self.inner
+            .read()
+            .ok()
+            .map(|guard| guard.external_bearer.is_some())
             .unwrap_or(false)
     }
 
@@ -1285,6 +1370,21 @@ impl AuthManager {
         &self,
         reason: ExternalAuthRefreshReason,
     ) -> Result<(), RefreshTokenError> {
+        let external_bearer = match self.inner.read() {
+            Ok(guard) => guard.external_bearer.clone(),
+            Err(_) => {
+                return Err(RefreshTokenError::Transient(std::io::Error::other(
+                    "failed to read external auth state",
+                )));
+            }
+        };
+        if let Some(bearer_auth) = external_bearer {
+            return bearer_auth
+                .refresh_after_unauthorized()
+                .await
+                .map_err(RefreshTokenError::Transient);
+        }
+
         let forced_chatgpt_workspace_id = self.forced_chatgpt_workspace_id();
         let refresher = match self.inner.read() {
             Ok(guard) => guard.external_refresher.clone(),
@@ -1311,13 +1411,18 @@ impl AuthManager {
         };
 
         let refreshed = refresher.refresh(context).await?;
+        let Some(chatgpt_metadata) = refreshed.chatgpt_metadata() else {
+            return Err(RefreshTokenError::Transient(std::io::Error::other(
+                "external auth refresh did not return ChatGPT metadata",
+            )));
+        };
         if let Some(expected_workspace_id) = forced_chatgpt_workspace_id.as_deref()
-            && refreshed.chatgpt_account_id != expected_workspace_id
+            && chatgpt_metadata.account_id != expected_workspace_id
         {
             return Err(RefreshTokenError::Transient(std::io::Error::other(
                 format!(
                     "external auth refresh returned workspace {:?}, expected {expected_workspace_id:?}",
-                    refreshed.chatgpt_account_id,
+                    chatgpt_metadata.account_id,
                 ),
             )));
         }
@@ -1353,6 +1458,22 @@ impl AuthManager {
 
         Ok(())
     }
+
+    async fn resolve_external_bearer_auth(&self) -> Option<CodexAuth> {
+        let bearer_auth = self
+            .inner
+            .read()
+            .ok()
+            .and_then(|guard| guard.external_bearer.clone())?;
+
+        match bearer_auth.resolve_access_token().await {
+            Ok(access_token) => Some(CodexAuth::from_api_key(&access_token)),
+            Err(err) => {
+                tracing::error!("Failed to resolve external bearer auth: {err}");
+                None
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -1369,9 +1490,11 @@ mod tests {
 
     use base64::Engine;
     use codex_protocol::config_types::ForcedLoginMethod;
+    use codex_protocol::config_types::ModelProviderAuthInfo;
     use pretty_assertions::assert_eq;
     use serde::Serialize;
     use serde_json::json;
+    use tempfile::TempDir;
     use tempfile::tempdir;
 
     #[tokio::test]
@@ -1527,6 +1650,191 @@ mod tests {
         assert!(logout(dir.path(), AuthCredentialsStoreMode::File)?);
         assert!(!auth_file.exists());
         Ok(())
+    }
+
+    #[test]
+    fn external_auth_tokens_without_chatgpt_metadata_cannot_seed_chatgpt_auth() {
+        let err = AuthDotJson::from_external_tokens(&ExternalAuthTokens::access_token_only(
+            "test-access-token",
+        ))
+        .expect_err("bearer-only external auth should not seed ChatGPT auth");
+
+        assert_eq!(
+            err.to_string(),
+            "external auth tokens are missing ChatGPT metadata"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_bearer_only_auth_manager_uses_cached_provider_token() {
+        let script = ProviderAuthScript::new(&["provider-token", "next-token"]).unwrap();
+        let manager = AuthManager::external_bearer_only(script.auth_config());
+
+        let first = manager
+            .auth()
+            .await
+            .and_then(|auth| auth.api_key().map(str::to_string));
+        let second = manager
+            .auth()
+            .await
+            .and_then(|auth| auth.api_key().map(str::to_string));
+
+        assert_eq!(first.as_deref(), Some("provider-token"));
+        assert_eq!(second.as_deref(), Some("provider-token"));
+    }
+
+    #[tokio::test]
+    async fn external_bearer_only_auth_manager_returns_none_when_command_fails() {
+        let script = ProviderAuthScript::new_failing().unwrap();
+        let manager = AuthManager::external_bearer_only(script.auth_config());
+
+        assert_eq!(manager.auth().await, None);
+    }
+
+    #[tokio::test]
+    async fn unauthorized_recovery_uses_external_refresh_for_bearer_manager() {
+        let script =
+            ProviderAuthScript::new(&["provider-token", "refreshed-provider-token"]).unwrap();
+        let manager = AuthManager::external_bearer_only(script.auth_config());
+        let initial_token = manager
+            .auth()
+            .await
+            .and_then(|auth| auth.api_key().map(str::to_string));
+        let mut recovery = manager.unauthorized_recovery();
+
+        assert!(recovery.has_next());
+
+        recovery
+            .next()
+            .await
+            .expect("external refresh should succeed");
+
+        let refreshed_token = manager
+            .auth()
+            .await
+            .and_then(|auth| auth.api_key().map(str::to_string));
+        assert_eq!(initial_token.as_deref(), Some("provider-token"));
+        assert_eq!(refreshed_token.as_deref(), Some("refreshed-provider-token"));
+    }
+
+    struct ProviderAuthScript {
+        tempdir: TempDir,
+        command: String,
+        args: Vec<String>,
+    }
+
+    impl ProviderAuthScript {
+        fn new(tokens: &[&str]) -> std::io::Result<Self> {
+            let tempdir = tempfile::tempdir()?;
+            let token_file = tempdir.path().join("tokens.txt");
+            let mut token_file_contents = String::new();
+            for token in tokens {
+                token_file_contents.push_str(token);
+                token_file_contents.push('\n');
+            }
+            std::fs::write(&token_file, token_file_contents)?;
+
+            #[cfg(unix)]
+            let (command, args) = {
+                let script_path = tempdir.path().join("print-token.sh");
+                std::fs::write(
+                    &script_path,
+                    r#"#!/bin/sh
+first_line=$(sed -n '1p' tokens.txt)
+printf '%s\n' "$first_line"
+tail -n +2 tokens.txt > tokens.next
+mv tokens.next tokens.txt
+"#,
+                )?;
+                let mut permissions = std::fs::metadata(&script_path)?.permissions();
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    permissions.set_mode(0o755);
+                }
+                std::fs::set_permissions(&script_path, permissions)?;
+                ("./print-token.sh".to_string(), Vec::new())
+            };
+
+            #[cfg(windows)]
+            let (command, args) = {
+                let script_path = tempdir.path().join("print-token.ps1");
+                std::fs::write(
+                    &script_path,
+                    r#"$lines = Get-Content -Path tokens.txt
+if ($lines.Count -eq 0) { exit 1 }
+Write-Output $lines[0]
+$lines | Select-Object -Skip 1 | Set-Content -Path tokens.txt
+"#,
+                )?;
+                (
+                    "powershell".to_string(),
+                    vec![
+                        "-NoProfile".to_string(),
+                        "-ExecutionPolicy".to_string(),
+                        "Bypass".to_string(),
+                        "-File".to_string(),
+                        ".\\print-token.ps1".to_string(),
+                    ],
+                )
+            };
+
+            Ok(Self {
+                tempdir,
+                command,
+                args,
+            })
+        }
+
+        fn new_failing() -> std::io::Result<Self> {
+            let tempdir = tempfile::tempdir()?;
+
+            #[cfg(unix)]
+            let (command, args) = {
+                let script_path = tempdir.path().join("fail.sh");
+                std::fs::write(
+                    &script_path,
+                    r#"#!/bin/sh
+exit 1
+"#,
+                )?;
+                let mut permissions = std::fs::metadata(&script_path)?.permissions();
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    permissions.set_mode(0o755);
+                }
+                std::fs::set_permissions(&script_path, permissions)?;
+                ("./fail.sh".to_string(), Vec::new())
+            };
+
+            #[cfg(windows)]
+            let (command, args) = (
+                "powershell".to_string(),
+                vec![
+                    "-NoProfile".to_string(),
+                    "-ExecutionPolicy".to_string(),
+                    "Bypass".to_string(),
+                    "-Command".to_string(),
+                    "exit 1".to_string(),
+                ],
+            );
+
+            Ok(Self {
+                tempdir,
+                command,
+                args,
+            })
+        }
+
+        fn auth_config(&self) -> ModelProviderAuthInfo {
+            serde_json::from_value(json!({
+                "command": self.command,
+                "args": self.args,
+                "timeout_ms": 1000,
+                "refresh_interval_ms": 60000,
+                "cwd": self.tempdir.path(),
+            }))
+            .expect("provider auth config should deserialize")
+        }
     }
 
     struct AuthFileParams {

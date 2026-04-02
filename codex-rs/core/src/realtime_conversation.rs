@@ -5,6 +5,7 @@ use crate::codex::Session;
 use crate::default_client::default_headers;
 use crate::error::CodexErr;
 use crate::error::Result as CodexResult;
+use crate::provider_auth::auth_manager_for_provider;
 use crate::realtime_context::build_realtime_startup_context;
 use async_channel::Receiver;
 use async_channel::Sender;
@@ -273,7 +274,12 @@ pub(crate) async fn handle_start(
     params: ConversationStartParams,
 ) -> CodexResult<()> {
     let provider = sess.provider().await;
-    let auth = sess.services.auth_manager.auth().await;
+    let auth_manager =
+        auth_manager_for_provider(Some(Arc::clone(&sess.services.auth_manager)), &provider);
+    let auth = match auth_manager {
+        Some(manager) => manager.auth().await,
+        None => None,
+    };
     let realtime_api_key = realtime_api_key(auth.as_ref(), &provider)?;
     let mut api_provider = provider.to_api_provider(Some(crate::auth::AuthMode::ApiKey))?;
     let config = sess.get_config().await;

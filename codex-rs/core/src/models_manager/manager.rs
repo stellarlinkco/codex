@@ -11,6 +11,7 @@ use crate::model_provider_info::ModelProviderInfo;
 use crate::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use crate::models_manager::collaboration_mode_presets::builtin_collaboration_mode_presets;
 use crate::models_manager::model_info;
+use crate::provider_auth::required_auth_manager_for_provider;
 use codex_api::ModelsClient;
 use codex_api::ReqwestTransport;
 use codex_protocol::config_types::CollaborationModeMask;
@@ -74,7 +75,9 @@ impl ModelsManager {
         auth_manager: Arc<AuthManager>,
         model_catalog: Option<ModelsResponse>,
         collaboration_modes_config: CollaborationModesConfig,
+        provider: ModelProviderInfo,
     ) -> Self {
+        let auth_manager = required_auth_manager_for_provider(auth_manager, &provider);
         let cache_path = codex_home.join(MODEL_CACHE_FILE);
         let cache_manager = ModelsCacheManager::new(cache_path, DEFAULT_MODEL_CACHE_TTL);
         let catalog_mode = if model_catalog.is_some() {
@@ -95,7 +98,7 @@ impl ModelsManager {
             auth_manager,
             etag: RwLock::new(None),
             cache_manager,
-            provider: ModelProviderInfo::create_openai_provider(),
+            provider,
         }
     }
 
@@ -381,6 +384,7 @@ impl ModelsManager {
         auth_manager: Arc<AuthManager>,
         provider: ModelProviderInfo,
     ) -> Self {
+        let auth_manager = required_auth_manager_for_provider(auth_manager, &provider);
         let cache_path = codex_home.join(MODEL_CACHE_FILE);
         let cache_manager = ModelsCacheManager::new(cache_path, DEFAULT_MODEL_CACHE_TTL);
         let mut remote_models = Self::load_remote_models_from_file()
@@ -526,6 +530,7 @@ mod tests {
             env_key: None,
             env_key_instructions: None,
             experimental_bearer_token: None,
+            auth: None,
             wire_api: WireApi::Responses,
             query_params: None,
             http_headers: None,
@@ -553,6 +558,7 @@ mod tests {
             auth_manager,
             None,
             CollaborationModesConfig::default(),
+            config.model_provider.clone(),
         );
         let known_slug = manager
             .get_remote_models()
@@ -593,6 +599,7 @@ mod tests {
                 models: vec![overlay],
             }),
             CollaborationModesConfig::default(),
+            config.model_provider.clone(),
         );
 
         let model_info = manager
@@ -626,6 +633,7 @@ mod tests {
                 models: vec![remote],
             }),
             CollaborationModesConfig::default(),
+            config.model_provider.clone(),
         );
         let namespaced_model = "custom/gpt-image".to_string();
 
@@ -651,6 +659,7 @@ mod tests {
             auth_manager,
             None,
             CollaborationModesConfig::default(),
+            config.model_provider.clone(),
         );
         let known_slug = manager
             .get_remote_models()

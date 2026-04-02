@@ -824,6 +824,7 @@ async fn prefers_apikey_when_config_prefers_apikey_even_with_chatgpt_tokens() {
                 .features
                 .enabled(Feature::DefaultModeRequestUserInput),
         },
+        config.model_provider.clone(),
     );
     let NewThread { thread: codex, .. } = thread_manager
         .start_thread(config)
@@ -1727,6 +1728,7 @@ async fn azure_responses_request_includes_store_and_reasoning_ids() {
         env_key: None,
         env_key_instructions: None,
         experimental_bearer_token: None,
+        auth: None,
         wire_api: WireApi::Responses,
         query_params: None,
         http_headers: None,
@@ -2320,6 +2322,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
         // Reuse the existing environment variable to avoid using unsafe code
         env_key: Some(existing_env_var_with_random_value.to_string()),
         experimental_bearer_token: None,
+        auth: None,
         query_params: Some(std::collections::HashMap::from([(
             "api-version".to_string(),
             "2025-04-01-preview".to_string(),
@@ -2409,6 +2412,7 @@ async fn env_var_overrides_loaded_auth() {
         )])),
         env_key_instructions: None,
         experimental_bearer_token: None,
+        auth: None,
         wire_api: WireApi::Responses,
         http_headers: Some(std::collections::HashMap::from([(
             "Custom-Header".to_string(),
