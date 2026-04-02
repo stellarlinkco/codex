@@ -483,11 +483,18 @@ async fn apply_patch_custom_tool_output_is_structured(
         r"(?s)^Exit code: 0
 Wall time: [0-9]+(?:\.[0-9]+)? seconds
 Output:
-Success. Updated the following files:
+(?:Success. Updated the following files:
 A {file_name}
-?$"
+)?$"
     );
     assert_regex_match(&expected_pattern, output.as_str());
+
+    let structured_path = harness.path(file_name);
+    let structured_contents = fs::read_to_string(&structured_path)?;
+    assert_eq!(
+        structured_contents, "from custom tool\n",
+        "expected file contents for {file_name}"
+    );
 
     Ok(())
 }
@@ -525,9 +532,9 @@ async fn apply_patch_custom_tool_call_creates_file(
         r"(?s)^Exit code: 0
 Wall time: [0-9]+(?:\.[0-9]+)? seconds
 Output:
-Success. Updated the following files:
+(?:Success. Updated the following files:
 A {file_name}
-?$"
+)?$"
     );
     assert_regex_match(&expected_pattern, output.as_str());
 
@@ -583,9 +590,9 @@ async fn apply_patch_custom_tool_call_updates_existing_file(
         r"(?s)^Exit code: 0
 Wall time: [0-9]+(?:\.[0-9]+)? seconds
 Output:
-Success. Updated the following files:
+(?:Success. Updated the following files:
 M {file_name}
-?$"
+)?$"
     );
     assert_regex_match(&expected_pattern, output.as_str());
 
@@ -677,11 +684,18 @@ async fn apply_patch_function_call_output_is_structured(
         r"(?s)^Exit code: 0
 Wall time: [0-9]+(?:\.[0-9]+)? seconds
 Output:
-Success. Updated the following files:
+(?:Success. Updated the following files:
 A {file_name}
-?$"
+)?$"
     );
     assert_regex_match(&expected_pattern, output.as_str());
+
+    let function_path = harness.path(file_name);
+    let function_contents = fs::read_to_string(&function_path)?;
+    assert_eq!(
+        function_contents, "via function call\n",
+        "expected file contents for {file_name}"
+    );
 
     Ok(())
 }

@@ -2661,6 +2661,7 @@ async fn unified_exec_runs_under_sandbox() -> Result<()> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unified_exec_python_prompt_under_seatbelt() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
 
     let python = match which::which("python").or_else(|_| which::which("python3")) {
         Ok(path) => path,

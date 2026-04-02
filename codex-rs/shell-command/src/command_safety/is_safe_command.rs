@@ -4,8 +4,8 @@ use crate::command_safety::is_dangerous_command::executable_name_lookup_key;
 // may appear before it (e.g., `-C`, `-c`, `--git-dir`).
 // Implemented in `is_dangerous_command` and shared here.
 use crate::command_safety::is_dangerous_command::find_git_subcommand;
-#[cfg(windows)]
 use crate::command_safety::is_dangerous_command::git_global_option_requires_prompt;
+#[cfg(windows)]
 use crate::command_safety::windows_safe_commands::is_safe_command_windows;
 
 pub fn is_known_safe_command(command: &[String]) -> bool {

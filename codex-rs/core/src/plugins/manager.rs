@@ -6,6 +6,7 @@ use super::marketplace::MarketplaceError;
 use super::marketplace::MarketplacePluginSourceSummary;
 use super::marketplace::list_marketplaces;
 use super::marketplace::resolve_marketplace_plugin;
+use super::plugin_manifest_interface;
 use super::plugin_manifest_name;
 use super::plugin_manifest_paths;
 use super::store::DEFAULT_PLUGIN_VERSION;
@@ -630,7 +631,13 @@ fn load_plugin(config_name: String, plugin: &PluginConfig, store: &PluginStore) 
     };
 
     let manifest_paths = plugin_manifest_paths(&manifest, plugin_root.as_path());
-    loaded_plugin.manifest_name = Some(plugin_manifest_name(&manifest, plugin_root.as_path()));
+    loaded_plugin.manifest_name = plugin_manifest_interface(&manifest, plugin_root.as_path())
+        .and_then(|interface| interface.display_name)
+        .as_deref()
+        .map(str::trim)
+        .filter(|display_name| !display_name.is_empty())
+        .map(str::to_string)
+        .or_else(|| Some(manifest.name.clone()));
     loaded_plugin.manifest_description = manifest.description;
     loaded_plugin.skill_roots = plugin_skill_roots(plugin_root.as_path(), &manifest_paths);
     let mut mcp_servers = HashMap::new();
@@ -1049,6 +1056,43 @@ mod tests {
         assert_eq!(
             outcome.effective_apps(),
             vec![AppConnectorId("connector_example".to_string())]
+        );
+    }
+
+    #[test]
+    fn load_plugins_prefers_interface_display_name_for_capability_summary() {
+        let codex_home = TempDir::new().unwrap();
+        let plugin_root = codex_home
+            .path()
+            .join("plugins/cache")
+            .join("test/sample/local");
+
+        write_file(
+            &plugin_root.join(".codex-plugin/plugin.json"),
+            r#"{
+  "name": "sample",
+  "interface": {
+    "displayName": "Sample Plugin"
+  }
+}"#,
+        );
+        write_file(
+            &plugin_root.join("skills/sample-search/SKILL.md"),
+            "---\nname: sample-search\ndescription: search sample data\n---\n",
+        );
+
+        let outcome = load_plugins_from_config(&plugin_config_toml(true, true), codex_home.path());
+
+        assert_eq!(
+            outcome.capability_summaries(),
+            &[PluginCapabilitySummary {
+                config_name: "sample@test".to_string(),
+                display_name: "Sample Plugin".to_string(),
+                description: None,
+                has_skills: true,
+                mcp_server_names: Vec::new(),
+                app_connector_ids: Vec::new(),
+            }]
         );
     }
 

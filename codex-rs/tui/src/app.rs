@@ -773,6 +773,7 @@ impl App {
             .await?;
         self.apply_runtime_policy_overrides(&mut config);
         self.config = config;
+        self.chat_widget.sync_plugin_mentions_config(&self.config);
         Ok(())
     }
 
@@ -5891,6 +5892,10 @@ mod tests {
 
         assert_eq!(
             app_enabled_in_effective_config(&app.config, &app_id),
+            Some(false)
+        );
+        assert_eq!(
+            app_enabled_in_effective_config(app.chat_widget.config_ref(), &app_id),
             Some(false)
         );
         Ok(())

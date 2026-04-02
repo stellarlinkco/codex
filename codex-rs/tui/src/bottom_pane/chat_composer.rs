@@ -3570,6 +3570,8 @@ impl ChatComposer {
 
     fn mention_items(&self) -> Vec<MentionItem> {
         let mut mentions = Vec::new();
+        let mut plugin_display_names_by_connector_id: HashMap<String, HashSet<String>> =
+            HashMap::new();
 
         if let Some(skills) = self.skills.as_ref() {
             for skill in skills {
@@ -3595,6 +3597,12 @@ impl ChatComposer {
 
         if let Some(plugins) = self.plugins.as_ref() {
             for plugin in plugins {
+                for connector_id in &plugin.app_connector_ids {
+                    plugin_display_names_by_connector_id
+                        .entry(connector_id.0.clone())
+                        .or_default()
+                        .insert(plugin.display_name.clone());
+                }
                 let (plugin_name, marketplace_name) = plugin
                     .config_name
                     .split_once('@')
@@ -3652,6 +3660,15 @@ impl ChatComposer {
                 if !connector.is_accessible || !connector.is_enabled {
                     continue;
                 }
+                if let Some(plugin_display_names) =
+                    plugin_display_names_by_connector_id.get(connector.id.as_str())
+                    && connector
+                        .plugin_display_names
+                        .iter()
+                        .any(|display_name| plugin_display_names.contains(display_name))
+                {
+                    continue;
+                }
                 let display_name = connectors::connector_display_label(connector);
                 let description = Some(Self::connector_brief_description(connector));
                 let slug = codex_core::connectors::connector_mention_slug(connector);
@@ -3673,7 +3690,13 @@ impl ChatComposer {
             *counts.entry(mention.insert_text.clone()).or_insert(0) += 1;
         }
         for mention in &mut mentions {
-            if counts.get(&mention.insert_text).copied().unwrap_or(0) <= 1 {
+            let has_unique_insert_text =
+                counts.get(&mention.insert_text).copied().unwrap_or(0) <= 1;
+            let is_plugin_mention = mention
+                .path
+                .as_deref()
+                .is_some_and(|path| path.starts_with("plugin://"));
+            if has_unique_insert_text && !is_plugin_mention {
                 mention.category_tag = None;
             }
         }
@@ -5349,6 +5372,56 @@ mod tests {
                 )],
             }]));
         });
+    }
+
+    #[test]
+    fn mention_items_hide_plugin_owned_app_duplicates_when_provenance_matches() {
+        let (tx, _rx) = unbounded_channel::<AppEvent>();
+        let sender = AppEventSender::new(tx);
+        let mut composer = ChatComposer::new(
+            true,
+            sender,
+            false,
+            "Ask Codex to do anything".to_string(),
+            false,
+        );
+        composer.set_connectors_enabled(true);
+        composer.set_text_content("$goog".to_string(), Vec::new(), Vec::new());
+        composer.set_plugin_mentions(Some(vec![PluginCapabilitySummary {
+            config_name: "google-calendar@debug".to_string(),
+            display_name: "Google Calendar".to_string(),
+            description: None,
+            has_skills: false,
+            mcp_server_names: vec!["google-calendar".to_string()],
+            app_connector_ids: vec![codex_core::plugins::AppConnectorId(
+                "google_calendar".to_string(),
+            )],
+        }]));
+        composer.set_connector_mentions(Some(ConnectorsSnapshot {
+            connectors: vec![AppInfo {
+                id: "google_calendar".to_string(),
+                name: "Google Calendar".to_string(),
+                description: Some("Look up events and availability".to_string()),
+                logo_url: None,
+                logo_url_dark: None,
+                distribution_channel: None,
+                branding: None,
+                app_metadata: None,
+                labels: None,
+                install_url: Some("https://example.test/google-calendar".to_string()),
+                is_accessible: true,
+                is_enabled: true,
+                plugin_display_names: vec!["Google Calendar".to_string()],
+            }],
+        }));
+
+        let mentions = composer.mention_items();
+        assert_eq!(mentions.len(), 1);
+        assert_eq!(mentions[0].category_tag, Some("[debug]".to_string()));
+        assert_eq!(
+            mentions[0].path,
+            Some("plugin://google-calendar@debug".to_string())
+        );
     }
 
     #[test]

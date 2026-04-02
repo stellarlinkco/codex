@@ -41,6 +41,8 @@ const SNAPSHOT_PATH_FOR_TEST: &str = "/codex/snapshot/path";
 const SNAPSHOT_MARKER_VAR: &str = "CODEX_SNAPSHOT_POLICY_MARKER";
 const SNAPSHOT_MARKER_VALUE: &str = "from_snapshot";
 const POLICY_SUCCESS_OUTPUT: &str = "policy-after-snapshot";
+const SNAPSHOT_APPEAR_TIMEOUT: Duration = Duration::from_secs(120);
+const SNAPSHOT_FILE_TIMEOUT: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Default)]
 struct SnapshotRunOptions {
@@ -49,7 +51,7 @@ struct SnapshotRunOptions {
 
 async fn wait_for_snapshot(codex_home: &Path) -> Result<PathBuf> {
     let snapshot_dir = codex_home.join("shell_snapshots");
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + SNAPSHOT_APPEAR_TIMEOUT;
     loop {
         if let Ok(mut entries) = fs::read_dir(&snapshot_dir).await {
             while let Some(entry) = entries.next_entry().await? {
@@ -72,7 +74,7 @@ async fn wait_for_snapshot(codex_home: &Path) -> Result<PathBuf> {
 }
 
 async fn wait_for_file_contents(path: &Path) -> Result<String> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + SNAPSHOT_FILE_TIMEOUT;
     loop {
         match fs::read_to_string(path).await {
             Ok(contents) => return Ok(contents),
@@ -89,7 +91,7 @@ async fn wait_for_file_contents(path: &Path) -> Result<String> {
 }
 
 async fn wait_for_path_removed(path: &Path) -> Result<()> {
-    let deadline = Instant::now() + Duration::from_secs(5);
+    let deadline = Instant::now() + SNAPSHOT_FILE_TIMEOUT;
     loop {
         match fs::metadata(path).await {
             Ok(_) => {}

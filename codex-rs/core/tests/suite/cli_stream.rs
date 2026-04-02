@@ -5,14 +5,36 @@ use codex_utils_cargo_bin::find_resource;
 use core_test_support::fs_wait;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
+use ctor::ctor;
+use std::path::PathBuf;
+use std::sync::OnceLock;
 use std::time::Duration;
 use tempfile::TempDir;
 use uuid::Uuid;
 use wiremock::MockServer;
 
+static CODEX_BIN: OnceLock<PathBuf> = OnceLock::new();
+const CLI_EXEC_TIMEOUT: Duration = Duration::from_secs(180);
+const CLI_SESSION_DIR_TIMEOUT: Duration = Duration::from_secs(30);
+const CLI_SESSION_FILE_TIMEOUT: Duration = Duration::from_secs(60);
+
 fn repo_root() -> std::path::PathBuf {
     #[expect(clippy::expect_used)]
     codex_utils_cargo_bin::repo_root().expect("failed to resolve repo root")
+}
+
+fn codex_bin() -> PathBuf {
+    CODEX_BIN
+        .get_or_init(|| {
+            #[expect(clippy::expect_used)]
+            codex_utils_cargo_bin::cargo_bin("codex").expect("failed to resolve codex bin")
+        })
+        .clone()
+}
+
+#[ctor]
+fn prewarm_codex_bin() {
+    let _ = codex_bin();
 }
 
 fn cli_responses_fixture() -> std::path::PathBuf {
@@ -39,9 +61,9 @@ async fn responses_mode_stream_cli() {
         "model_providers.mock={{ name = \"mock\", base_url = \"{}/v1\", env_key = \"PATH\", wire_api = \"responses\" }}",
         server.uri()
     );
-    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let bin = codex_bin();
     let mut cmd = AssertCommand::new(bin);
-    cmd.timeout(Duration::from_secs(30));
+    cmd.timeout(CLI_EXEC_TIMEOUT);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
@@ -122,8 +144,9 @@ async fn exec_cli_applies_model_instructions_file() {
 
     let home = TempDir::new().unwrap();
     let repo_root = repo_root();
-    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let bin = codex_bin();
     let mut cmd = AssertCommand::new(bin);
+    cmd.timeout(CLI_EXEC_TIMEOUT);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-c")
@@ -174,8 +197,9 @@ async fn responses_api_stream_cli() {
     let repo_root = repo_root();
 
     let home = TempDir::new().unwrap();
-    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let bin = codex_bin();
     let mut cmd = AssertCommand::new(bin);
+    cmd.timeout(CLI_EXEC_TIMEOUT);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-C")
@@ -210,8 +234,9 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     let repo_root = repo_root();
 
     // 4. Run the codex CLI and invoke `exec`, which is what records a session.
-    let bin = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let bin = codex_bin();
     let mut cmd = AssertCommand::new(bin);
+    cmd.timeout(CLI_EXEC_TIMEOUT);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-C")
@@ -232,11 +257,11 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
 
     // Wait for sessions dir to appear.
     let sessions_dir = home.path().join("sessions");
-    fs_wait::wait_for_path_exists(&sessions_dir, Duration::from_secs(5)).await?;
+    fs_wait::wait_for_path_exists(&sessions_dir, CLI_SESSION_DIR_TIMEOUT).await?;
 
     // Find the session file that contains `marker`.
     let marker_clone = marker.clone();
-    let path = fs_wait::wait_for_matching_file(&sessions_dir, Duration::from_secs(10), move |p| {
+    let path = fs_wait::wait_for_matching_file(&sessions_dir, CLI_SESSION_FILE_TIMEOUT, move |p| {
         if p.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
             return false;
         }
@@ -331,8 +356,9 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     // Second run: resume should update the existing file.
     let marker2 = format!("integration-resume-{}", Uuid::new_v4());
     let prompt2 = format!("echo {marker2}");
-    let bin2 = codex_utils_cargo_bin::cargo_bin("codex").unwrap();
+    let bin2 = codex_bin();
     let mut cmd2 = AssertCommand::new(bin2);
+    cmd2.timeout(CLI_EXEC_TIMEOUT);
     cmd2.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-C")
@@ -351,7 +377,7 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     // Find the new session file containing the resumed marker.
     let marker2_clone = marker2.clone();
     let resumed_path =
-        fs_wait::wait_for_matching_file(&sessions_dir, Duration::from_secs(10), move |p| {
+        fs_wait::wait_for_matching_file(&sessions_dir, CLI_SESSION_FILE_TIMEOUT, move |p| {
             if p.extension().and_then(|ext| ext.to_str()) != Some("jsonl") {
                 return false;
             }

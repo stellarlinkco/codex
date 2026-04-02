@@ -5993,19 +5993,10 @@ pub(crate) async fn run_turn(
         &available_connectors,
         &skill_name_counts_lower,
     ));
-    // Explicit plugin mentions can make a plugin's enabled apps callable for
-    // this turn without persisting those connectors as sticky user selections.
-    let mut turn_enabled_connectors = explicitly_enabled_connectors.clone();
-    turn_enabled_connectors.extend(
+    explicitly_enabled_connectors.extend(
         mentioned_plugins
             .iter()
-            .flat_map(|plugin| plugin.app_connector_ids.iter())
-            .map(|connector_id| connector_id.0.clone())
-            .filter(|connector_id| {
-                available_connectors
-                    .iter()
-                    .any(|connector| connector.is_enabled && connector.id == *connector_id)
-            }),
+            .flat_map(|plugin| plugin.app_connector_ids.iter().map(|id| id.0.clone())),
     );
     let connector_names_by_id = available_connectors
         .iter()
@@ -6117,7 +6108,7 @@ pub(crate) async fn run_turn(
             &mut client_session,
             turn_metadata_header.as_deref(),
             sampling_request_input,
-            &turn_enabled_connectors,
+            &explicitly_enabled_connectors,
             skills_outcome,
             &mut server_model_warning_emitted_for_turn,
             cancellation_token.child_token(),
@@ -8119,6 +8110,21 @@ mod tests {
         let explicitly_enabled_connectors = HashSet::new();
         let selected = filter_connectors_for_input(
             &[connector],
+            &input,
+            &explicitly_enabled_connectors,
+            &HashMap::new(),
+        );
+
+        assert_eq!(selected, Vec::new());
+    }
+
+    #[test]
+    fn filter_connectors_for_input_skips_plugin_mentions() {
+        let connectors = vec![make_connector("figma", "Figma")];
+        let input = vec![user_message("use [$figma](plugin://figma@openai-curated)")];
+        let explicitly_enabled_connectors = HashSet::new();
+        let selected = filter_connectors_for_input(
+            &connectors,
             &input,
             &explicitly_enabled_connectors,
             &HashMap::new(),

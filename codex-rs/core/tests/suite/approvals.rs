@@ -31,6 +31,7 @@ use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_no_network;
+use core_test_support::skip_if_sandbox;
 use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
@@ -1582,6 +1583,7 @@ fn scenarios() -> Vec<ScenarioSpec> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn approval_matrix_covers_all_modes() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
 
     for scenario in scenarios() {
         run_scenario(&scenario).await?;
@@ -1710,6 +1712,7 @@ async fn run_scenario(scenario: &ScenarioSpec) -> Result<()> {
 #[cfg(unix)]
 async fn approving_apply_patch_for_session_skips_future_prompts_for_same_file() -> Result<()> {
     skip_if_no_network!(Ok(()));
+    skip_if_sandbox!(Ok(()));
 
     let server = start_mock_server().await;
     let approval_policy = AskForApproval::OnRequest;

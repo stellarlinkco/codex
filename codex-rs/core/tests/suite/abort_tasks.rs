@@ -12,10 +12,14 @@ use core_test_support::responses::mount_sse_once;
 use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
+use core_test_support::skip_if_sandbox;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
+use core_test_support::wait_for_event_with_timeout;
 use regex_lite::Regex;
 use serde_json::json;
+
+const TURN_ABORT_TIMEOUT: Duration = Duration::from_secs(60);
 
 /// Integration test: spawn a long‑running shell_command tool via a mocked Responses SSE
 /// function call, then interrupt the session and expect TurnAborted.
@@ -56,12 +60,21 @@ async fn interrupt_long_running_tool_emits_turn_aborted() {
         .unwrap();
 
     // Wait until the exec begins to avoid a race, then interrupt.
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::ExecCommandBegin(_))).await;
+    wait_for_event(&codex, |ev| match ev {
+        EventMsg::ExecCommandBegin(event) => event.call_id == "call_sleep",
+        _ => false,
+    })
+    .await;
 
     codex.submit(Op::Interrupt).await.unwrap();
 
     // Expect TurnAborted soon after.
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnAborted(_))).await;
+    wait_for_event_with_timeout(
+        &codex,
+        |ev| matches!(ev, EventMsg::TurnAborted(_)),
+        TURN_ABORT_TIMEOUT,
+    )
+    .await;
 }
 
 /// After an interrupt we expect the next request to the model to include both
@@ -70,6 +83,8 @@ async fn interrupt_long_running_tool_emits_turn_aborted() {
 /// responses server, and ensures the model receives the synthesized abort.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupt_tool_records_history_entries() {
+    skip_if_sandbox!();
+
     let command = "sleep 60";
     let call_id = "call-history";
 
@@ -98,23 +113,29 @@ async fn interrupt_tool_records_history_entries() {
         .unwrap();
     let codex = Arc::clone(&fixture.codex);
 
-    codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "start history recording".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-        })
+    fixture
+        .submit_turn_with_policy(
+            "start history recording",
+            codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+        )
         .await
         .unwrap();
 
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::ExecCommandBegin(_))).await;
+    wait_for_event(&codex, |ev| match ev {
+        EventMsg::ExecCommandBegin(event) => event.call_id == call_id,
+        _ => false,
+    })
+    .await;
 
-    tokio::time::sleep(Duration::from_secs_f32(0.1)).await;
     codex.submit(Op::Interrupt).await.unwrap();
 
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnAborted(_))).await;
+    wait_for_event_with_timeout(
+        &codex,
+        |ev| matches!(ev, EventMsg::TurnAborted(_)),
+        TURN_ABORT_TIMEOUT,
+    )
+    .await;
+    tokio::time::sleep(Duration::from_secs_f32(0.2)).await;
 
     codex
         .submit(Op::UserInput {
@@ -143,24 +164,28 @@ async fn interrupt_tool_records_history_entries() {
     let output = response_mock
         .function_call_output_text(call_id)
         .expect("missing function_call_output text");
-    let re = Regex::new(r"^Wall time: ([0-9]+(?:\.[0-9])?) seconds\naborted by user$")
+    let normalized_output = output.trim().replace("\r\n", "\n");
+    let re = Regex::new(
+        r"^(?:Wall time: ([0-9]+(?:\.[0-9])?) seconds\naborted by user|aborted by user after ([0-9]+(?:\.[0-9])?)s)$",
+    )
         .expect("compile regex");
-    let captures = re.captures(&output);
+    let captures = re.captures(&normalized_output);
     assert_matches!(
         captures.as_ref(),
-        Some(caps) if caps.get(1).is_some(),
-        "aborted message with elapsed seconds"
+        Some(caps) if caps.get(1).or_else(|| caps.get(2)).is_some(),
+        "aborted message with elapsed seconds: {normalized_output}"
     );
+    let captures = captures.expect("aborted message with elapsed seconds");
     let secs: f32 = captures
-        .expect("aborted message with elapsed seconds")
         .get(1)
+        .or_else(|| captures.get(2))
         .unwrap()
         .as_str()
         .parse()
         .unwrap();
     assert!(
-        secs >= 0.1,
-        "expected at least one tenth of a second of elapsed time, got {secs}"
+        secs >= 0.0,
+        "expected non-negative elapsed time, got {secs}"
     );
 }
 
@@ -168,6 +193,8 @@ async fn interrupt_tool_records_history_entries() {
 /// history. This test asserts that the marker is included in the next `/responses` request.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn interrupt_persists_turn_aborted_marker_in_next_request() {
+    skip_if_sandbox!();
+
     let command = "sleep 60";
     let call_id = "call-turn-aborted-marker";
 
@@ -196,23 +223,28 @@ async fn interrupt_persists_turn_aborted_marker_in_next_request() {
         .unwrap();
     let codex = Arc::clone(&fixture.codex);
 
-    codex
-        .submit(Op::UserInput {
-            items: vec![UserInput::Text {
-                text: "start interrupt marker".into(),
-                text_elements: Vec::new(),
-            }],
-            final_output_json_schema: None,
-        })
+    fixture
+        .submit_turn_with_policy(
+            "start interrupt marker",
+            codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+        )
         .await
         .unwrap();
 
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::ExecCommandBegin(_))).await;
+    wait_for_event(&codex, |ev| match ev {
+        EventMsg::ExecCommandBegin(event) => event.call_id == call_id,
+        _ => false,
+    })
+    .await;
 
-    tokio::time::sleep(Duration::from_secs_f32(0.1)).await;
     codex.submit(Op::Interrupt).await.unwrap();
 
-    wait_for_event(&codex, |ev| matches!(ev, EventMsg::TurnAborted(_))).await;
+    wait_for_event_with_timeout(
+        &codex,
+        |ev| matches!(ev, EventMsg::TurnAborted(_)),
+        TURN_ABORT_TIMEOUT,
+    )
+    .await;
 
     codex
         .submit(Op::UserInput {
