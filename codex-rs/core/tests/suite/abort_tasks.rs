@@ -166,7 +166,7 @@ async fn interrupt_tool_records_history_entries() {
         .expect("missing function_call_output text");
     let normalized_output = output.trim().replace("\r\n", "\n");
     let re = Regex::new(
-        r"^(?:Wall time: ([0-9]+(?:\.[0-9])?) seconds\naborted by user|aborted by user after ([0-9]+(?:\.[0-9])?)s)$",
+        r"^(?:Wall time: ([0-9]+(?:\.[0-9]+)?) seconds\naborted by user|aborted by user after ([0-9]+(?:\.[0-9]+)?)s)$",
     )
         .expect("compile regex");
     let captures = re.captures(&normalized_output);

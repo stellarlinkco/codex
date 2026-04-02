@@ -2057,7 +2057,12 @@ impl Config {
         for (key, provider) in cfg.model_providers.into_iter() {
             model_providers.entry(key).or_insert(provider);
         }
-        for (key, provider) in &model_providers {
+        let mut model_provider_keys = model_providers.keys().collect::<Vec<_>>();
+        model_provider_keys.sort();
+        for key in model_provider_keys {
+            let provider = model_providers
+                .get(key)
+                .expect("model provider key collected from map should resolve");
             if let Err(message) = provider.validate() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidInput,
