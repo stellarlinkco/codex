@@ -108,7 +108,7 @@ async fn mock_device_code_usercode(server: &MockServer, interval_seconds: u64) {
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
             "device_auth_id": "device-auth-123",
             "user_code": "CODE-12345",
-            "interval": interval_seconds.to_string(),
+            "interval": interval_seconds,
         })))
         .mount(server)
         .await;

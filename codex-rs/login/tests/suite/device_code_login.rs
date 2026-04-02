@@ -38,7 +38,7 @@ async fn mock_usercode_success(server: &MockServer) {
             "device_auth_id": "device-auth-123",
             "user_code": "CODE-12345",
             // NOTE: Interval is kept 0 in order to avoid waiting for the interval to pass
-            "interval": "0"
+            "interval": 0
         })))
         .mount(server)
         .await;

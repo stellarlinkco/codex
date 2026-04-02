@@ -1055,10 +1055,11 @@ impl CodexMessageProcessor {
                 config.cli_auth_credentials_store_mode,
             )
         };
-        if let Ok(issuer) = std::env::var(LOGIN_ISSUER_OVERRIDE_ENV_VAR)
-            && !issuer.trim().is_empty()
-        {
-            opts.issuer = issuer;
+        if let Ok(issuer) = std::env::var(LOGIN_ISSUER_OVERRIDE_ENV_VAR) {
+            let issuer = issuer.trim();
+            if !issuer.is_empty() {
+                opts.issuer = issuer.to_string();
+            }
         }
 
         Ok(opts)
@@ -1124,6 +1125,12 @@ impl CodexMessageProcessor {
                             }
                         };
 
+                        let mut guard = active_login.lock().await;
+                        if guard.as_ref().map(ActiveLogin::login_id) == Some(login_id) {
+                            *guard = None;
+                        }
+                        drop(guard);
+
                         let payload_v2 = AccountLoginCompletedNotification {
                             login_id: Some(login_id.to_string()),
                             success,
@@ -1160,12 +1167,6 @@ impl CodexMessageProcessor {
                                     payload_v2,
                                 ))
                                 .await;
-                        }
-
-                        // Clear the active login if it matches this attempt. It may have been replaced or cancelled.
-                        let mut guard = active_login.lock().await;
-                        if guard.as_ref().map(ActiveLogin::login_id) == Some(login_id) {
-                            *guard = None;
                         }
                     });
 
@@ -1238,6 +1239,12 @@ impl CodexMessageProcessor {
                             }
                         };
 
+                        let mut guard = active_login.lock().await;
+                        if guard.as_ref().map(ActiveLogin::login_id) == Some(login_id) {
+                            *guard = None;
+                        }
+                        drop(guard);
+
                         let payload_v2 = AccountLoginCompletedNotification {
                             login_id: Some(login_id.to_string()),
                             success,
@@ -1273,11 +1280,6 @@ impl CodexMessageProcessor {
                                     payload_v2,
                                 ))
                                 .await;
-                        }
-
-                        let mut guard = active_login.lock().await;
-                        if guard.as_ref().map(ActiveLogin::login_id) == Some(login_id) {
-                            *guard = None;
                         }
                     });
                 }

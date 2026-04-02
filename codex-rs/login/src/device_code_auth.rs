@@ -31,6 +31,13 @@ struct UserCodeResp {
     interval: u64,
 }
 
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum IntervalValue {
+    Number(u64),
+    String(String),
+}
+
 #[derive(Serialize)]
 struct UserCodeReq {
     client_id: String,
@@ -46,10 +53,13 @@ fn deserialize_interval<'de, D>(deserializer: D) -> Result<u64, D::Error>
 where
     D: Deserializer<'de>,
 {
-    let s = String::deserialize(deserializer)?;
-    s.trim()
-        .parse::<u64>()
-        .map_err(|e| de::Error::custom(format!("invalid u64 string: {e}")))
+    match IntervalValue::deserialize(deserializer)? {
+        IntervalValue::Number(value) => Ok(value),
+        IntervalValue::String(value) => value
+            .trim()
+            .parse::<u64>()
+            .map_err(|e| de::Error::custom(format!("invalid u64 string: {e}"))),
+    }
 }
 
 #[derive(Deserialize)]
