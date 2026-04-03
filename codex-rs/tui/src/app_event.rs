@@ -80,6 +80,15 @@ pub(crate) enum AppEvent {
         op: codex_protocol::protocol::Op,
     },
 
+    /// Note an outbound op submitted through a secondary controller.
+    ///
+    /// This keeps thread replay state and pending approval badges in sync when
+    /// a live bridge writes directly to a thread runtime.
+    NoteThreadOp {
+        thread_id: ThreadId,
+        op: codex_protocol::protocol::Op,
+    },
+
     /// Forward an event from a non-primary thread into the app-level thread router.
     ThreadEvent {
         thread_id: ThreadId,

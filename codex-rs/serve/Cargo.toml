@@ -33,6 +33,7 @@ futures = { workspace = true }
 include_dir = { workspace = true }
 mime_guess = { workspace = true }
 rand = { workspace = true }
+reqwest = { workspace = true, features = ["json", "rustls-tls"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 toml = { workspace = true }
@@ -48,4 +49,5 @@ uuid = { workspace = true, features = ["v4"] }
 webbrowser = { workspace = true }
 
 [dev-dependencies]
+pretty_assertions = { workspace = true }
 tower = { version = "0.5", features = ["util"] }

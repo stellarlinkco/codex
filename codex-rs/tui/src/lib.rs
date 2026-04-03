@@ -86,6 +86,7 @@ mod history_cell;
 pub mod insert_history;
 mod key_hint;
 mod line_truncation;
+mod live_bridge;
 pub mod live_wrap;
 mod markdown;
 mod markdown_render;

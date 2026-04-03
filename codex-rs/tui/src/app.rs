@@ -23,6 +23,7 @@ use crate::history_cell;
 use crate::history_cell::HistoryCell;
 #[cfg(not(debug_assertions))]
 use crate::history_cell::UpdateAvailableHistoryCell;
+use crate::live_bridge::LiveBridgeHandle;
 use crate::model_migration::ModelMigrationOutcome;
 use crate::model_migration::migration_copy_for_models;
 use crate::model_migration::run_model_migration_prompt;
@@ -694,6 +695,7 @@ pub(crate) struct App {
     pending_shutdown_exit_thread_id: Option<ThreadId>,
 
     windows_sandbox: WindowsSandboxState,
+    live_bridge: LiveBridgeHandle,
 
     thread_event_channels: HashMap<ThreadId, ThreadEventChannel>,
     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
@@ -1211,6 +1213,9 @@ impl App {
         };
         if submitted && let Some(op) = replay_state_op.as_ref() {
             self.note_thread_outbound_op(thread_id, op).await;
+            if Some(thread_id) == self.primary_thread_id {
+                self.live_bridge.observe_primary_op(op);
+            }
             self.refresh_pending_thread_approvals().await;
         }
     }
@@ -1257,6 +1262,10 @@ impl App {
             let channel = self.ensure_thread_channel(thread_id);
             (channel.sender.clone(), Arc::clone(&channel.store))
         };
+
+        if Some(thread_id) == self.primary_thread_id {
+            self.live_bridge.observe_primary_event(event.clone());
+        }
 
         let should_send = {
             let mut guard = store.lock().await;
@@ -1519,7 +1528,9 @@ impl App {
         self.active_thread_id = None;
         self.active_thread_rx = None;
         self.primary_thread_id = None;
+        self.primary_session_configured = None;
         self.pending_primary_events.clear();
+        self.live_bridge.detach_primary_thread();
         self.chat_widget.set_pending_thread_approvals(Vec::new());
     }
 
@@ -1876,6 +1887,11 @@ impl App {
             .maybe_prompt_windows_sandbox_enable(should_prompt_windows_sandbox_nux_at_startup);
 
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
+        let live_bridge = LiveBridgeHandle::new(
+            config.codex_home.as_path(),
+            thread_manager.clone(),
+            app_event_tx.clone(),
+        );
         #[cfg(not(debug_assertions))]
         let upgrade_version = crate::updates::get_upgrade_version(&config);
 
@@ -1907,6 +1923,7 @@ impl App {
             suppress_shutdown_complete: false,
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState::default(),
+            live_bridge,
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_picker_threads: HashMap::new(),
@@ -1916,6 +1933,10 @@ impl App {
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
         };
+
+        if let Some(message) = app.live_bridge.take_startup_warning() {
+            app.chat_widget.add_error_message(message);
+        }
 
         // On startup, if Agent mode (workspace-write) or ReadOnly is active, warn about world-writable dirs on Windows.
         #[cfg(target_os = "windows")]
@@ -2025,6 +2046,7 @@ impl App {
                 AppRunControl::Exit(reason) => break reason,
             }
         };
+        app.live_bridge.shutdown();
         tui.terminal.clear()?;
         Ok(AppExitInfo {
             token_usage: app.token_usage(),
@@ -2346,6 +2368,14 @@ impl App {
             }
             AppEvent::SubmitThreadOp { thread_id, op } => {
                 self.submit_op_to_thread(thread_id, op).await;
+            }
+            AppEvent::NoteThreadOp { thread_id, op } => {
+                if let Some(op) =
+                    ThreadEventStore::op_can_change_pending_replay_state(&op).then_some(op)
+                {
+                    self.note_thread_outbound_op(thread_id, &op).await;
+                    self.refresh_pending_thread_approvals().await;
+                }
             }
             AppEvent::DiffResult(text) => {
                 // Clear the in-progress state in the bottom pane
@@ -5390,6 +5420,11 @@ mod tests {
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
         let model = codex_core::test_support::get_model_offline(config.model.as_deref());
         let session_telemetry = test_session_telemetry(&config, model.as_str());
+        let live_bridge = LiveBridgeHandle::new(
+            config.codex_home.as_path(),
+            server.clone(),
+            app_event_tx.clone(),
+        );
 
         App {
             server,
@@ -5419,6 +5454,7 @@ mod tests {
             suppress_shutdown_complete: false,
             pending_shutdown_exit_thread_id: None,
             windows_sandbox: WindowsSandboxState::default(),
+            live_bridge,
             thread_event_channels: HashMap::new(),
             thread_event_listener_tasks: HashMap::new(),
             agent_picker_threads: HashMap::new(),
@@ -5449,6 +5485,11 @@ mod tests {
         let file_search = FileSearchManager::new(config.cwd.clone(), app_event_tx.clone());
         let model = codex_core::test_support::get_model_offline(config.model.as_deref());
         let session_telemetry = test_session_telemetry(&config, model.as_str());
+        let live_bridge = LiveBridgeHandle::new(
+            config.codex_home.as_path(),
+            server.clone(),
+            app_event_tx.clone(),
+        );
 
         (
             App {
@@ -5479,6 +5520,7 @@ mod tests {
                 suppress_shutdown_complete: false,
                 pending_shutdown_exit_thread_id: None,
                 windows_sandbox: WindowsSandboxState::default(),
+                live_bridge,
                 thread_event_channels: HashMap::new(),
                 thread_event_listener_tasks: HashMap::new(),
                 agent_picker_threads: HashMap::new(),

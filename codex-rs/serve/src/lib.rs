@@ -4,7 +4,9 @@ use std::net::IpAddr;
 use std::path::PathBuf;
 
 mod kanban;
+mod live_runtime;
 mod server;
+mod telegram_bot;
 mod workspace;
 
 #[derive(Debug, Parser)]

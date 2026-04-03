@@ -62,10 +62,51 @@ codex --version
 codex serve
 ```
 
+### Telegram on macOS
+
+Codex now supports a macOS-only Telegram control surface for `codex serve`.
+
+Quick start:
+
+```shell
+export CODEX_TELEGRAM_BOT_TOKEN="123456:telegram-token"
+export CODEX_TELEGRAM_ALLOWED_CHAT_IDS="123456789"
+codex serve --host 127.0.0.1 --port 8787
+```
+
+What it adds:
+
+- view projects and sessions from Telegram
+- attach to a running local CLI or TUI session
+- open dormant or archived sessions in read-only mode, then continue them on demand
+- stream assistant output into Telegram while the local terminal stays in sync
+- approve requests and answer `request_user_input` directly from Telegram
+
+Telegram commands:
+
+- `/projects`
+- `/refresh`
+- `/continue`
+- `/stop`
+
+See [**Telegram Bot for Codex on macOS**](./docs/telegram-bot-macos.md) for the full setup, troubleshooting, and end-to-end validation flow.
+
+## This Update
+
+Recent work in this fork includes:
+
+- macOS live bridge and runtime registry for running CLI or TUI sessions
+- single-owner lease handling and stale lease recovery
+- unified `liveWindow` / `headless` / `stored` session aggregation in `codex serve`
+- live owner delta streaming and remote control routing
+- Telegram bot worker integration with watched-session UX and throttled streaming updates
+- operations documentation for Telegram setup and validation
+
 ## Docs
 
 - [**Contributing**](./docs/contributing.md)
 - [**Installing & building**](./docs/install.md)
+- [**Telegram Bot for Codex on macOS**](./docs/telegram-bot-macos.md)
 - [**Hodexctl guide**](./scripts/hodexctl/README.md)
 - [**Open source fund**](./docs/open-source-fund.md)
 
