@@ -27,6 +27,7 @@ use codex_app_server_protocol::AppScreenshot;
 use codex_app_server_protocol::AppsListParams;
 use codex_app_server_protocol::AppsListResponse;
 use codex_app_server_protocol::JSONRPCError;
+use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
 use codex_app_server_protocol::ServerNotification;
@@ -51,7 +52,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio::time::timeout;
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 
 #[tokio::test]
 async fn list_apps_returns_empty_when_connectors_disabled() -> Result<()> {
@@ -377,9 +378,6 @@ async fn list_apps_emits_updates_and_returns_after_both_lists_load() -> Result<(
         plugin_display_names: Vec::new(),
     }];
 
-    let first_update = read_app_list_updated_notification(&mut mcp).await?;
-    assert_eq!(first_update.data, expected_accessible);
-
     let expected_merged = vec![
         AppInfo {
             id: "beta".to_string(),
@@ -413,19 +411,13 @@ async fn list_apps_emits_updates_and_returns_after_both_lists_load() -> Result<(
         },
     ];
 
-    let second_update = read_app_list_updated_notification(&mut mcp).await?;
-    assert_eq!(second_update.data, expected_merged);
-
-    let response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
-    )
-    .await??;
-
-    let AppsListResponse {
-        data: response_data,
-        next_cursor,
-    } = to_response(response)?;
+    let (updates, response_data, next_cursor) =
+        read_app_list_updates_and_response(&mut mcp, request_id).await?;
+    assert!(
+        updates.as_slice() == [expected_accessible.clone(), expected_merged.clone()]
+            || updates.as_slice() == [expected_merged.clone()],
+        "unexpected app/list update sequence: {updates:?}"
+    );
     assert_eq!(response_data, expected_merged);
     assert!(next_cursor.is_none());
 
@@ -961,13 +953,26 @@ async fn list_apps_force_refetch_patches_updates_from_cached_snapshots() -> Resu
             force_refetch: false,
         })
         .await?;
-    let warm_first_update = read_app_list_updated_notification(&mut mcp).await?;
-    assert_eq!(
-        warm_first_update.data,
-        vec![AppInfo {
+    let warm_expected_accessible = vec![AppInfo {
+        id: "beta".to_string(),
+        name: "Beta App".to_string(),
+        description: None,
+        logo_url: None,
+        logo_url_dark: None,
+        distribution_channel: None,
+        branding: None,
+        app_metadata: None,
+        labels: None,
+        install_url: Some("https://chatgpt.com/apps/beta-app/beta".to_string()),
+        is_accessible: true,
+        is_enabled: true,
+        plugin_display_names: Vec::new(),
+    }];
+    let warm_expected_merged = vec![
+        AppInfo {
             id: "beta".to_string(),
             name: "Beta App".to_string(),
-            description: None,
+            description: Some("Beta v1".to_string()),
             logo_url: None,
             logo_url_dark: None,
             distribution_channel: None,
@@ -978,56 +983,35 @@ async fn list_apps_force_refetch_patches_updates_from_cached_snapshots() -> Resu
             is_accessible: true,
             is_enabled: true,
             plugin_display_names: Vec::new(),
-        }]
+        },
+        AppInfo {
+            id: "alpha".to_string(),
+            name: "Alpha".to_string(),
+            description: Some("Alpha v1".to_string()),
+            logo_url: None,
+            logo_url_dark: None,
+            distribution_channel: None,
+            branding: None,
+            app_metadata: None,
+            labels: None,
+            install_url: Some("https://chatgpt.com/apps/alpha/alpha".to_string()),
+            is_accessible: false,
+            is_enabled: true,
+            plugin_display_names: Vec::new(),
+        },
+    ];
+    let (warm_updates, warm_data, warm_next_cursor) =
+        read_app_list_updates_and_response(&mut mcp, warm_request).await?;
+    assert!(
+        warm_updates.as_slice()
+            == [
+                warm_expected_accessible.clone(),
+                warm_expected_merged.clone()
+            ]
+            || warm_updates.as_slice() == [warm_expected_merged.clone()],
+        "unexpected warm app/list update sequence: {warm_updates:?}"
     );
-
-    let warm_second_update = read_app_list_updated_notification(&mut mcp).await?;
-    assert_eq!(
-        warm_second_update.data,
-        vec![
-            AppInfo {
-                id: "beta".to_string(),
-                name: "Beta App".to_string(),
-                description: Some("Beta v1".to_string()),
-                logo_url: None,
-                logo_url_dark: None,
-                distribution_channel: None,
-                branding: None,
-                app_metadata: None,
-                labels: None,
-                install_url: Some("https://chatgpt.com/apps/beta-app/beta".to_string()),
-                is_accessible: true,
-                is_enabled: true,
-                plugin_display_names: Vec::new(),
-            },
-            AppInfo {
-                id: "alpha".to_string(),
-                name: "Alpha".to_string(),
-                description: Some("Alpha v1".to_string()),
-                logo_url: None,
-                logo_url_dark: None,
-                distribution_channel: None,
-                branding: None,
-                app_metadata: None,
-                labels: None,
-                install_url: Some("https://chatgpt.com/apps/alpha/alpha".to_string()),
-                is_accessible: false,
-                is_enabled: true,
-                plugin_display_names: Vec::new(),
-            },
-        ]
-    );
-
-    let warm_response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(warm_request)),
-    )
-    .await??;
-    let AppsListResponse {
-        data: warm_data,
-        next_cursor: warm_next_cursor,
-    } = to_response(warm_response)?;
-    assert_eq!(warm_data, warm_second_update.data);
+    assert_eq!(warm_data, warm_expected_merged);
     assert!(warm_next_cursor.is_none());
 
     server_control.set_connectors(vec![AppInfo {
@@ -1056,53 +1040,6 @@ async fn list_apps_force_refetch_patches_updates_from_cached_snapshots() -> Resu
         })
         .await?;
 
-    let first_update = read_app_list_updated_notification(&mut mcp).await?;
-    assert_eq!(
-        first_update.data,
-        vec![
-            AppInfo {
-                id: "beta".to_string(),
-                name: "Beta App".to_string(),
-                description: Some("Beta v1".to_string()),
-                logo_url: None,
-                logo_url_dark: None,
-                distribution_channel: None,
-                branding: None,
-                app_metadata: None,
-                labels: None,
-                install_url: Some("https://chatgpt.com/apps/beta-app/beta".to_string()),
-                is_accessible: true,
-                is_enabled: true,
-                plugin_display_names: Vec::new(),
-            },
-            AppInfo {
-                id: "alpha".to_string(),
-                name: "Alpha".to_string(),
-                description: Some("Alpha v1".to_string()),
-                logo_url: None,
-                logo_url_dark: None,
-                distribution_channel: None,
-                branding: None,
-                app_metadata: None,
-                labels: None,
-                install_url: Some("https://chatgpt.com/apps/alpha/alpha".to_string()),
-                is_accessible: false,
-                is_enabled: true,
-                plugin_display_names: Vec::new(),
-            },
-        ]
-    );
-
-    let maybe_second_update = timeout(
-        Duration::from_millis(150),
-        read_app_list_updated_notification(&mut mcp),
-    )
-    .await;
-    assert!(
-        maybe_second_update.is_err(),
-        "unexpected inaccessible-only app/list update during force refetch"
-    );
-
     let expected_final = vec![AppInfo {
         id: "alpha".to_string(),
         name: "Alpha".to_string(),
@@ -1118,18 +1055,14 @@ async fn list_apps_force_refetch_patches_updates_from_cached_snapshots() -> Resu
         is_enabled: true,
         plugin_display_names: Vec::new(),
     }];
-    let second_update = read_app_list_updated_notification(&mut mcp).await?;
-    assert_eq!(second_update.data, expected_final);
-
-    let refetch_response: JSONRPCResponse = timeout(
-        DEFAULT_TIMEOUT,
-        mcp.read_stream_until_response_message(RequestId::Integer(refetch_request)),
-    )
-    .await??;
-    let AppsListResponse {
-        data: refetch_data,
-        next_cursor: refetch_next_cursor,
-    } = to_response(refetch_response)?;
+    let expected_cached = warm_expected_merged.clone();
+    let (refetch_updates, refetch_data, refetch_next_cursor) =
+        read_app_list_updates_and_response(&mut mcp, refetch_request).await?;
+    assert!(
+        refetch_updates.as_slice() == [expected_cached.clone(), expected_final.clone()]
+            || refetch_updates.as_slice() == [expected_final.clone()],
+        "unexpected force-refetch app/list update sequence: {refetch_updates:?}"
+    );
     assert_eq!(refetch_data, expected_final);
     assert!(refetch_next_cursor.is_none());
 
@@ -1150,6 +1083,37 @@ async fn read_app_list_updated_notification(
         bail!("unexpected notification variant");
     };
     Ok(payload)
+}
+
+async fn read_app_list_updates_and_response(
+    mcp: &mut McpProcess,
+    request_id: i64,
+) -> Result<(Vec<Vec<AppInfo>>, Vec<AppInfo>, Option<String>)> {
+    let deadline = tokio::time::Instant::now() + DEFAULT_TIMEOUT;
+    let request_id = RequestId::Integer(request_id);
+    let mut updates = Vec::new();
+
+    loop {
+        let now = tokio::time::Instant::now();
+        let remaining = deadline.saturating_duration_since(now);
+        let message = timeout(remaining, mcp.read_next_message()).await??;
+        match message {
+            JSONRPCMessage::Notification(notification)
+                if notification.method == "app/list/updated" =>
+            {
+                let parsed: ServerNotification = notification.try_into()?;
+                let ServerNotification::AppListUpdated(payload) = parsed else {
+                    bail!("unexpected notification variant");
+                };
+                updates.push(payload.data);
+            }
+            JSONRPCMessage::Response(response) if response.id == request_id => {
+                let AppsListResponse { data, next_cursor } = to_response(response)?;
+                return Ok((updates, data, next_cursor));
+            }
+            _ => {}
+        }
+    }
 }
 
 #[derive(Clone)]

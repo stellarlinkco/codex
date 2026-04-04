@@ -139,13 +139,16 @@ trust_level = "trusted"
     let mut exit_rx = exit_rx;
     let writer_tx = session.writer_sender();
     let interrupt_writer = writer_tx.clone();
+    let (startup_ready_tx, startup_ready_rx) = tokio::sync::oneshot::channel::<()>();
     let interrupt_task = tokio::spawn(async move {
+        let _ = timeout(Duration::from_secs(10), startup_ready_rx).await;
         sleep(Duration::from_secs(2)).await;
         for _ in 0..4 {
             let _ = interrupt_writer.send(vec![3]).await;
             sleep(Duration::from_millis(500)).await;
         }
     });
+    let mut startup_ready_tx = Some(startup_ready_tx);
 
     let exit_code_result = timeout(Duration::from_secs(15), async {
         loop {
@@ -154,6 +157,9 @@ trust_level = "trusted"
                     Ok(chunk) => {
                         if chunk.windows(4).any(|window| window == b"\x1b[6n") {
                             let _ = writer_tx.send(b"\x1b[1;1R".to_vec()).await;
+                            if let Some(startup_ready_tx) = startup_ready_tx.take() {
+                                let _ = startup_ready_tx.send(());
+                            }
                         }
                         output.extend_from_slice(&chunk);
                     }

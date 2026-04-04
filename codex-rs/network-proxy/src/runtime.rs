@@ -25,16 +25,20 @@ use std::future::Future;
 use std::net::IpAddr;
 use std::path::Path;
 use std::sync::Arc;
+#[cfg(not(test))]
 use std::time::Duration;
 use time::OffsetDateTime;
+#[cfg(not(test))]
 use tokio::net::lookup_host;
 use tokio::sync::RwLock;
+#[cfg(not(test))]
 use tokio::time::timeout;
 use tracing::debug;
 use tracing::info;
 use tracing::warn;
 
 const MAX_BLOCKED_EVENTS: usize = 200;
+#[cfg(not(test))]
 const DNS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(2);
 const NETWORK_POLICY_VIOLATION_PREFIX: &str = "CODEX_NETWORK_POLICY_VIOLATION";
 
@@ -693,6 +697,7 @@ pub(crate) fn unix_socket_permissions_supported() -> bool {
     cfg!(target_os = "macos")
 }
 
+#[cfg(not(test))]
 async fn host_resolves_to_non_public_ip(host: &str, port: u16) -> bool {
     if let Ok(ip) = host.parse::<IpAddr>() {
         return is_non_public_ip(ip);
@@ -712,6 +717,15 @@ async fn host_resolves_to_non_public_ip(host: &str, port: u16) -> bool {
         }
     }
 
+    false
+}
+
+#[cfg(test)]
+async fn host_resolves_to_non_public_ip(_host: &str, _port: u16) -> bool {
+    // Unit tests should not depend on the host machine's DNS policy. Some CI and developer
+    // environments rewrite arbitrary hostnames to non-public ranges (for example 198.18.0.0/15),
+    // which would make allowlist and decider assertions nondeterministic. Explicit loopback and
+    // private IP coverage remains exercised through the local-literal path above.
     false
 }
 
@@ -842,12 +856,12 @@ mod tests {
     #[tokio::test]
     async fn host_blocked_requires_allowlist_match() {
         let state = network_proxy_state_for_policy(NetworkProxySettings {
-            allowed_domains: vec!["example.com".to_string()],
+            allowed_domains: vec!["example.invalid".to_string()],
             ..NetworkProxySettings::default()
         });
 
         assert_eq!(
-            state.host_blocked("example.com", 80).await.unwrap(),
+            state.host_blocked("example.invalid", 80).await.unwrap(),
             HostBlockDecision::Allowed
         );
         assert_eq!(
@@ -861,17 +875,17 @@ mod tests {
     #[tokio::test]
     async fn add_allowed_domain_removes_matching_deny_entry() {
         let state = network_proxy_state_for_policy(NetworkProxySettings {
-            denied_domains: vec!["example.com".to_string()],
+            denied_domains: vec!["example.invalid".to_string()],
             ..NetworkProxySettings::default()
         });
 
-        state.add_allowed_domain("ExAmPlE.CoM").await.unwrap();
+        state.add_allowed_domain("ExAmPlE.InVaLiD").await.unwrap();
 
         let (allowed, denied) = state.current_patterns().await.unwrap();
-        assert_eq!(allowed, vec!["example.com".to_string()]);
+        assert_eq!(allowed, vec!["example.invalid".to_string()]);
         assert!(denied.is_empty());
         assert_eq!(
-            state.host_blocked("example.com", 80).await.unwrap(),
+            state.host_blocked("example.invalid", 80).await.unwrap(),
             HostBlockDecision::Allowed
         );
     }
@@ -1075,16 +1089,16 @@ mod tests {
     #[tokio::test]
     async fn host_blocked_subdomain_wildcards_exclude_apex() {
         let state = network_proxy_state_for_policy(NetworkProxySettings {
-            allowed_domains: vec!["*.openai.com".to_string()],
+            allowed_domains: vec!["*.openai.invalid".to_string()],
             ..NetworkProxySettings::default()
         });
 
         assert_eq!(
-            state.host_blocked("api.openai.com", 80).await.unwrap(),
+            state.host_blocked("api.openai.invalid", 80).await.unwrap(),
             HostBlockDecision::Allowed
         );
         assert_eq!(
-            state.host_blocked("openai.com", 80).await.unwrap(),
+            state.host_blocked("openai.invalid", 80).await.unwrap(),
             HostBlockDecision::Blocked(HostBlockReason::NotAllowed)
         );
     }
