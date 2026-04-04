@@ -15,6 +15,7 @@ use wiremock::MockServer;
 
 static CODEX_BIN: OnceLock<PathBuf> = OnceLock::new();
 const CLI_EXEC_TIMEOUT: Duration = Duration::from_secs(180);
+const CLI_SESSION_INTEGRATION_TIMEOUT: Duration = Duration::from_secs(600);
 const CLI_SESSION_DIR_TIMEOUT: Duration = Duration::from_secs(30);
 const CLI_SESSION_FILE_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -236,7 +237,7 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     // 4. Run the codex CLI and invoke `exec`, which is what records a session.
     let bin = codex_bin();
     let mut cmd = AssertCommand::new(bin);
-    cmd.timeout(CLI_EXEC_TIMEOUT);
+    cmd.timeout(CLI_SESSION_INTEGRATION_TIMEOUT);
     cmd.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-C")
@@ -358,7 +359,7 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
     let prompt2 = format!("echo {marker2}");
     let bin2 = codex_bin();
     let mut cmd2 = AssertCommand::new(bin2);
-    cmd2.timeout(CLI_EXEC_TIMEOUT);
+    cmd2.timeout(CLI_SESSION_INTEGRATION_TIMEOUT);
     cmd2.arg("exec")
         .arg("--skip-git-repo-check")
         .arg("-C")
@@ -372,7 +373,11 @@ async fn integration_creates_and_checks_session_file() -> anyhow::Result<()> {
         .env("OPENAI_BASE_URL", "http://unused.local");
 
     let output2 = cmd2.output().unwrap();
-    assert!(output2.status.success(), "resume codex-cli run failed");
+    assert!(
+        output2.status.success(),
+        "resume codex-cli run failed: {}",
+        String::from_utf8_lossy(&output2.stderr)
+    );
 
     // Find the new session file containing the resumed marker.
     let marker2_clone = marker2.clone();

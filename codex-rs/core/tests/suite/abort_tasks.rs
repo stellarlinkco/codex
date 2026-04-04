@@ -13,6 +13,7 @@ use core_test_support::responses::mount_sse_sequence;
 use core_test_support::responses::sse;
 use core_test_support::responses::start_mock_server;
 use core_test_support::skip_if_sandbox;
+use core_test_support::test_codex::TestCodex;
 use core_test_support::test_codex::test_codex;
 use core_test_support::wait_for_event;
 use core_test_support::wait_for_event_with_timeout;
@@ -20,6 +21,35 @@ use regex_lite::Regex;
 use serde_json::json;
 
 const TURN_ABORT_TIMEOUT: Duration = Duration::from_secs(60);
+
+async fn submit_user_turn_with_policy(
+    fixture: &TestCodex,
+    prompt: &str,
+    sandbox_policy: codex_protocol::protocol::SandboxPolicy,
+) {
+    if let Err(err) = fixture
+        .codex
+        .submit(Op::UserTurn {
+            items: vec![UserInput::Text {
+                text: prompt.into(),
+                text_elements: Vec::new(),
+            }],
+            final_output_json_schema: None,
+            cwd: fixture.cwd.path().to_path_buf(),
+            approval_policy: codex_protocol::protocol::AskForApproval::Never,
+            sandbox_policy,
+            model: fixture.session_configured.model.clone(),
+            effort: None,
+            summary: None,
+            service_tier: None,
+            collaboration_mode: None,
+            personality: None,
+        })
+        .await
+    {
+        panic!("submitting user turn with policy should succeed: {err}");
+    }
+}
 
 /// Integration test: spawn a long‑running shell_command tool via a mocked Responses SSE
 /// function call, then interrupt the session and expect TurnAborted.
@@ -113,13 +143,12 @@ async fn interrupt_tool_records_history_entries() {
         .unwrap();
     let codex = Arc::clone(&fixture.codex);
 
-    fixture
-        .submit_turn_with_policy(
-            "start history recording",
-            codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
-        )
-        .await
-        .unwrap();
+    submit_user_turn_with_policy(
+        &fixture,
+        "start history recording",
+        codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+    )
+    .await;
 
     wait_for_event(&codex, |ev| match ev {
         EventMsg::ExecCommandBegin(event) => event.call_id == call_id,
@@ -223,13 +252,12 @@ async fn interrupt_persists_turn_aborted_marker_in_next_request() {
         .unwrap();
     let codex = Arc::clone(&fixture.codex);
 
-    fixture
-        .submit_turn_with_policy(
-            "start interrupt marker",
-            codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
-        )
-        .await
-        .unwrap();
+    submit_user_turn_with_policy(
+        &fixture,
+        "start interrupt marker",
+        codex_protocol::protocol::SandboxPolicy::DangerFullAccess,
+    )
+    .await;
 
     wait_for_event(&codex, |ev| match ev {
         EventMsg::ExecCommandBegin(event) => event.call_id == call_id,
