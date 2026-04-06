@@ -3,6 +3,7 @@ use super::curated_plugins_repo_path;
 use super::load_plugin_manifest;
 use super::manifest::PluginManifestInterfaceSummary;
 use super::marketplace::MarketplaceError;
+use super::marketplace::MarketplaceInterfaceSummary;
 use super::marketplace::MarketplacePluginSourceSummary;
 use super::marketplace::list_marketplaces;
 use super::marketplace::resolve_marketplace_plugin;
@@ -64,6 +65,7 @@ pub struct PluginInstallRequest {
 pub struct ConfiguredMarketplaceSummary {
     pub name: String,
     pub path: AbsolutePathBuf,
+    pub interface: Option<MarketplaceInterfaceSummary>,
     pub plugins: Vec<ConfiguredMarketplacePluginSummary>,
 }
 
@@ -366,6 +368,7 @@ impl PluginsManager {
                 (!plugins.is_empty()).then_some(ConfiguredMarketplaceSummary {
                     name: marketplace.name,
                     path: marketplace.path,
+                    interface: marketplace.interface,
                     plugins,
                 })
             })
@@ -1712,6 +1715,7 @@ enabled = false
                     tmp.path().join("repo/.agents/plugins/marketplace.json"),
                 )
                 .unwrap(),
+                interface: None,
                 plugins: vec![
                     ConfiguredMarketplacePluginSummary {
                         id: "enabled-plugin@debug".to_string(),
@@ -1791,6 +1795,7 @@ enabled = false
                     curated_root.join(".agents/plugins/marketplace.json")
                 )
                 .unwrap(),
+                interface: None,
                 plugins: vec![ConfiguredMarketplacePluginSummary {
                     id: "linear@openai-curated".to_string(),
                     name: "linear".to_string(),
@@ -1990,6 +1995,7 @@ enabled = true
                     tmp.path().join("repo/.agents/plugins/marketplace.json"),
                 )
                 .unwrap(),
+                interface: None,
                 plugins: vec![ConfiguredMarketplacePluginSummary {
                     id: "sample-plugin@debug".to_string(),
                     name: "sample-plugin".to_string(),

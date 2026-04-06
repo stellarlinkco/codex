@@ -125,6 +125,63 @@ async fn plugin_list_accepts_omitted_cwds() -> Result<()> {
 }
 
 #[tokio::test]
+async fn plugin_list_includes_marketplace_interface_display_name() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let repo_root = TempDir::new()?;
+    std::fs::create_dir_all(repo_root.path().join(".git"))?;
+    std::fs::create_dir_all(repo_root.path().join(".agents/plugins"))?;
+    std::fs::write(
+        repo_root.path().join(".agents/plugins/marketplace.json"),
+        r#"{
+  "name": "codex-curated",
+  "interface": {
+    "displayName": "Codex Curated"
+  },
+  "plugins": [
+    {
+      "name": "demo-plugin",
+      "source": {
+        "source": "local",
+        "path": "./demo-plugin"
+      }
+    }
+  ]
+}"#,
+    )?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
+
+    let request_id = mcp
+        .send_plugin_list_request(PluginListParams {
+            cwds: Some(vec![AbsolutePathBuf::try_from(repo_root.path())?]),
+        })
+        .await?;
+
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(request_id)),
+    )
+    .await??;
+    let response: PluginListResponse = to_response(response)?;
+
+    let marketplace = response
+        .marketplaces
+        .into_iter()
+        .find(|marketplace| marketplace.name == "codex-curated")
+        .expect("expected marketplace entry");
+
+    assert_eq!(
+        marketplace
+            .interface
+            .as_ref()
+            .and_then(|interface| interface.display_name.as_deref()),
+        Some("Codex Curated")
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn plugin_list_includes_install_and_enabled_state_from_config() -> Result<()> {
     let codex_home = TempDir::new()?;
     let repo_root = TempDir::new()?;
