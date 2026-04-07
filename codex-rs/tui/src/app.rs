@@ -251,6 +251,32 @@ fn emit_project_config_warnings(app_event_tx: &AppEventSender, config: &Config) 
     )));
 }
 
+async fn emit_custom_prompt_deprecation_notice(app_event_tx: &AppEventSender, codex_home: &Path) {
+    let prompts_dir = codex_home.join("prompts");
+    let prompt_count = codex_core::custom_prompts::discover_prompts_in(&prompts_dir)
+        .await
+        .len();
+    if prompt_count == 0 {
+        return;
+    }
+
+    let prompt_label = if prompt_count == 1 {
+        "prompt"
+    } else {
+        "prompts"
+    };
+    let details = format!(
+        "Detected {prompt_count} custom {prompt_label} in `$CODEX_HOME/prompts`. Use the `$skill-creator` skill to convert each custom prompt into a skill."
+    );
+
+    app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+        history_cell::new_deprecation_notice(
+            "Custom prompts are deprecated and will soon be removed.".to_string(),
+            Some(details),
+        ),
+    )));
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct SessionSummary {
     usage_line: String,
@@ -1770,6 +1796,7 @@ impl App {
         let enhanced_keys_supported = tui.enhanced_keys_supported();
         let wait_for_initial_session_configured =
             Self::should_wait_for_initial_session(&session_selection);
+        emit_custom_prompt_deprecation_notice(&app_event_tx, &config.codex_home).await;
         let mut chat_widget = match session_selection {
             SessionSelection::StartFresh | SessionSelection::Exit => {
                 let startup_tooltip_override =
@@ -3879,6 +3906,62 @@ mod tests {
             )),
             false
         );
+    }
+
+    fn render_history_cell(cell: &dyn HistoryCell, width: u16) -> String {
+        cell.display_lines(width)
+            .into_iter()
+            .map(|line| line.to_string())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[tokio::test]
+    async fn startup_custom_prompt_deprecation_notice_emits_when_prompts_exist() -> Result<()> {
+        let codex_home = tempdir()?;
+        let prompts_dir = codex_home.path().join("prompts");
+        std::fs::create_dir_all(&prompts_dir)?;
+        std::fs::write(prompts_dir.join("review.md"), "# Review\n")?;
+
+        let (tx_raw, mut rx) = unbounded_channel();
+        let app_event_tx = AppEventSender::new(tx_raw);
+
+        emit_custom_prompt_deprecation_notice(&app_event_tx, codex_home.path()).await;
+
+        let cell = match rx.try_recv() {
+            Ok(AppEvent::InsertHistoryCell(cell)) => cell,
+            other => panic!("expected InsertHistoryCell event, got {other:?}"),
+        };
+        let rendered = render_history_cell(cell.as_ref(), 120);
+
+        assert_snapshot!("startup_custom_prompt_deprecation_notice", rendered);
+        assert!(rx.try_recv().is_err(), "expected only one startup notice");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_custom_prompt_deprecation_notice_skips_missing_prompts_dir() -> Result<()> {
+        let codex_home = tempdir()?;
+        let (tx_raw, mut rx) = unbounded_channel();
+        let app_event_tx = AppEventSender::new(tx_raw);
+
+        emit_custom_prompt_deprecation_notice(&app_event_tx, codex_home.path()).await;
+
+        assert!(rx.try_recv().is_err(), "expected no startup notice");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn startup_custom_prompt_deprecation_notice_skips_empty_prompts_dir() -> Result<()> {
+        let codex_home = tempdir()?;
+        std::fs::create_dir_all(codex_home.path().join("prompts"))?;
+        let (tx_raw, mut rx) = unbounded_channel();
+        let app_event_tx = AppEventSender::new(tx_raw);
+
+        emit_custom_prompt_deprecation_notice(&app_event_tx, codex_home.path()).await;
+
+        assert!(rx.try_recv().is_err(), "expected no startup notice");
+        Ok(())
     }
 
     #[test]
