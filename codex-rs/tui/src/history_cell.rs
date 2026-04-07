@@ -2216,7 +2216,7 @@ pub(crate) fn new_view_image_tool_call(path: PathBuf, cwd: &Path) -> PlainHistor
 pub(crate) fn new_image_generation_call(
     call_id: String,
     revised_prompt: Option<String>,
-    saved_to: Option<String>,
+    saved_path: Option<String>,
 ) -> PlainHistoryCell {
     let detail = revised_prompt.unwrap_or_else(|| call_id.clone());
 
@@ -2224,8 +2224,8 @@ pub(crate) fn new_image_generation_call(
         vec!["• ".dim(), "Generated Image:".bold()].into(),
         vec!["  └ ".dim(), detail.dim()].into(),
     ];
-    if let Some(saved_to) = saved_to {
-        lines.push(vec!["  └ ".dim(), format!("Saved to: {saved_to}").dim()].into());
+    if let Some(saved_path) = saved_path {
+        lines.push(vec!["  └ ".dim(), "Saved to: ".dim(), saved_path.into()].into());
     }
 
     PlainHistoryCell { lines }
@@ -2616,6 +2616,25 @@ mod tests {
         let cell = new_unified_exec_processes_output(Vec::new());
         let rendered = render_lines(&cell.display_lines(60)).join("\n");
         insta::assert_snapshot!(rendered);
+    }
+
+    #[test]
+    fn image_generation_call_renders_saved_path() {
+        let saved_path = "file:///tmp/generated-image.png".to_string();
+        let cell = new_image_generation_call(
+            "call-image-generation".to_string(),
+            Some("A tiny blue square".to_string()),
+            Some(saved_path.clone()),
+        );
+
+        assert_eq!(
+            render_lines(&cell.display_lines(80)),
+            vec![
+                "• Generated Image:".to_string(),
+                "  └ A tiny blue square".to_string(),
+                format!("  └ Saved to: {saved_path}"),
+            ],
+        );
     }
 
     #[tokio::test]
