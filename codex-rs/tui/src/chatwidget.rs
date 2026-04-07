@@ -4854,7 +4854,7 @@ impl ChatWidget {
             .personality
             .filter(|_| self.config.features.enabled(Feature::Personality))
             .filter(|_| self.current_model_supports_personality());
-        let service_tier = self.fast_mode_enabled().then_some(self.config.service_tier);
+        let service_tier = Some(self.config.service_tier);
         let op = Op::UserTurn {
             items,
             cwd: self.config.cwd.clone(),
