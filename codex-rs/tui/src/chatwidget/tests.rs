@@ -85,6 +85,7 @@ use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SkillMetadata as ProtocolSkillMetadata;
 use codex_protocol::protocol::SkillScope;
 use codex_protocol::protocol::StreamErrorEvent;
 use codex_protocol::protocol::TerminalInteractionEvent;
@@ -5973,6 +5974,37 @@ async fn slash_copy_state_is_preserved_during_running_task() {
     assert_eq!(
         chat.last_copyable_output,
         Some("Previous completed reply".to_string())
+    );
+}
+
+#[tokio::test]
+async fn annotate_skill_reads_in_parsed_cmd_appends_skill_name() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let skill_path = PathBuf::from("/tmp/skills/pr-babysitter/SKILL.md");
+    chat.skills_all = vec![ProtocolSkillMetadata {
+        name: "pr-babysitter".to_string(),
+        description: "Babysit a PR".to_string(),
+        short_description: None,
+        interface: None,
+        dependencies: None,
+        path: skill_path.clone(),
+        scope: SkillScope::Repo,
+        enabled: true,
+    }];
+
+    let annotated = chat.annotate_skill_reads_in_parsed_cmd(vec![ParsedCommand::Read {
+        name: "SKILL.md".to_string(),
+        cmd: "cat /tmp/skills/pr-babysitter/SKILL.md".to_string(),
+        path: skill_path.clone(),
+    }]);
+
+    assert_eq!(
+        annotated,
+        vec![ParsedCommand::Read {
+            name: "SKILL.md (pr-babysitter skill)".to_string(),
+            cmd: "cat /tmp/skills/pr-babysitter/SKILL.md".to_string(),
+            path: skill_path,
+        }]
     );
 }
 
