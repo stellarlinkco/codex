@@ -266,7 +266,7 @@ async fn unicode_output(login: bool) -> anyhow::Result<()> {
     // config is actually being set correctly.
     let call_id = "unicode_output";
     let command = if cfg!(windows) {
-        "cmd /c echo naïve_café"
+        "cmd.exe /c echo naïve_café"
     } else {
         "echo \"naïve_café\""
     };
