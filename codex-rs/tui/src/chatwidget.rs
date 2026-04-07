@@ -580,6 +580,9 @@ pub(crate) struct ChatWidget {
     plan_stream_controller: Option<PlanStreamController>,
     // Latest completed user-visible Codex output that `/copy` should place on the clipboard.
     last_copyable_output: Option<String>,
+    // Latest agent message observed during the active turn. Turn completion notifications do not
+    // always repeat this payload, so promote it when the turn completes.
+    pending_turn_copyable_output: Option<String>,
     running_commands: HashMap<String, RunningCommand>,
     suppressed_exec_calls: HashSet<String>,
     skills_all: Vec<ProtocolSkillMetadata>,
@@ -1407,6 +1410,7 @@ impl ChatWidget {
         }
         let initial_messages = event.initial_messages.clone();
         self.last_copyable_output = None;
+        self.pending_turn_copyable_output = None;
         let forked_from_id = event.forked_from_id;
         let model_for_header = event.model.clone();
         self.session_header.set_model(&model_for_header);
@@ -1704,6 +1708,7 @@ impl ChatWidget {
         self.plan_item_active = false;
         self.adaptive_chunking.reset();
         self.plan_stream_controller = None;
+        self.pending_turn_copyable_output = None;
         self.turn_runtime_metrics = RuntimeMetricsSummary::default();
         self.session_telemetry.reset_runtime_metrics();
         self.bottom_pane.clear_quit_shortcut_hint();
@@ -1721,9 +1726,12 @@ impl ChatWidget {
 
     fn on_task_complete(&mut self, last_agent_message: Option<String>, from_replay: bool) {
         self.submit_pending_steers_after_interrupt = false;
-        if let Some(message) = last_agent_message.as_ref()
-            && !message.trim().is_empty()
-        {
+        let copyable_turn_output = last_agent_message
+            .as_ref()
+            .filter(|message| !message.trim().is_empty())
+            .cloned()
+            .or_else(|| self.pending_turn_copyable_output.take());
+        if let Some(message) = copyable_turn_output.as_ref() {
             self.last_copyable_output = Some(message.clone());
         }
         // If a stream is currently active, finalize it.
@@ -2775,6 +2783,9 @@ impl ChatWidget {
         self.finalize_completed_assistant_message(
             (!message.is_empty()).then_some(message.as_str()),
         );
+        if self.agent_turn_running && !message.is_empty() {
+            self.pending_turn_copyable_output = Some(message.clone());
+        }
         self.pending_status_indicator_restore = match item.phase {
             // Models that don't support preambles only output AgentMessageItems on turn completion.
             Some(MessagePhase::FinalAnswer) | None => false,
@@ -3353,6 +3364,7 @@ impl ChatWidget {
             stream_controller: None,
             plan_stream_controller: None,
             last_copyable_output: None,
+            pending_turn_copyable_output: None,
             running_commands: HashMap::new(),
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
@@ -3539,6 +3551,7 @@ impl ChatWidget {
             stream_controller: None,
             plan_stream_controller: None,
             last_copyable_output: None,
+            pending_turn_copyable_output: None,
             running_commands: HashMap::new(),
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
@@ -3717,6 +3730,7 @@ impl ChatWidget {
             stream_controller: None,
             plan_stream_controller: None,
             last_copyable_output: None,
+            pending_turn_copyable_output: None,
             running_commands: HashMap::new(),
             suppressed_exec_calls: HashSet::new(),
             last_unified_wait: None,
@@ -5192,6 +5206,7 @@ impl ChatWidget {
                 // transcript cells, but we do not maintain rollback-aware raw-markdown history yet,
                 // so keeping the previous cache can return content that was just removed.
                 self.last_copyable_output = None;
+                self.pending_turn_copyable_output = None;
                 if from_replay {
                     self.app_event_tx.send(AppEvent::ApplyThreadRollback {
                         num_turns: rollback.num_turns,

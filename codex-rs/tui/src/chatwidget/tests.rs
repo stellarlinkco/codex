@@ -1842,6 +1842,7 @@ async fn make_chatwidget_manual(
         stream_controller: None,
         plan_stream_controller: None,
         last_copyable_output: None,
+        pending_turn_copyable_output: None,
         running_commands: HashMap::new(),
         suppressed_exec_calls: HashSet::new(),
         skills_all: Vec::new(),
@@ -6005,6 +6006,38 @@ async fn annotate_skill_reads_in_parsed_cmd_appends_skill_name() {
             cmd: "cat /tmp/skills/pr-babysitter/SKILL.md".to_string(),
             path: skill_path,
         }]
+    );
+}
+
+#[tokio::test]
+async fn slash_copy_state_tracks_commentary_only_turn_completion() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.handle_codex_event(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-1".to_string(),
+            last_agent_message: Some("Previous completed reply".to_string()),
+        }),
+    });
+    chat.on_task_started();
+    complete_assistant_message(
+        &mut chat,
+        "msg-1",
+        "Commentary-only update",
+        Some(MessagePhase::Commentary),
+    );
+    chat.handle_codex_event(Event {
+        id: "turn-2".into(),
+        msg: EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-2".to_string(),
+            last_agent_message: None,
+        }),
+    });
+
+    assert_eq!(
+        chat.last_copyable_output,
+        Some("Commentary-only update".to_string())
     );
 }
 
