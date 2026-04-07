@@ -1987,6 +1987,60 @@ pub(crate) async fn make_chatwidget_manual_with_sender() -> (
     (widget, app_event_tx, rx, op_rx)
 }
 
+#[tokio::test]
+async fn new_from_existing_ignores_startup_tooltip_override_and_preserves_nux_counts() {
+    let mut cfg = test_config().await;
+    cfg.model_availability_nux
+        .shown_count
+        .insert("gpt-5.4".to_string(), 1);
+
+    let model = codex_core::test_support::get_model_offline(cfg.model.as_deref());
+    let session_telemetry = test_session_telemetry(&cfg, model.as_str());
+    let auth_manager =
+        codex_core::test_support::auth_manager_from_auth(CodexAuth::from_api_key("test"));
+    let thread_manager = Arc::new(
+        codex_core::test_support::thread_manager_with_models_provider(
+            CodexAuth::from_api_key("test"),
+            cfg.model_provider.clone(),
+        ),
+    );
+    let started = thread_manager
+        .start_thread(cfg.clone())
+        .await
+        .expect("thread should start");
+
+    let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+    let tx = AppEventSender::new(tx_raw);
+    let init = ChatWidgetInit {
+        config: cfg,
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: tx,
+        initial_user_message: None,
+        enhanced_keys_supported: false,
+        auth_manager,
+        models_manager: thread_manager.get_models_manager(),
+        feedback: codex_feedback::CodexFeedback::new(),
+        is_first_run: false,
+        feedback_audience: FeedbackAudience::External,
+        model: Some(model),
+        startup_tooltip_override: Some("Model now available".to_string()),
+        status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
+        session_telemetry,
+    };
+
+    let widget = ChatWidget::new_from_existing(init, started.thread, started.session_configured);
+
+    assert_eq!(widget.startup_tooltip_override, None);
+    assert_eq!(
+        widget
+            .config
+            .model_availability_nux
+            .shown_count
+            .get("gpt-5.4"),
+        Some(&1)
+    );
+}
+
 fn drain_insert_history(
     rx: &mut tokio::sync::mpsc::UnboundedReceiver<AppEvent>,
 ) -> Vec<Vec<ratatui::text::Line<'static>>> {
