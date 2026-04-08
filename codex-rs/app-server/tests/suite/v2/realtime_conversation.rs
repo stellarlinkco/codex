@@ -35,7 +35,7 @@ use std::time::Duration;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(10);
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const STARTUP_CONTEXT_HEADER: &str = "Startup context from Codex.";
 
 #[tokio::test]

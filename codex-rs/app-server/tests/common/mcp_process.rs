@@ -1,14 +1,13 @@
 use std::collections::VecDeque;
+use std::io::BufRead;
+use std::io::BufReader;
+use std::io::Write;
 use std::path::Path;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::AtomicI64;
 use std::sync::atomic::Ordering;
-use tokio::io::AsyncBufReadExt;
-use tokio::io::AsyncWriteExt;
-use tokio::io::BufReader;
-use tokio::process::Child;
-use tokio::process::ChildStdin;
-use tokio::process::ChildStdout;
 
 use anyhow::Context;
 use codex_app_server_protocol::AppsListParams;
@@ -69,17 +68,16 @@ use codex_app_server_protocol::TurnStartParams;
 use codex_app_server_protocol::TurnSteerParams;
 use codex_app_server_protocol::WindowsSandboxSetupStartParams;
 use codex_core::default_client::CODEX_INTERNAL_ORIGINATOR_OVERRIDE_ENV_VAR;
-use tokio::process::Command;
+use std::process::Child;
+use std::process::ChildStdin;
+use std::process::ChildStdout;
+use std::process::Command;
 
 pub struct McpProcess {
     next_request_id: AtomicI64,
-    /// Retain this child process until the client is dropped. The Tokio runtime
-    /// will make a "best effort" to reap the process after it exits, but it is
-    /// not a guarantee. See the `kill_on_drop` documentation for details.
-    #[allow(dead_code)]
     process: Child,
-    stdin: Option<ChildStdin>,
-    stdout: BufReader<ChildStdout>,
+    stdin: Option<Arc<Mutex<ChildStdin>>>,
+    stdout: Arc<Mutex<BufReader<ChildStdout>>>,
     pending_messages: VecDeque<JSONRPCMessage>,
 }
 
@@ -122,10 +120,7 @@ impl McpProcess {
             }
         }
 
-        let mut process = cmd
-            .kill_on_drop(true)
-            .spawn()
-            .context("codex-mcp-server proc should start")?;
+        let mut process = cmd.spawn().context("codex-mcp-server proc should start")?;
         let stdin = process
             .stdin
             .take()
@@ -134,22 +129,33 @@ impl McpProcess {
             .stdout
             .take()
             .ok_or_else(|| anyhow::format_err!("mcp should have stdout fd"))?;
-        let stdout = BufReader::new(stdout);
+        let stdout = Arc::new(Mutex::new(BufReader::new(stdout)));
 
         // Forward child's stderr to our stderr so failures are visible even
         // when stdout/stderr are captured by the test harness.
         if let Some(stderr) = process.stderr.take() {
-            let mut stderr_reader = BufReader::new(stderr).lines();
-            tokio::spawn(async move {
-                while let Ok(Some(line)) = stderr_reader.next_line().await {
+            std::thread::spawn(move || {
+                let mut stderr_reader = BufReader::new(stderr);
+                let mut line = String::new();
+                while let Ok(bytes) = stderr_reader.read_line(&mut line) {
+                    if bytes == 0 {
+                        break;
+                    }
+                    if line.ends_with('\n') {
+                        line.pop();
+                        if line.ends_with('\r') {
+                            line.pop();
+                        }
+                    }
                     eprintln!("[mcp stderr] {line}");
+                    line.clear();
                 }
             });
         }
         Ok(Self {
             next_request_id: AtomicI64::new(0),
             process,
-            stdin: Some(stdin),
+            stdin: Some(Arc::new(Mutex::new(stdin))),
             stdout,
             pending_messages: VecDeque::new(),
         })
@@ -874,20 +880,35 @@ impl McpProcess {
 
     async fn send_jsonrpc_message(&mut self, message: JSONRPCMessage) -> anyhow::Result<()> {
         eprintln!("writing message to stdin: {message:?}");
-        let Some(stdin) = self.stdin.as_mut() else {
+        let Some(stdin) = self.stdin.as_ref().cloned() else {
             anyhow::bail!("mcp stdin closed");
         };
         let payload = serde_json::to_string(&message)?;
-        stdin.write_all(payload.as_bytes()).await?;
-        stdin.write_all(b"\n").await?;
-        stdin.flush().await?;
+        tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let mut stdin = stdin.lock().expect("stdin lock poisoned");
+            stdin.write_all(payload.as_bytes())?;
+            stdin.write_all(b"\n")?;
+            stdin.flush()?;
+            Ok(())
+        })
+        .await??;
         Ok(())
     }
 
     async fn read_jsonrpc_message(&mut self) -> anyhow::Result<JSONRPCMessage> {
-        let mut line = String::new();
-        self.stdout.read_line(&mut line).await?;
-        let message = serde_json::from_str::<JSONRPCMessage>(&line)?;
+        let stdout = Arc::clone(&self.stdout);
+        let message = tokio::task::spawn_blocking(move || -> anyhow::Result<JSONRPCMessage> {
+            let mut line = String::new();
+            let bytes = stdout
+                .lock()
+                .expect("stdout lock poisoned")
+                .read_line(&mut line)?;
+            if bytes == 0 {
+                anyhow::bail!("mcp should not close stdout");
+            }
+            Ok(serde_json::from_str::<JSONRPCMessage>(&line)?)
+        })
+        .await??;
         eprintln!("read message from stdout: {message:?}");
         Ok(message)
     }
@@ -1062,7 +1083,7 @@ impl Drop for McpProcess {
             }
         }
 
-        let _ = self.process.start_kill();
+        let _ = self.process.kill();
 
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(5);
