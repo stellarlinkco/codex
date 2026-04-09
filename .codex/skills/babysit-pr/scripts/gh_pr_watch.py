@@ -9,6 +9,8 @@ import subprocess
 import sys
 import tempfile
 import time
+from datetime import datetime
+from datetime import timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -46,6 +48,16 @@ MERGE_CONFLICT_OR_BLOCKING_STATES = {
     "UNKNOWN",
 }
 GREEN_STATE_MAX_POLL_SECONDS = 60 * 60
+LONG_RUNNING_CHECK_POLICIES = {
+    ("rust-ci", "Tests — ubuntu-24.04 - x86_64-unknown-linux-gnu"): {
+        "warn_seconds": 15 * 60,
+        "stuck_seconds": 25 * 60,
+    },
+    ("Bazel (experimental)", "Local Bazel build on ubuntu-24.04 for x86_64-unknown-linux-gnu"): {
+        "warn_seconds": 30 * 60,
+        "stuck_seconds": 35 * 60,
+    },
+}
 
 
 class GhCommandError(RuntimeError):
@@ -299,6 +311,70 @@ def summarize_checks(checks):
         "failed_count": failed_count,
         "passed_count": passed_count,
         "all_terminal": pending_count == 0,
+    }
+
+
+def parse_github_timestamp(raw_value):
+    raw_value = str(raw_value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        return datetime.fromisoformat(raw_value.replace("Z", "+00:00")).astimezone(timezone.utc)
+    except ValueError:
+        return None
+
+
+def monotonic_check_age_seconds(started_at, now):
+    started_at_dt = parse_github_timestamp(started_at)
+    if started_at_dt is None:
+        return None
+    age_seconds = int((now - started_at_dt).total_seconds())
+    if age_seconds < 0:
+        return 0
+    return age_seconds
+
+
+def check_timing_policy(check):
+    workflow_name = str(check.get("workflow") or "")
+    check_name = str(check.get("name") or "")
+    return LONG_RUNNING_CHECK_POLICIES.get((workflow_name, check_name))
+
+
+def classify_pending_checks(checks):
+    now = datetime.now(timezone.utc)
+    long_running_checks = []
+    stalled_checks = []
+
+    for check in checks:
+        if not is_pending_check(check):
+            continue
+
+        policy = check_timing_policy(check)
+        if policy is None:
+            continue
+
+        age_seconds = monotonic_check_age_seconds(check.get("startedAt"), now)
+        if age_seconds is None:
+            continue
+
+        check_info = {
+            "name": str(check.get("name") or ""),
+            "workflow": str(check.get("workflow") or ""),
+            "started_at": str(check.get("startedAt") or ""),
+            "age_seconds": age_seconds,
+            "warn_seconds": int(policy["warn_seconds"]),
+            "stuck_seconds": int(policy["stuck_seconds"]),
+            "details_url": str(check.get("link") or ""),
+        }
+
+        if age_seconds >= int(policy["warn_seconds"]):
+            long_running_checks.append(check_info)
+        if age_seconds >= int(policy["stuck_seconds"]):
+            stalled_checks.append(check_info)
+
+    return {
+        "long_running_checks": long_running_checks,
+        "stalled_checks": stalled_checks,
     }
 
 
@@ -569,7 +645,15 @@ def is_pr_ready_to_merge(pr, checks_summary, new_review_items):
     return True
 
 
-def recommend_actions(pr, checks_summary, failed_runs, new_review_items, retries_used, max_retries):
+def recommend_actions(
+    pr,
+    checks_summary,
+    failed_runs,
+    new_review_items,
+    retries_used,
+    max_retries,
+    stalled_checks,
+):
     actions = []
     if pr["closed"] or pr["merged"]:
         if new_review_items:
@@ -583,6 +667,9 @@ def recommend_actions(pr, checks_summary, failed_runs, new_review_items, retries
 
     if new_review_items:
         actions.append("process_review_comment")
+
+    if stalled_checks:
+        actions.append("diagnose_ci_stall")
 
     has_failed_pr_checks = checks_summary["failed_count"] > 0
     if has_failed_pr_checks:
@@ -610,6 +697,9 @@ def collect_snapshot(args):
     # After resolving `--pr auto`, reuse the concrete PR number.
     checks = get_pr_checks(str(pr["number"]), repo=pr["repo"])
     checks_summary = summarize_checks(checks)
+    check_timing = classify_pending_checks(checks)
+    checks_summary["long_running_count"] = len(check_timing["long_running_checks"])
+    checks_summary["stalled_count"] = len(check_timing["stalled_checks"])
     workflow_runs = get_workflow_runs_for_sha(pr["repo"], pr["head_sha"])
     failed_runs = failed_runs_from_workflow_runs(workflow_runs, pr["head_sha"])
     authenticated_login = get_authenticated_login()
@@ -628,6 +718,7 @@ def collect_snapshot(args):
         new_review_items,
         retries_used,
         args.max_flaky_retries,
+        check_timing["stalled_checks"],
     )
 
     state["pr"] = {"repo": pr["repo"], "number": pr["number"]}
@@ -640,6 +731,8 @@ def collect_snapshot(args):
         "checks": checks_summary,
         "failed_runs": failed_runs,
         "new_review_items": new_review_items,
+        "long_running_checks": check_timing["long_running_checks"],
+        "stalled_checks": check_timing["stalled_checks"],
         "actions": actions,
         "retry_state": {
             "current_sha_retries_used": retries_used,
@@ -735,9 +828,20 @@ def snapshot_change_key(snapshot):
         int(checks.get("passed_count") or 0),
         int(checks.get("failed_count") or 0),
         int(checks.get("pending_count") or 0),
+        int(checks.get("long_running_count") or 0),
+        int(checks.get("stalled_count") or 0),
         tuple(
             (str(item.get("kind") or ""), str(item.get("id") or ""))
             for item in review_items
+            if isinstance(item, dict)
+        ),
+        tuple(
+            (
+                str(item.get("workflow") or ""),
+                str(item.get("name") or ""),
+                int(item.get("age_seconds") or 0),
+            )
+            for item in (snapshot.get("stalled_checks") or [])
             if isinstance(item, dict)
         ),
         tuple(snapshot.get("actions") or []),

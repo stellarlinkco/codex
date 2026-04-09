@@ -17,6 +17,8 @@ Treat as **likely flaky or unrelated** when evidence points to transient or exte
 - GitHub Actions infrastructure/service outages
 - Cloud/service rate limits or transient API outages
 - Non-deterministic failures in unrelated integration tests with known flake patterns
+- Checks that remain `in_progress` far beyond their workflow-specific runtime envelope
+  without new step transitions or fresh log output
 
 If uncertain, inspect failed logs once before choosing rerun.
 
@@ -28,8 +30,12 @@ If uncertain, inspect failed logs once before choosing rerun.
    - If branch-related: fix locally, commit, push.
    - If likely flaky/unrelated and all checks for the current SHA are terminal: rerun failed jobs.
    - If checks are still pending: wait.
-3. If flaky reruns for the same SHA reach the configured limit (default 3): stop and report persistent failure.
-4. Independently, process any new human review comments.
+3. If there are no failed checks but a pending check crosses the stall threshold:
+   - Diagnose it as a stuck CI run, not `idle`.
+   - Prefer fixing workflow observability/timeout gaps or retriggering on a new SHA if the
+     current run is clearly wedged and there is no actionable branch regression.
+4. If flaky reruns for the same SHA reach the configured limit (default 3): stop and report persistent failure.
+5. Independently, process any new human review comments.
 
 ## Review comment agreement criteria
 

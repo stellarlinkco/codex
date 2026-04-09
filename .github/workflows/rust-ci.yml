@@ -507,8 +507,8 @@ jobs:
             sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
           fi
 
-      - name: tests
-        id: test
+      - name: Determine test plan
+        id: test_plan
         shell: bash
         run: |
           set -euo pipefail
@@ -519,20 +519,51 @@ jobs:
           is_fork_pr="${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}"
 
           if [[ "${is_upstream_repo}" == "true" && "${is_fork_pr}" != "true" ]]; then
-            cargo nextest run --all-features --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings
+            echo "needs_prebuild=false" >> "$GITHUB_OUTPUT"
           else
-            # Some codex-core tests require workspace binaries that are not in the selected
-            # package set below. Pre-build them so `cargo_bin(...)` can find the executables.
-            cargo build --all-features --target ${{ matrix.target }} --profile ci-test --bins \
+            echo "needs_prebuild=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build required workspace binaries
+        if: steps.test_plan.outputs.needs_prebuild == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          "${GITHUB_WORKSPACE}/.github/scripts/ci-watchdog.sh" \
+            --label "rust-ci prebuild bins" \
+            --heartbeat-seconds 60 \
+            --wall-timeout-seconds 720 \
+            --log-path "${RUNNER_TEMP:-/tmp}/rust-ci-prebuild-bins.log" \
+            -- cargo build --all-features --target ${{ matrix.target }} --profile ci-test --bins \
               -p codex-exec \
               -p codex-shell-escalation \
               -p codex-linux-sandbox \
               -p codex-rmcp-client
 
-            cargo nextest run --all-features --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings \
-              -p codex-core \
-              -p codex-cli \
-              -p codex-tui
+      - name: Run nextest
+        id: test
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [[ '${{ steps.test_plan.outputs.needs_prebuild }}' == 'true' ]]; then
+            "${GITHUB_WORKSPACE}/.github/scripts/ci-watchdog.sh" \
+              --label "rust-ci selected nextest" \
+              --heartbeat-seconds 60 \
+              --wall-timeout-seconds 900 \
+              --log-path "${RUNNER_TEMP:-/tmp}/rust-ci-nextest.log" \
+              -- cargo nextest run --all-features --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings \
+                -p codex-core \
+                -p codex-cli \
+                -p codex-tui
+          else
+            "${GITHUB_WORKSPACE}/.github/scripts/ci-watchdog.sh" \
+              --label "rust-ci workspace nextest" \
+              --heartbeat-seconds 60 \
+              --wall-timeout-seconds 900 \
+              --log-path "${RUNNER_TEMP:-/tmp}/rust-ci-nextest.log" \
+              -- cargo nextest run --all-features --no-fail-fast --target ${{ matrix.target }} --cargo-profile ci-test --timings
           fi
         env:
           RUST_BACKTRACE: 1
