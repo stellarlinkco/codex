@@ -37,6 +37,7 @@ use crate::config_loader::McpServerRequirement;
 use crate::config_loader::ResidencyRequirement;
 use crate::config_loader::Sourced;
 use crate::config_loader::load_config_layers_state;
+use crate::config_loader::project_trust_key;
 use crate::features::Feature;
 use crate::features::FeatureOverrides;
 use crate::features::Features;
@@ -84,7 +85,6 @@ use codex_utils_absolute_path::AbsolutePathBufGuard;
 use schemars::JsonSchema;
 use serde::Deserialize;
 use serde::Serialize;
-use similar::DiffableStr;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashMap;
@@ -929,7 +929,7 @@ pub(crate) fn set_project_trust_level_inner(
     //
     // [projects]
     // "/path/to/project" = { trust_level = "trusted" }
-    let project_key = project_path.to_string_lossy().to_string();
+    let project_key = project_trust_key(project_path);
 
     // Ensure top-level `projects` exists as a non-inline, explicit table. If it
     // exists but was previously represented as a non-table (e.g., inline),
@@ -1564,19 +1564,34 @@ impl ConfigToml {
     /// does not contain a project corresponding to cwd or a git repo for cwd
     pub fn get_active_project(&self, resolved_cwd: &Path) -> Option<ProjectConfig> {
         let projects = self.projects.clone().unwrap_or_default();
+        let find_project_config = |lookup_key: &str| {
+            projects.get(lookup_key).cloned().or_else(|| {
+                projects.iter().find_map(|(stored_key, project_config)| {
+                    (project_trust_key(Path::new(stored_key)) == lookup_key)
+                        .then_some(project_config.clone())
+                })
+            })
+        };
 
-        if let Some(project_config) = projects.get(&resolved_cwd.to_string_lossy().to_string()) {
-            return Some(project_config.clone());
+        let resolved_cwd_key = project_trust_key(resolved_cwd);
+        let resolved_cwd_raw_key = resolved_cwd.to_string_lossy().to_string();
+        if let Some(project_config) = find_project_config(&resolved_cwd_key)
+            .or_else(|| find_project_config(&resolved_cwd_raw_key))
+        {
+            return Some(project_config);
         }
 
         // If cwd lives inside a git repo/worktree, check whether the root git project
         // (the primary repository working directory) is trusted. This lets
         // worktrees inherit trust from the main project.
-        if let Some(repo_root) = resolve_root_git_project_for_trust(resolved_cwd)
-            && let Some(project_config_for_root) =
-                projects.get(&repo_root.to_string_lossy().to_string_lossy().to_string())
-        {
-            return Some(project_config_for_root.clone());
+        if let Some(repo_root) = resolve_root_git_project_for_trust(resolved_cwd) {
+            let repo_root_key = project_trust_key(repo_root.as_path());
+            let repo_root_raw_key = repo_root.to_string_lossy().to_string();
+            if let Some(project_config_for_root) = find_project_config(&repo_root_key)
+                .or_else(|| find_project_config(&repo_root_raw_key))
+            {
+                return Some(project_config_for_root);
+            }
         }
 
         None
@@ -5828,14 +5843,17 @@ model_verbosity = "high"
 
     #[test]
     fn test_set_project_trusted_writes_explicit_tables() -> anyhow::Result<()> {
-        let project_dir = Path::new("/some/path");
+        let temp_dir = tempdir()?;
+        let project_dir = temp_dir.path().join("project");
+        std::fs::create_dir_all(&project_dir)?;
+        let noncanonical_project_dir = project_dir.join("..").join("project");
         let mut doc = DocumentMut::new();
 
-        set_project_trust_level_inner(&mut doc, project_dir, TrustLevel::Trusted)?;
+        set_project_trust_level_inner(&mut doc, &noncanonical_project_dir, TrustLevel::Trusted)?;
 
         let contents = doc.to_string();
 
-        let raw_path = project_dir.to_string_lossy();
+        let raw_path = project_trust_key(&project_dir);
         let path_str = if raw_path.contains('\\') {
             format!("'{raw_path}'")
         } else {
@@ -5847,6 +5865,35 @@ trust_level = "trusted"
 "#
         );
         assert_eq!(contents, expected);
+
+        Ok(())
+    }
+
+    #[test]
+    fn test_get_active_project_accepts_legacy_raw_project_key() -> anyhow::Result<()> {
+        let temp_dir = tempdir()?;
+        let project_dir = temp_dir.path().join("project");
+        std::fs::create_dir_all(&project_dir)?;
+
+        let canonical_project_dir = std::fs::canonicalize(&project_dir)?;
+        let legacy_project_dir = project_dir.join("..").join("project");
+
+        let config = ConfigToml {
+            projects: Some(HashMap::from([(
+                legacy_project_dir.to_string_lossy().to_string(),
+                ProjectConfig {
+                    trust_level: Some(TrustLevel::Trusted),
+                },
+            )])),
+            ..Default::default()
+        };
+
+        assert_eq!(
+            config.get_active_project(&canonical_project_dir),
+            Some(ProjectConfig {
+                trust_level: Some(TrustLevel::Trusted),
+            })
+        );
 
         Ok(())
     }
