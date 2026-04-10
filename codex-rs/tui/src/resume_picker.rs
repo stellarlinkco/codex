@@ -1670,6 +1670,53 @@ mod tests {
         assert_snapshot!("resume_picker_search_error", snapshot);
     }
 
+    #[test]
+    fn empty_state_shows_initial_loading_message_before_any_sessions_load() {
+        let loader: PageLoader = Arc::new(|_| {});
+        let mut state = PickerState::new(
+            PathBuf::from("/tmp"),
+            FrameRequester::test_dummy(),
+            loader,
+            String::from("openai"),
+            true,
+            None,
+            SessionPickerAction::Resume,
+        );
+        state.pagination.loading = LoadingState::Pending(PendingLoad {
+            request_token: 1,
+            search_token: None,
+        });
+
+        assert_eq!(
+            render_empty_state_line(&state).to_string(),
+            "Loading sessions…"
+        );
+    }
+
+    #[test]
+    fn empty_state_shows_older_loading_message_after_initial_scan() {
+        let loader: PageLoader = Arc::new(|_| {});
+        let mut state = PickerState::new(
+            PathBuf::from("/tmp"),
+            FrameRequester::test_dummy(),
+            loader,
+            String::from("openai"),
+            true,
+            None,
+            SessionPickerAction::Resume,
+        );
+        state.pagination.num_scanned_files = 5;
+        state.pagination.loading = LoadingState::Pending(PendingLoad {
+            request_token: 2,
+            search_token: None,
+        });
+
+        assert_eq!(
+            render_empty_state_line(&state).to_string(),
+            "Loading older sessions…"
+        );
+    }
+
     // TODO(jif) fix
     // #[tokio::test]
     // async fn resume_picker_screen_snapshot() {
