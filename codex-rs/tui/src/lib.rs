@@ -1064,16 +1064,39 @@ fn restore() {
 
 struct TerminalRestoreGuard {
     active: bool,
+    #[cfg(test)]
+    restore_fn: Option<Box<dyn FnMut() -> color_eyre::Result<()> + Send>>,
 }
 
 impl TerminalRestoreGuard {
     fn new() -> Self {
-        Self { active: true }
+        Self {
+            active: true,
+            #[cfg(test)]
+            restore_fn: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_for_test<F>(restore_fn: F) -> Self
+    where
+        F: FnMut() -> color_eyre::Result<()> + Send + 'static,
+    {
+        Self {
+            active: true,
+            restore_fn: Some(Box::new(restore_fn)),
+        }
     }
 
     #[cfg_attr(debug_assertions, allow(dead_code))]
     fn restore(&mut self) -> color_eyre::Result<()> {
         if self.active {
+            #[cfg(test)]
+            if let Some(restore_fn) = self.restore_fn.as_mut() {
+                restore_fn()?;
+                self.active = false;
+                return Ok(());
+            }
             crate::tui::restore()?;
             self.active = false;
         }
@@ -1082,6 +1105,12 @@ impl TerminalRestoreGuard {
 
     fn restore_silently(&mut self) {
         if self.active {
+            #[cfg(test)]
+            if let Some(restore_fn) = self.restore_fn.as_mut() {
+                let _ = restore_fn();
+                self.active = false;
+                return;
+            }
             restore();
             self.active = false;
         }
@@ -1224,6 +1253,9 @@ mod tests {
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::TurnContextItem;
     use serial_test::serial;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use tempfile::TempDir;
 
     async fn build_config(temp_dir: &TempDir) -> std::io::Result<Config> {
@@ -1578,5 +1610,54 @@ trust_level = "untrusted"
             .expect("expected cwd");
         assert_eq!(cwd, sqlite_cwd);
         Ok(())
+    }
+
+    #[test]
+    fn terminal_restore_guard_restores_once_on_drop() {
+        let restore_calls = Arc::new(AtomicUsize::new(0));
+        {
+            let restore_calls = Arc::clone(&restore_calls);
+            let _guard = TerminalRestoreGuard::new_for_test(move || {
+                restore_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+        }
+
+        assert_eq!(restore_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn terminal_restore_guard_manual_restore_disables_drop_restore() {
+        let restore_calls = Arc::new(AtomicUsize::new(0));
+        let mut guard = {
+            let restore_calls = Arc::clone(&restore_calls);
+            TerminalRestoreGuard::new_for_test(move || {
+                restore_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        };
+
+        guard.restore().expect("manual restore should succeed");
+        drop(guard);
+
+        assert_eq!(restore_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn terminal_restore_guard_silent_restore_is_idempotent() {
+        let restore_calls = Arc::new(AtomicUsize::new(0));
+        let mut guard = {
+            let restore_calls = Arc::clone(&restore_calls);
+            TerminalRestoreGuard::new_for_test(move || {
+                restore_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        };
+
+        guard.restore_silently();
+        guard.restore_silently();
+        drop(guard);
+
+        assert_eq!(restore_calls.load(Ordering::SeqCst), 1);
     }
 }
