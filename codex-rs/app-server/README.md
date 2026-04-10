@@ -486,7 +486,7 @@ Invoke an app by including `$<app-slug>` in the text input and adding a `mention
 
 ### Example: Start a turn (invoke a plugin)
 
-Invoke a plugin by including a UI mention token such as `@sample` in the text input and adding a `mention` input item with the exact `plugin://<plugin-name>@<marketplace-name>` path returned by `plugin/list`.
+Invoke a plugin by including a UI mention token such as `@sample` in the text input and adding a `mention` input item with the exact `plugin://<plugin-name>@<marketplace-name>` path returned by `plugin/list`. When present, `plugin/list` also returns `marketplaces[].interface.displayName` so clients can show a human-friendly marketplace label from `marketplace.json`.
 
 ```json
 { "method": "turn/start", "id": 35, "params": {
