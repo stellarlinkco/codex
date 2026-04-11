@@ -1563,7 +1563,7 @@ impl ConfigToml {
     /// Resolves the cwd to an existing project, or returns None if ConfigToml
     /// does not contain a project corresponding to cwd or a git repo for cwd
     pub fn get_active_project(&self, resolved_cwd: &Path) -> Option<ProjectConfig> {
-        let projects = self.projects.clone().unwrap_or_default();
+        let projects = self.projects.as_ref()?;
         let find_project_config = |lookup_key: &str| {
             projects.get(lookup_key).cloned().or_else(|| {
                 projects.iter().find_map(|(stored_key, project_config)| {

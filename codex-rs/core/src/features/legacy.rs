@@ -1,5 +1,8 @@
 use super::Feature;
 use super::Features;
+use std::collections::BTreeSet;
+use std::sync::LazyLock;
+use std::sync::Mutex;
 use tracing::info;
 
 #[derive(Clone, Copy)]
@@ -41,7 +44,14 @@ const ALIASES: &[Alias] = &[
         legacy_key: "memory_tool",
         feature: Feature::MemoryTool,
     },
+    Alias {
+        legacy_key: "guardian_approval",
+        feature: Feature::RequestPermissions,
+    },
 ];
+
+static REPORTED_LEGACY_ALIASES: LazyLock<Mutex<BTreeSet<&'static str>>> =
+    LazyLock::new(|| Mutex::new(BTreeSet::new()));
 
 pub(crate) fn legacy_feature_keys() -> impl Iterator<Item = &'static str> {
     ALIASES.iter().map(|alias| alias.legacy_key)
@@ -108,9 +118,15 @@ fn set_feature(features: &mut Features, feature: Feature, enabled: bool) {
     }
 }
 
-fn log_alias(alias: &str, feature: Feature) {
+fn log_alias(alias: &'static str, feature: Feature) {
     let canonical = feature.key();
     if alias == canonical {
+        return;
+    }
+    let Ok(mut reported_aliases) = REPORTED_LEGACY_ALIASES.lock() else {
+        return;
+    };
+    if !reported_aliases.insert(alias) {
         return;
     }
     info!(

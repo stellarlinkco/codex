@@ -186,7 +186,7 @@ where
         let cursor_pos = backend.get_cursor_position().unwrap_or_else(|err| {
             // Some PTYs do not answer CPR (`ESC[6n`); continue with a safe default instead
             // of failing TUI startup.
-            tracing::warn!("failed to read initial cursor position; defaulting to origin: {err}");
+            tracing::debug!("failed to read initial cursor position; defaulting to origin: {err}");
             Position { x: 0, y: 0 }
         });
         Ok(Self {

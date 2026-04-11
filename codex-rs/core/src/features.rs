@@ -922,4 +922,12 @@ mod tests {
         assert_eq!(feature_for_key("multi_agent"), Some(Feature::Collab));
         assert_eq!(feature_for_key("collab"), Some(Feature::Collab));
     }
+
+    #[test]
+    fn guardian_approval_is_legacy_alias_for_request_permissions() {
+        assert_eq!(
+            feature_for_key("guardian_approval"),
+            Some(Feature::RequestPermissions)
+        );
+    }
 }

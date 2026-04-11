@@ -14,6 +14,7 @@ use codex_app_server_protocol::ThreadStartedNotification;
 use codex_app_server_protocol::ThreadStatus;
 use codex_app_server_protocol::ThreadStatusChangedNotification;
 use codex_core::config::set_project_trust_level;
+use codex_core::config_loader::project_trust_key;
 use codex_core::git_info::resolve_root_git_project_for_trust;
 use codex_protocol::config_types::ServiceTier;
 use codex_protocol::config_types::TrustLevel;
@@ -378,7 +379,7 @@ model_reasoning_effort = "high"
     let config_toml = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
     let trusted_root = resolve_root_git_project_for_trust(workspace.path())
         .unwrap_or_else(|| workspace.path().to_path_buf());
-    assert!(config_toml.contains(&persisted_trust_path(&trusted_root)));
+    assert!(config_toml.contains(&project_trust_key(&trusted_root)));
     assert!(config_toml.contains("trust_level = \"trusted\""));
 
     Ok(())
@@ -415,8 +416,8 @@ async fn thread_start_with_nested_git_cwd_trusts_repo_root() -> Result<()> {
     let config_toml = std::fs::read_to_string(codex_home.path().join("config.toml"))?;
     let trusted_root =
         resolve_root_git_project_for_trust(&nested).expect("git root should resolve");
-    assert!(config_toml.contains(&persisted_trust_path(&trusted_root)));
-    assert!(!config_toml.contains(&persisted_trust_path(&nested)));
+    assert!(config_toml.contains(&project_trust_key(&trusted_root)));
+    assert!(!config_toml.contains(&project_trust_key(&nested)));
 
     Ok(())
 }
@@ -560,21 +561,6 @@ fn create_config_toml_without_approval_policy(
     server_uri: &str,
 ) -> std::io::Result<()> {
     create_config_toml_with_optional_approval_policy(codex_home, server_uri, None)
-}
-
-fn persisted_trust_path(project_path: &Path) -> String {
-    let project_path =
-        std::fs::canonicalize(project_path).unwrap_or_else(|_| project_path.to_path_buf());
-    let project_path = project_path.display().to_string();
-
-    if let Some(project_path) = project_path.strip_prefix(r"\\?\UNC\") {
-        return format!(r"\\{project_path}");
-    }
-
-    project_path
-        .strip_prefix(r"\\?\")
-        .unwrap_or(&project_path)
-        .to_string()
 }
 
 fn create_config_toml_with_optional_approval_policy(
