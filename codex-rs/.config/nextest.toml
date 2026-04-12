@@ -1,11 +1,21 @@
 [profile.default]
 # Do not increase, fix your test instead
 slow-timeout = { period = "15s", terminate-after = 2 }
+test-threads = 2
 
 [test-groups.app_server_protocol_codegen]
 max-threads = 1
 
+[test-groups.app_server_protocol_lib]
+max-threads = 1
+
 [test-groups.app_server_integration]
+max-threads = 1
+
+[test-groups.app_server_lib]
+max-threads = 1
+
+[test-groups.apply_patch_integration]
 max-threads = 1
 
 
@@ -23,7 +33,19 @@ filter = 'package(codex-app-server-protocol) & (test(typescript_schema_fixtures_
 test-group = 'app_server_protocol_codegen'
 
 [[profile.default.overrides]]
+filter = 'package(codex-app-server-protocol) & kind(lib)'
+test-group = 'app_server_protocol_lib'
+
+[[profile.default.overrides]]
 # These integration tests spawn a fresh app-server subprocess per case.
-# Keep the library unit tests parallel.
+# Run them serially, separate from the app-server lib tests.
 filter = 'package(codex-app-server) & kind(test)'
 test-group = 'app_server_integration'
+
+[[profile.default.overrides]]
+filter = 'package(codex-app-server) & kind(lib)'
+test-group = 'app_server_lib'
+
+[[profile.default.overrides]]
+filter = 'package(codex-apply-patch) & kind(test)'
+test-group = 'apply_patch_integration'

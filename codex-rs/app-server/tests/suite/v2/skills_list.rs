@@ -3,10 +3,10 @@ use std::time::Duration;
 use anyhow::Context;
 use anyhow::Result;
 use app_test_support::McpProcess;
+use app_test_support::create_mock_responses_server_sequence_unchecked;
 use app_test_support::to_response;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
-use codex_app_server_protocol::SkillsChangedNotification;
 use codex_app_server_protocol::SkillsListExtraRootsForCwd;
 use codex_app_server_protocol::SkillsListParams;
 use codex_app_server_protocol::SkillsListResponse;
@@ -15,9 +15,9 @@ use pretty_assertions::assert_eq;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
-const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
-const WATCHER_TIMEOUT: Duration = Duration::from_secs(20);
+use super::connection_handling_websocket::create_config_toml;
 
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 fn write_skill(root: &TempDir, name: &str) -> Result<()> {
     let skill_dir = root.path().join("skills").join(name);
     std::fs::create_dir_all(&skill_dir)?;
@@ -220,9 +220,12 @@ async fn skills_list_uses_cached_result_until_force_reload() -> Result<()> {
 }
 
 #[tokio::test]
-async fn skills_changed_notification_is_emitted_after_skill_change() -> Result<()> {
+async fn skills_list_force_reload_observes_skill_change_after_thread_start() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
+    let cwd = TempDir::new()?;
     write_skill(&codex_home, "demo")?;
+    create_config_toml(codex_home.path(), &server.uri(), "never")?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
     timeout(DEFAULT_TIMEOUT, mcp.initialize()).await??;
@@ -250,28 +253,45 @@ async fn skills_changed_notification_is_emitted_after_skill_change() -> Result<(
         DEFAULT_TIMEOUT,
         mcp.read_stream_until_response_message(RequestId::Integer(thread_start_request_id)),
     )
-    .await??;
-
-    let skill_path = codex_home
-        .path()
-        .join("skills")
-        .join("demo")
-        .join("SKILL.md");
-    std::fs::write(
-        &skill_path,
-        "---\nname: demo\ndescription: updated\n---\n\n# Updated\n",
-    )?;
-
-    let notification = timeout(
-        WATCHER_TIMEOUT,
-        mcp.read_stream_until_notification_message("skills/changed"),
+    .await
+    .context("wait for thread/start response")??;
+    timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_notification_message("thread/started"),
     )
-    .await??;
-    let params = notification
-        .params
-        .context("skills/changed params must be present")?;
-    let notification: SkillsChangedNotification = serde_json::from_value(params)?;
+    .await
+    .context("wait for thread/started notification")??;
+    timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_notification_message("codex/event/mcp_startup_complete"),
+    )
+    .await
+    .context("wait for codex/event/mcp_startup_complete notification")??;
 
-    assert_eq!(notification, SkillsChangedNotification {});
+    write_skill(&codex_home, "demo-added")?;
+
+    let skills_list_request_id = mcp
+        .send_skills_list_request(SkillsListParams {
+            cwds: vec![cwd.path().to_path_buf()],
+            force_reload: true,
+            per_cwd_extra_user_roots: None,
+        })
+        .await?;
+    let response: JSONRPCResponse = timeout(
+        DEFAULT_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(skills_list_request_id)),
+    )
+    .await
+    .context("wait for skills/list response after skill change")??;
+    let SkillsListResponse { data } = to_response(response)?;
+    assert_eq!(data.len(), 1);
+    assert_eq!(data[0].cwd, cwd.path().to_path_buf());
+    assert!(data[0].skills.iter().any(|skill| skill.name == "demo"));
+    assert!(
+        data[0]
+            .skills
+            .iter()
+            .any(|skill| skill.name == "demo-added")
+    );
     Ok(())
 }
