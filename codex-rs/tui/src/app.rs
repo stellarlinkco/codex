@@ -2024,8 +2024,13 @@ impl App {
                     }
                     AppRunControl::Continue
                 }
-                Some(event) = tui_events.next() => {
-                    app.handle_tui_event(tui, event).await?
+                event = tui_events.next() => {
+                    if let Some(event) = event {
+                        app.handle_tui_event(tui, event).await?
+                    } else {
+                        tracing::warn!("terminal input stream closed; shutting down active thread");
+                        app.handle_exit_mode(ExitMode::ShutdownFirst)
+                    }
                 }
                 // Listen on new thread creation due to collab tools.
                 created = thread_created_rx.recv(), if listen_for_threads => {
