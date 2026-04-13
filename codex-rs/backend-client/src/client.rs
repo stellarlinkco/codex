@@ -472,6 +472,7 @@ impl Client {
             crate::types::PlanType::Go => AccountPlanType::Go,
             crate::types::PlanType::Plus => AccountPlanType::Plus,
             crate::types::PlanType::Pro => AccountPlanType::Pro,
+            crate::types::PlanType::ProLite => AccountPlanType::ProLite,
             crate::types::PlanType::Team => AccountPlanType::Team,
             crate::types::PlanType::Business => AccountPlanType::Business,
             crate::types::PlanType::Enterprise => AccountPlanType::Enterprise,
@@ -479,7 +480,8 @@ impl Client {
             crate::types::PlanType::Guest
             | crate::types::PlanType::FreeWorkspace
             | crate::types::PlanType::Quorum
-            | crate::types::PlanType::K12 => AccountPlanType::Unknown,
+            | crate::types::PlanType::K12
+            | crate::types::PlanType::Unknown => AccountPlanType::Unknown,
         }
     }
 
@@ -592,6 +594,20 @@ mod tests {
         assert_eq!(snapshots[0].primary, None);
         assert_eq!(snapshots[1].limit_id.as_deref(), Some("codex_other"));
         assert_eq!(snapshots[1].limit_name.as_deref(), Some("codex_other"));
+    }
+
+    #[test]
+    fn usage_payload_maps_prolite_plan_type() {
+        let payload = RateLimitStatusPayload {
+            plan_type: crate::types::PlanType::ProLite,
+            rate_limit: None,
+            additional_rate_limits: None,
+            credits: None,
+        };
+
+        let snapshots = Client::rate_limit_snapshots_from_payload(payload);
+        assert_eq!(snapshots.len(), 1);
+        assert_eq!(snapshots[0].plan_type, Some(AccountPlanType::ProLite));
     }
 
     #[test]

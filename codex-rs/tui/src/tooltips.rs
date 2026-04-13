@@ -64,7 +64,8 @@ pub(crate) fn get_tooltip(plan: Option<PlanType>, fast_mode_enabled: bool) -> Op
             | Some(PlanType::Business)
             | Some(PlanType::Team)
             | Some(PlanType::Enterprise)
-            | Some(PlanType::Pro) => {
+            | Some(PlanType::Pro)
+            | Some(PlanType::ProLite) => {
                 return Some(pick_paid_tooltip(&mut rng, fast_mode_enabled).to_string());
             }
             Some(PlanType::Go) | Some(PlanType::Free) => {

@@ -274,6 +274,7 @@ impl CodexAuth {
             InternalKnownPlan::Go => AccountPlanType::Go,
             InternalKnownPlan::Plus => AccountPlanType::Plus,
             InternalKnownPlan::Pro => AccountPlanType::Pro,
+            InternalKnownPlan::ProLite => AccountPlanType::ProLite,
             InternalKnownPlan::Team => AccountPlanType::Team,
             InternalKnownPlan::Business => AccountPlanType::Business,
             InternalKnownPlan::Enterprise => AccountPlanType::Enterprise,
@@ -1747,6 +1748,26 @@ mod tests {
             .expect("auth available");
 
         pretty_assertions::assert_eq!(auth.account_plan_type(), Some(AccountPlanType::Pro));
+    }
+
+    #[test]
+    fn plan_type_maps_prolite_plan() {
+        let codex_home = tempdir().unwrap();
+        let _jwt = write_auth_file(
+            AuthFileParams {
+                openai_api_key: None,
+                chatgpt_plan_type: Some("prolite".to_string()),
+                chatgpt_account_id: None,
+            },
+            codex_home.path(),
+        )
+        .expect("failed to write auth file");
+
+        let auth = super::load_auth(codex_home.path(), false, AuthCredentialsStoreMode::File)
+            .expect("load auth")
+            .expect("auth available");
+
+        pretty_assertions::assert_eq!(auth.account_plan_type(), Some(AccountPlanType::ProLite));
     }
 
     #[test]
