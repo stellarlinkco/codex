@@ -215,6 +215,9 @@ impl FromArgMatches for ResumeArgs {
 }
 
 #[derive(Parser, Debug)]
+#[command(
+    override_usage = "codex review [OPTIONS] --uncommitted\n       codex review [OPTIONS] --base <BRANCH>\n       codex review [OPTIONS] --commit <SHA> [--title <TITLE>]\n       codex review [OPTIONS] [INSTRUCTIONS]"
+)]
 pub struct ReviewArgs {
     /// Review staged, unstaged, and untracked changes.
     #[arg(
@@ -244,8 +247,8 @@ pub struct ReviewArgs {
     #[arg(long = "title", value_name = "TITLE", requires = "commit")]
     pub commit_title: Option<String>,
 
-    /// Custom review instructions. If `-` is used, read from stdin.
-    #[arg(value_name = "PROMPT", value_hint = clap::ValueHint::Other)]
+    /// Custom review instructions when no review target flag is provided. If `-` is used, read from stdin.
+    #[arg(value_name = "INSTRUCTIONS", value_hint = clap::ValueHint::Other)]
     pub prompt: Option<String>,
 }
 
@@ -261,6 +264,7 @@ pub enum Color {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
     use pretty_assertions::assert_eq;
 
     #[test]
@@ -314,5 +318,28 @@ mod tests {
         };
         assert_eq!(args.session_id.as_deref(), Some("session-123"));
         assert_eq!(args.prompt.as_deref(), Some(PROMPT));
+    }
+
+    #[test]
+    fn review_help_describes_target_specific_usage() {
+        let mut cmd = ReviewArgs::command();
+        let help = cmd.render_long_help().to_string();
+
+        assert!(help.contains("codex review [OPTIONS] --commit <SHA> [--title <TITLE>]"));
+        assert!(help.contains("[INSTRUCTIONS]"));
+        assert!(help.contains("when no review target flag is provided"));
+    }
+
+    #[test]
+    fn review_rejects_commit_with_custom_instructions() {
+        let err = ReviewArgs::try_parse_from([
+            "review",
+            "--commit",
+            "HEAD~1",
+            "only report blocking findings",
+        ])
+        .expect_err("commit review should reject positional custom instructions");
+
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
     }
 }
