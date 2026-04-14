@@ -1,4 +1,4 @@
-OUT ?= /Users/chenwenjie/bin/codex
+OUT ?= $(HOME)/bin/codex
 
 .PHONY: write-serve-web-assets
 write-serve-web-assets:
