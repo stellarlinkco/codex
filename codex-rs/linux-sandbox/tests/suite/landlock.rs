@@ -469,6 +469,61 @@ async fn sandbox_blocks_git_and_codex_writes_inside_writable_root() {
 }
 
 #[tokio::test]
+async fn sandbox_keeps_git_readable_but_blocks_git_writes_inside_writable_root() {
+    if should_skip_bwrap_tests().await {
+        eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");
+        return;
+    }
+
+    let tmpdir = tempfile::tempdir().expect("tempdir");
+    let dot_git = tmpdir.path().join(".git");
+    std::fs::create_dir_all(&dot_git).expect("create .git");
+
+    let git_target = dot_git.join("config");
+    let git_contents = "[core]\nrepositoryformatversion = 0\n";
+    std::fs::write(&git_target, git_contents).expect("write .git/config");
+
+    let git_output = run_cmd_result_with_writable_roots(
+        &[
+            "bash",
+            "-lc",
+            &format!("cat {}", git_target.to_string_lossy()),
+        ],
+        &[tmpdir.path().to_path_buf()],
+        LONG_TIMEOUT_MS,
+        true,
+        true,
+    )
+    .await
+    .expect("sandboxed command should execute");
+
+    assert_eq!(git_output.exit_code, 0);
+    assert_eq!(git_output.stdout.text, git_contents);
+
+    let denied_output = expect_denied(
+        run_cmd_result_with_writable_roots(
+            &[
+                "bash",
+                "-lc",
+                &format!("printf denied > {}", git_target.to_string_lossy()),
+            ],
+            &[tmpdir.path().to_path_buf()],
+            LONG_TIMEOUT_MS,
+            true,
+            true,
+        )
+        .await,
+        ".git write should stay denied after read validation",
+    );
+
+    assert_ne!(denied_output.exit_code, 0);
+    assert_eq!(
+        std::fs::read_to_string(&git_target).expect("read host .git/config"),
+        git_contents
+    );
+}
+
+#[tokio::test]
 async fn sandbox_blocks_codex_symlink_replacement_attack() {
     if should_skip_bwrap_tests().await {
         eprintln!("skipping bwrap test: bwrap sandbox prerequisites are unavailable");

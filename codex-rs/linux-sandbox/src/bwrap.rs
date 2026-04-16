@@ -192,8 +192,17 @@ fn create_filesystem_args(
     file_system_sandbox_policy: &FileSystemSandboxPolicy,
     cwd: &Path,
 ) -> Result<BwrapArgs> {
-    let writable_roots = file_system_sandbox_policy.get_writable_roots_with_cwd(cwd);
+    let mut writable_roots = file_system_sandbox_policy.get_writable_roots_with_cwd(cwd);
     let unreadable_roots = file_system_sandbox_policy.get_unreadable_roots_with_cwd(cwd);
+    writable_roots = prune_nested_tmp_writable_roots(writable_roots);
+    writable_roots.sort_by(|left, right| {
+        left.root
+            .as_path()
+            .components()
+            .count()
+            .cmp(&right.root.as_path().components().count())
+            .then_with(|| left.root.as_path().cmp(right.root.as_path()))
+    });
     ensure_mount_targets_exist(&writable_roots)?;
 
     let mut args = if file_system_sandbox_policy.has_full_disk_read_access() {
@@ -261,9 +270,11 @@ fn create_filesystem_args(
 
     for writable_root in &writable_roots {
         let root = writable_root.root.as_path();
-        args.push("--bind".to_string());
+        let root_file = File::open(root)?;
+        args.push("--bind-fd".to_string());
+        args.push(root_file.as_raw_fd().to_string());
         args.push(path_to_string(root));
-        args.push(path_to_string(root));
+        preserved_files.push(root_file);
     }
 
     // Re-apply read-only subpaths after the writable binds so they win.
@@ -295,9 +306,14 @@ fn create_filesystem_args(
         }
 
         if is_within_allowed_write_paths(&subpath, &allowed_write_paths) {
-            args.push("--ro-bind".to_string());
+            // Bind by fd rather than by path so protected subpaths under
+            // Docker/Desktop bind mounts remain readable after the writable
+            // parent root has been rebound into the sandbox.
+            let subpath_file = File::open(&subpath)?;
+            args.push("--ro-bind-fd".to_string());
+            args.push(subpath_file.as_raw_fd().to_string());
             args.push(path_to_string(&subpath));
-            args.push(path_to_string(&subpath));
+            preserved_files.push(subpath_file);
         }
     }
 
@@ -339,6 +355,25 @@ fn create_filesystem_args(
         args,
         preserved_files,
     })
+}
+
+fn prune_nested_tmp_writable_roots(writable_roots: Vec<WritableRoot>) -> Vec<WritableRoot> {
+    let has_nested_tmp_child = writable_roots.iter().any(|candidate| {
+        let candidate_path = candidate.root.as_path();
+        candidate_path != Path::new("/tmp") && candidate_path.starts_with(Path::new("/tmp"))
+    });
+
+    writable_roots
+        .into_iter()
+        .filter(|candidate| {
+            let candidate_path = candidate.root.as_path();
+            if candidate_path != Path::new("/tmp") {
+                return true;
+            }
+
+            !has_nested_tmp_child || !candidate.read_only_subpaths.is_empty()
+        })
+        .collect()
 }
 
 /// Collect unique read-only subpaths across all writable roots.
@@ -530,20 +565,25 @@ mod tests {
         )
         .expect("bwrap fs args");
         assert_eq!(
-            args.args,
-            vec![
+            args.args[0..5],
+            [
                 "--ro-bind".to_string(),
                 "/".to_string(),
                 "/".to_string(),
                 "--dev".to_string(),
                 "/dev".to_string(),
-                "--bind".to_string(),
-                "/".to_string(),
-                "/".to_string(),
-                "--bind".to_string(),
-                "/dev".to_string(),
-                "/dev".to_string(),
             ]
+        );
+        assert_eq!(args.preserved_files.len(), 3);
+        assert!(
+            args.args
+                .windows(3)
+                .any(|window| { window[0] == "--bind-fd" && window[2] == "/" })
+        );
+        assert!(
+            args.args
+                .windows(3)
+                .any(|window| { window[0] == "--bind-fd" && window[2] == "/dev" })
         );
     }
 
@@ -639,18 +679,120 @@ mod tests {
         let writable_root_str = path_to_string(writable_root.as_path());
         let blocked_str = path_to_string(blocked.as_path());
 
-        assert!(args.args.windows(3).any(|window| {
-            window
-                == [
-                    "--bind",
-                    writable_root_str.as_str(),
-                    writable_root_str.as_str(),
-                ]
-        }));
+        assert_eq!(args.preserved_files.len(), 1);
+        assert!(
+            args.args
+                .windows(3)
+                .any(|window| { window[0] == "--bind-fd" && window[2] == writable_root_str })
+        );
         assert!(
             args.args.windows(3).any(|window| {
                 window == ["--ro-bind", blocked_str.as_str(), blocked_str.as_str()]
             })
+        );
+    }
+
+    #[test]
+    fn nested_writable_roots_bind_parents_before_children() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let parent = temp_dir.path().join("parent");
+        let child = parent.join("child");
+        std::fs::create_dir_all(&child).expect("create nested roots");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: AbsolutePathBuf::try_from(child.as_path()).expect("absolute child"),
+                },
+                access: FileSystemAccessMode::Write,
+            },
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: AbsolutePathBuf::try_from(parent.as_path()).expect("absolute parent"),
+                },
+                access: FileSystemAccessMode::Write,
+            },
+        ]);
+
+        let args = create_filesystem_args(&policy, temp_dir.path()).expect("filesystem args");
+        let parent_str = path_to_string(parent.as_path());
+        let child_str = path_to_string(child.as_path());
+        let bind_mounts: Vec<&[String]> = args
+            .args
+            .windows(3)
+            .filter(|window| window[0] == "--bind-fd")
+            .collect();
+
+        assert_eq!(bind_mounts.len(), 2);
+        assert_eq!(bind_mounts[0][2], parent_str);
+        assert_eq!(bind_mounts[1][2], child_str);
+    }
+
+    #[test]
+    fn nested_tmp_parent_is_pruned_when_child_workspace_exists() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let tmp_root = AbsolutePathBuf::try_from(Path::new("/tmp")).expect("absolute /tmp");
+        let workspace = temp_dir.path().join("workspace");
+        std::fs::create_dir_all(&workspace).expect("create workspace");
+        let workspace = AbsolutePathBuf::try_from(workspace.as_path()).expect("absolute workspace");
+
+        let pruned = prune_nested_tmp_writable_roots(vec![
+            WritableRoot {
+                root: tmp_root,
+                read_only_subpaths: Vec::new(),
+            },
+            WritableRoot {
+                root: workspace.clone(),
+                read_only_subpaths: Vec::new(),
+            },
+        ]);
+
+        assert_eq!(pruned.len(), 1);
+        assert_eq!(pruned[0].root, workspace);
+    }
+
+    #[test]
+    fn writable_root_read_only_subpaths_use_fd_binds() {
+        let temp_dir = TempDir::new().expect("temp dir");
+        let workspace = temp_dir.path().join("workspace");
+        std::fs::create_dir_all(workspace.join(".git")).expect("create .git");
+        std::fs::create_dir_all(workspace.join(".codex")).expect("create .codex");
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![
+                AbsolutePathBuf::try_from(workspace.as_path()).expect("absolute workspace"),
+            ],
+            read_only_access: Default::default(),
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+
+        let args = create_filesystem_args(&FileSystemSandboxPolicy::from(&policy), temp_dir.path())
+            .expect("filesystem args");
+        let dot_codex = path_to_string(workspace.join(".codex").as_path());
+        let dot_git = path_to_string(workspace.join(".git").as_path());
+
+        assert_eq!(args.preserved_files.len(), 3);
+        assert!(
+            args.args
+                .windows(3)
+                .any(|window| { window[0] == "--ro-bind-fd" && window[2] == dot_codex })
+        );
+        assert!(
+            args.args
+                .windows(3)
+                .any(|window| { window[0] == "--ro-bind-fd" && window[2] == dot_git })
+        );
+        assert!(
+            !args
+                .args
+                .windows(3)
+                .any(|window| { window == ["--ro-bind", dot_codex.as_str(), dot_codex.as_str()] })
+        );
+        assert!(
+            !args
+                .args
+                .windows(3)
+                .any(|window| { window == ["--ro-bind", dot_git.as_str(), dot_git.as_str()] })
         );
     }
 
