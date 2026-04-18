@@ -2,6 +2,7 @@ use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use app_test_support::create_mock_responses_server_sequence_unchecked;
+use app_test_support::to_response;
 use codex_app_server_protocol::ClientInfo;
 use codex_app_server_protocol::InitializeParams;
 use codex_app_server_protocol::JSONRPCError;
@@ -10,6 +11,10 @@ use codex_app_server_protocol::JSONRPCNotification;
 use codex_app_server_protocol::JSONRPCRequest;
 use codex_app_server_protocol::JSONRPCResponse;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::ThreadLoadedListParams;
+use codex_app_server_protocol::ThreadLoadedListResponse;
+use codex_app_server_protocol::ThreadStartParams;
+use codex_app_server_protocol::ThreadStartResponse;
 use futures::SinkExt;
 use futures::StreamExt;
 use reqwest::StatusCode;
@@ -100,6 +105,38 @@ async fn websocket_transport_serves_health_endpoints_on_same_listener() -> Resul
     send_initialize_request(&mut ws, 1, "ws_health_client").await?;
     let init = read_response_for_id(&mut ws, 1).await?;
     assert_eq!(init.id, RequestId::Integer(1));
+
+    process
+        .kill()
+        .await
+        .context("failed to stop websocket app-server process")?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn websocket_disconnect_unloads_last_subscribed_thread() -> Result<()> {
+    let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri(), "never")?;
+
+    let bind_addr = reserve_local_addr()?;
+    let mut process = spawn_websocket_server(codex_home.path(), bind_addr).await?;
+
+    let mut ws1 = connect_websocket(bind_addr).await?;
+    send_initialize_request(&mut ws1, 1, "ws_thread_owner").await?;
+    read_response_for_id(&mut ws1, 1).await?;
+
+    let thread_id = start_thread(&mut ws1, 2).await?;
+    assert_loaded_threads(&mut ws1, 3, &[thread_id.as_str()]).await?;
+
+    ws1.close(None).await.context("failed to close websocket")?;
+    drop(ws1);
+
+    let mut ws2 = connect_websocket(bind_addr).await?;
+    send_initialize_request(&mut ws2, 4, "ws_reconnect_client").await?;
+    read_response_for_id(&mut ws2, 4).await?;
+
+    wait_for_loaded_threads(&mut ws2, 5, &[]).await?;
 
     process
         .kill()
@@ -206,6 +243,78 @@ pub(super) async fn send_initialize_request(
         Some(serde_json::to_value(params)?),
     )
     .await
+}
+
+async fn start_thread(stream: &mut WsClient, id: i64) -> Result<String> {
+    send_request(
+        stream,
+        "thread/start",
+        id,
+        Some(serde_json::to_value(ThreadStartParams {
+            model: Some("mock-model".to_string()),
+            ..Default::default()
+        })?),
+    )
+    .await?;
+    let response = read_response_for_id(stream, id).await?;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(response)?;
+    Ok(thread.id)
+}
+
+async fn assert_loaded_threads(stream: &mut WsClient, id: i64, expected: &[&str]) -> Result<()> {
+    let response = request_loaded_threads(stream, id).await?;
+    let mut actual = response.data;
+    actual.sort();
+    let mut expected = expected
+        .iter()
+        .map(|thread_id| (*thread_id).to_string())
+        .collect::<Vec<_>>();
+    expected.sort();
+    assert_eq!(actual, expected);
+    assert_eq!(response.next_cursor, None);
+    Ok(())
+}
+
+async fn wait_for_loaded_threads(
+    stream: &mut WsClient,
+    first_id: i64,
+    expected: &[&str],
+) -> Result<()> {
+    let mut next_id = first_id;
+    let expected = expected
+        .iter()
+        .map(|thread_id| (*thread_id).to_string())
+        .collect::<Vec<_>>();
+    timeout(DEFAULT_READ_TIMEOUT, async {
+        loop {
+            let response = request_loaded_threads(stream, next_id).await?;
+            next_id += 1;
+            let mut actual = response.data;
+            actual.sort();
+            if actual == expected {
+                return Ok::<(), anyhow::Error>(());
+            }
+            sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .context("timed out waiting for loaded thread list")??;
+    Ok(())
+}
+
+async fn request_loaded_threads(
+    stream: &mut WsClient,
+    id: i64,
+) -> Result<ThreadLoadedListResponse> {
+    send_request(
+        stream,
+        "thread/loaded/list",
+        id,
+        Some(serde_json::to_value(ThreadLoadedListParams::default())?),
+    )
+    .await?;
+    let response = read_response_for_id(stream, id).await?;
+    to_response::<ThreadLoadedListResponse>(response)
 }
 
 async fn send_config_read_request(stream: &mut WsClient, id: i64) -> Result<()> {
