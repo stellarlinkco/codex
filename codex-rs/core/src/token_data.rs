@@ -67,6 +67,7 @@ impl PlanType {
             "go" => Self::Known(KnownPlan::Go),
             "plus" => Self::Known(KnownPlan::Plus),
             "pro" => Self::Known(KnownPlan::Pro),
+            "prolite" => Self::Known(KnownPlan::ProLite),
             "team" => Self::Known(KnownPlan::Team),
             "business" => Self::Known(KnownPlan::Business),
             "enterprise" => Self::Known(KnownPlan::Enterprise),
@@ -83,6 +84,7 @@ pub(crate) enum KnownPlan {
     Go,
     Plus,
     Pro,
+    ProLite,
     Team,
     Business,
     Enterprise,
@@ -284,5 +286,16 @@ mod tests {
             ..IdTokenInfo::default()
         };
         assert_eq!(personal.is_workspace_account(), false);
+    }
+
+    #[test]
+    fn prolite_is_treated_as_personal_plan() {
+        let personal = IdTokenInfo {
+            chatgpt_plan_type: Some(PlanType::Known(KnownPlan::ProLite)),
+            ..IdTokenInfo::default()
+        };
+
+        assert_eq!(personal.is_workspace_account(), false);
+        assert_eq!(personal.get_chatgpt_plan_type().as_deref(), Some("ProLite"));
     }
 }

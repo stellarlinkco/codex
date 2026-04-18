@@ -25,7 +25,13 @@ pub struct ResolvedMarketplacePlugin {
 pub struct MarketplaceSummary {
     pub name: String,
     pub path: AbsolutePathBuf,
+    pub interface: Option<MarketplaceInterfaceSummary>,
     pub plugins: Vec<MarketplacePluginSummary>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MarketplaceInterfaceSummary {
+    pub display_name: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,6 +140,7 @@ fn list_marketplaces_with_home(
         marketplaces.push(MarketplaceSummary {
             name: marketplace.name,
             path: marketplace_path,
+            interface: marketplace_interface_summary(marketplace.interface),
             plugins,
         });
     }
@@ -268,8 +275,11 @@ fn marketplace_root_dir(
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct MarketplaceFile {
     name: String,
+    #[serde(default)]
+    interface: Option<MarketplaceInterface>,
     plugins: Vec<MarketplacePlugin>,
 }
 
@@ -283,6 +293,24 @@ struct MarketplacePlugin {
 #[serde(tag = "source", rename_all = "lowercase")]
 enum MarketplacePluginSource {
     Local { path: String },
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MarketplaceInterface {
+    #[serde(default)]
+    display_name: Option<String>,
+}
+
+fn marketplace_interface_summary(
+    interface: Option<MarketplaceInterface>,
+) -> Option<MarketplaceInterfaceSummary> {
+    let interface = interface?;
+    interface
+        .display_name
+        .map(|display_name| MarketplaceInterfaceSummary {
+            display_name: Some(display_name),
+        })
 }
 
 #[cfg(test)]
@@ -426,6 +454,7 @@ mod tests {
                         home_root.join(".agents/plugins/marketplace.json"),
                     )
                     .unwrap(),
+                    interface: None,
                     plugins: vec![
                         MarketplacePluginSummary {
                             name: "shared-plugin".to_string(),
@@ -451,6 +480,7 @@ mod tests {
                         repo_root.join(".agents/plugins/marketplace.json"),
                     )
                     .unwrap(),
+                    interface: None,
                     plugins: vec![
                         MarketplacePluginSummary {
                             name: "shared-plugin".to_string(),
@@ -531,6 +561,7 @@ mod tests {
                 MarketplaceSummary {
                     name: "codex-curated".to_string(),
                     path: AbsolutePathBuf::try_from(home_marketplace).unwrap(),
+                    interface: None,
                     plugins: vec![MarketplacePluginSummary {
                         name: "local-plugin".to_string(),
                         source: MarketplacePluginSourceSummary::Local {
@@ -542,6 +573,7 @@ mod tests {
                 MarketplaceSummary {
                     name: "codex-curated".to_string(),
                     path: AbsolutePathBuf::try_from(repo_marketplace.clone()).unwrap(),
+                    interface: None,
                     plugins: vec![MarketplacePluginSummary {
                         name: "local-plugin".to_string(),
                         source: MarketplacePluginSourceSummary::Local {
@@ -606,6 +638,7 @@ mod tests {
                 name: "codex-curated".to_string(),
                 path: AbsolutePathBuf::try_from(repo_root.join(".agents/plugins/marketplace.json"))
                     .unwrap(),
+                interface: None,
                 plugins: vec![MarketplacePluginSummary {
                     name: "local-plugin".to_string(),
                     source: MarketplacePluginSourceSummary::Local {
@@ -681,6 +714,44 @@ mod tests {
                 screenshots: vec![
                     AbsolutePathBuf::try_from(plugin_root.join("assets/shot1.png")).unwrap(),
                 ],
+            })
+        );
+    }
+
+    #[test]
+    fn list_marketplaces_reads_marketplace_interface_display_name() {
+        let tmp = tempdir().unwrap();
+        let repo_root = tmp.path().join("repo");
+        fs::create_dir_all(repo_root.join(".git")).unwrap();
+        fs::create_dir_all(repo_root.join(".agents/plugins")).unwrap();
+        fs::write(
+            repo_root.join(".agents/plugins/marketplace.json"),
+            r#"{
+  "name": "codex-curated",
+  "interface": {
+    "displayName": "Codex Curated"
+  },
+  "plugins": [
+    {
+      "name": "demo-plugin",
+      "source": {
+        "source": "local",
+        "path": "./plugins/demo-plugin"
+      }
+    }
+  ]
+}"#,
+        )
+        .unwrap();
+
+        let marketplaces =
+            list_marketplaces_with_home(&[AbsolutePathBuf::try_from(repo_root).unwrap()], None)
+                .unwrap();
+
+        assert_eq!(
+            marketplaces[0].interface,
+            Some(MarketplaceInterfaceSummary {
+                display_name: Some("Codex Curated".to_string()),
             })
         );
     }

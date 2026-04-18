@@ -1,0 +1,87 @@
+name: linux-sandbox-ci
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/linux-sandbox-ci.yml
+      - codex-rs/Cargo.lock
+      - codex-rs/Cargo.toml
+      - codex-rs/rust-toolchain.toml
+      - codex-rs/execpolicy/**
+      - codex-rs/linux-sandbox/**
+      - codex-rs/protocol/**
+  push:
+    branches:
+      - main
+    paths:
+      - .github/workflows/linux-sandbox-ci.yml
+      - codex-rs/Cargo.lock
+      - codex-rs/Cargo.toml
+      - codex-rs/rust-toolchain.toml
+      - codex-rs/execpolicy/**
+      - codex-rs/linux-sandbox/**
+      - codex-rs/protocol/**
+  workflow_dispatch:
+
+concurrency:
+  group: linux-sandbox-ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  linux-sandbox:
+    name: Linux sandbox tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      CARGO_INCREMENTAL: "0"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      RUST_BACKTRACE: "1"
+      RUSTFLAGS: "-Cdebuginfo=0"
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Linux build dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            pkg-config \
+            libcap-dev
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+        with:
+          components: clippy,rustfmt,rust-src
+
+      - name: Enable unprivileged user namespaces
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo sysctl -w kernel.unprivileged_userns_clone=1
+          if sudo sysctl -a 2>/dev/null | grep -q '^kernel.apparmor_restrict_unprivileged_userns'; then
+            sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          fi
+
+      - name: Run linux-sandbox unit tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          ulimit -n 65536 || ulimit -n 8192 || true
+          cargo test -p codex-linux-sandbox --lib -- --nocapture
+
+      - name: Run bwrap git carveout regression
+        shell: bash
+        run: |
+          set -euo pipefail
+          ulimit -n 65536 || ulimit -n 8192 || true
+          cargo test -p codex-linux-sandbox --test all \
+            sandbox_keeps_git_readable_but_blocks_git_writes_inside_writable_root \
+            -- --nocapture

@@ -21,8 +21,37 @@ pub fn create_env(
     policy: &ShellEnvironmentPolicy,
     thread_id: Option<ThreadId>,
 ) -> HashMap<String, String> {
-    populate_env(std::env::vars(), policy, thread_id)
+    create_env_from_vars(std::env::vars(), policy, thread_id)
 }
+
+fn create_env_from_vars<I>(
+    vars: I,
+    policy: &ShellEnvironmentPolicy,
+    thread_id: Option<ThreadId>,
+) -> HashMap<String, String>
+where
+    I: IntoIterator<Item = (String, String)>,
+{
+    let mut env_map = populate_env(vars, policy, thread_id);
+
+    if cfg!(target_os = "windows")
+        && !env_map
+            .keys()
+            .any(|key| key.eq_ignore_ascii_case("PATHEXT"))
+    {
+        env_map.insert("PATHEXT".to_string(), ".COM;.EXE;.BAT;.CMD".to_string());
+    }
+
+    env_map
+}
+
+const COMMON_CORE_VARS: &[&str] = &["PATH", "SHELL", "TMPDIR", "TEMP", "TMP"];
+
+#[cfg(target_os = "windows")]
+const PLATFORM_CORE_VARS: &[&str] = &["PATHEXT", "USERNAME", "USERPROFILE"];
+
+#[cfg(unix)]
+const PLATFORM_CORE_VARS: &[&str] = &["HOME", "LANG", "LC_ALL", "LC_CTYPE", "LOGNAME", "USER"];
 
 fn populate_env<I>(
     vars: I,
@@ -38,17 +67,18 @@ where
         ShellEnvironmentPolicyInherit::All => vars.into_iter().collect(),
         ShellEnvironmentPolicyInherit::None => HashMap::new(),
         ShellEnvironmentPolicyInherit::Core => {
-            const CORE_VARS: &[&str] = &[
-                "HOME", "LOGNAME", "PATH", "SHELL", "USER", "USERNAME", "TMPDIR", "TEMP", "TMP",
-            ];
-            let allow: HashSet<&str> = CORE_VARS.iter().copied().collect();
+            let core_vars: HashSet<&str> = COMMON_CORE_VARS
+                .iter()
+                .copied()
+                .chain(PLATFORM_CORE_VARS.iter().copied())
+                .collect();
             let is_core_var = |name: &str| {
                 if cfg!(target_os = "windows") {
-                    CORE_VARS
+                    core_vars
                         .iter()
                         .any(|allowed| allowed.eq_ignore_ascii_case(name))
                 } else {
-                    allow.contains(name)
+                    core_vars.contains(name)
                 }
             };
             vars.into_iter().filter(|(k, _)| is_core_var(k)).collect()
@@ -98,6 +128,7 @@ mod tests {
     use super::*;
     use crate::config::types::ShellEnvironmentPolicyInherit;
     use maplit::hashmap;
+    use pretty_assertions::assert_eq;
 
     fn make_vars(pairs: &[(&str, &str)]) -> Vec<(String, String)> {
         pairs
@@ -268,6 +299,7 @@ mod tests {
     fn test_core_inherit_respects_case_insensitive_names_on_windows() {
         let vars = make_vars(&[
             ("Path", "C:\\Windows\\System32"),
+            ("PathExt", ".COM;.EXE;.BAT;.CMD"),
             ("TEMP", "C:\\Temp"),
             ("FOO", "bar"),
         ]);
@@ -282,11 +314,53 @@ mod tests {
         let result = populate_env(vars, &policy, Some(thread_id));
         let mut expected: HashMap<String, String> = hashmap! {
             "Path".to_string() => "C:\\Windows\\System32".to_string(),
+            "PathExt".to_string() => ".COM;.EXE;.BAT;.CMD".to_string(),
             "TEMP".to_string() => "C:\\Temp".to_string(),
         };
         expected.insert(CODEX_THREAD_ID_ENV_VAR.to_string(), thread_id.to_string());
 
         assert_eq!(result, expected);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn create_env_inserts_pathext_on_windows_when_missing() {
+        let vars = make_vars(&[]);
+
+        let policy = ShellEnvironmentPolicy {
+            inherit: ShellEnvironmentPolicyInherit::None,
+            ignore_default_excludes: true,
+            ..Default::default()
+        };
+
+        let result = create_env_from_vars(vars, &policy, None);
+
+        let expected: HashMap<String, String> = hashmap! {
+            "PATHEXT".to_string() => ".COM;.EXE;.BAT;.CMD".to_string(),
+        };
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    #[cfg(target_os = "windows")]
+    fn create_env_preserves_existing_pathext_case_insensitively_on_windows() {
+        let vars = make_vars(&[("PathExt", ".COM;.EXE;.BAT;.CMD;.PS1")]);
+
+        let policy = ShellEnvironmentPolicy {
+            inherit: ShellEnvironmentPolicyInherit::Core,
+            ignore_default_excludes: true,
+            ..Default::default()
+        };
+
+        let result = create_env_from_vars(vars, &policy, None);
+
+        let pathext_vars = result
+            .iter()
+            .filter(|(key, _)| key.eq_ignore_ascii_case("PATHEXT"))
+            .collect::<Vec<_>>();
+
+        assert_eq!(pathext_vars.len(), 1);
+        assert_eq!(pathext_vars[0].1, ".COM;.EXE;.BAT;.CMD;.PS1");
     }
 
     #[test]

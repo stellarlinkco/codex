@@ -459,7 +459,7 @@ impl std::fmt::Display for UsageLimitReachedError {
                     retry_suffix_after_or(self.resets_at.as_ref())
                 )
             }
-            Some(PlanType::Known(KnownPlan::Pro)) => format!(
+            Some(PlanType::Known(KnownPlan::Pro | KnownPlan::ProLite)) => format!(
                 "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits{}",
                 retry_suffix_after_or(self.resets_at.as_ref())
             ),
@@ -921,16 +921,18 @@ mod tests {
         let resets_at = base + ChronoDuration::hours(1);
         with_now_override(base, move || {
             let expected_time = format_retry_timestamp(&resets_at);
-            let err = UsageLimitReachedError {
-                plan_type: Some(PlanType::Known(KnownPlan::Pro)),
-                resets_at: Some(resets_at),
-                rate_limits: Some(Box::new(rate_limit_snapshot())),
-                promo_message: None,
-            };
             let expected = format!(
                 "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again at {expected_time}."
             );
-            assert_eq!(err.to_string(), expected);
+            for plan in [KnownPlan::Pro, KnownPlan::ProLite] {
+                let err = UsageLimitReachedError {
+                    plan_type: Some(PlanType::Known(plan)),
+                    resets_at: Some(resets_at),
+                    rate_limits: Some(Box::new(rate_limit_snapshot())),
+                    promo_message: None,
+                };
+                assert_eq!(err.to_string(), expected);
+            }
         });
     }
 

@@ -45,6 +45,20 @@ function elapsed(startedAt: number | null | undefined): string {
     return `${Math.floor(min / 60)}h ${min % 60}m`
 }
 
+function formatRelativeTime(value: number): string {
+    const ms = value < 1_000_000_000_000 ? value * 1000 : value
+    if (!Number.isFinite(ms)) return ''
+    const delta = Date.now() - ms
+    if (delta < 60_000) return 'just now'
+    const minutes = Math.floor(delta / 60_000)
+    if (minutes < 60) return `${minutes}m ago`
+    const hours = Math.floor(minutes / 60)
+    if (hours < 24) return `${hours}h ago`
+    const days = Math.floor(hours / 24)
+    if (days < 7) return `${days}d ago`
+    return new Date(ms).toLocaleDateString()
+}
+
 const KanbanCardInner = memo(function KanbanCardInner({
     card,
     isSelected,
@@ -62,6 +76,10 @@ const KanbanCardInner = memo(function KanbanCardInner({
         isDragging,
     } = useSortable({
         id: card.key,
+        data: {
+            type: 'card',
+            cardKey: card.key,
+        },
         disabled: isDragDisabled,
     })
 
@@ -71,9 +89,13 @@ const KanbanCardInner = memo(function KanbanCardInner({
         opacity: isDragging ? 0.5 : 1,
     }
 
-    const { item, latestJob, settings } = card
-    const hasConfig = settings.model || settings.reasoningEffort || settings.promptPrefix
-    const isRunning = latestJob?.status === 'running'
+    const isGithubCard = card.kind === 'github'
+    const githubSettings = isGithubCard ? card.settings : null
+    const githubLatestJob = isGithubCard ? card.latestJob : null
+    const hasConfig = Boolean(
+        githubSettings?.model || githubSettings?.reasoningEffort || githubSettings?.promptPrefix
+    )
+    const isRunning = githubLatestJob?.status === 'running'
 
     return (
         <div
@@ -92,106 +114,164 @@ const KanbanCardInner = memo(function KanbanCardInner({
                 ${isDragDisabled ? 'cursor-default' : 'cursor-grab active:cursor-grabbing'}
             `}
         >
-            {/* Running pulse indicator */}
-            {isRunning && (
-                <div className="absolute top-2 right-2">
-                    <span className="relative flex h-2.5 w-2.5">
-                        <span className="absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75 animate-ping" />
-                        <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-blue-500" />
-                    </span>
-                </div>
-            )}
-
-            <div className="px-3 py-2.5 space-y-1.5">
-                {/* Top row: repo badge + number */}
-                <div className="flex items-center gap-1.5 text-xs">
-                    {repoColor && (
-                        <span
-                            className="inline-block w-2 h-2 rounded-full shrink-0"
-                            style={{ backgroundColor: repoColor }}
-                        />
+            {isGithubCard ? (
+                <>
+                    {isRunning && (
+                        <div className="absolute top-2 right-2">
+                            <span className="relative flex h-2.5 w-2.5">
+                                <span className="absolute inline-flex h-full w-full rounded-full bg-blue-400 opacity-75 animate-ping" />
+                                <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-blue-500" />
+                            </span>
+                        </div>
                     )}
-                    <span className="text-[var(--app-hint)] font-medium truncate">
-                        {repoLabel || item.repo}
-                    </span>
-                    <span className="text-[var(--app-hint)]">#{item.number}</span>
-                </div>
 
-                {/* Title */}
-                <div className="text-sm font-medium leading-snug text-[var(--app-fg)] line-clamp-2">
-                    {item.title}
-                </div>
-
-                {/* Labels */}
-                {item.labels.length > 0 && (
-                    <div className="flex flex-wrap gap-1">
-                        {item.labels.slice(0, 3).map(label => (
-                            <span
-                                key={label.name}
-                                className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium leading-none"
-                                style={{
-                                    backgroundColor: `#${label.color}22`,
-                                    color: `#${label.color}`,
-                                    border: `1px solid #${label.color}44`,
-                                }}
-                            >
-                                {label.name}
-                            </span>
-                        ))}
-                        {item.labels.length > 3 && (
-                            <span className="text-[10px] text-[var(--app-hint)]">
-                                +{item.labels.length - 3}
-                            </span>
-                        )}
-                    </div>
-                )}
-
-                {/* Bottom row: status + config indicator */}
-                <div className="flex items-center justify-between gap-2 pt-0.5">
-                    <div className="flex items-center gap-1.5">
-                        {latestJob && (
-                            <span
-                                className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide"
-                                style={{ color: statusColor(latestJob.status) }}
-                            >
+                    <div className="px-3 py-2.5 space-y-1.5">
+                        <div className="flex items-center gap-1.5 text-xs">
+                            {repoColor && (
                                 <span
-                                    className="w-1.5 h-1.5 rounded-full"
-                                    style={{ backgroundColor: statusColor(latestJob.status) }}
+                                    className="inline-block w-2 h-2 rounded-full shrink-0"
+                                    style={{ backgroundColor: repoColor }}
                                 />
-                                {statusLabel(latestJob.status)}
-                                {isRunning && latestJob.startedAt && (
-                                    <span className="font-normal text-[var(--app-hint)] ml-0.5">
-                                        {elapsed(latestJob.startedAt)}
+                            )}
+                            <span className="text-[var(--app-hint)] font-medium truncate">
+                                {repoLabel || card.item.repo}
+                            </span>
+                            <span className="text-[var(--app-hint)]">#{card.item.number}</span>
+                        </div>
+
+                        <div className="text-sm font-medium leading-snug text-[var(--app-fg)] line-clamp-2">
+                            {card.item.title}
+                        </div>
+
+                        {card.item.labels.length > 0 && (
+                            <div className="flex flex-wrap gap-1">
+                                {card.item.labels.slice(0, 3).map(label => (
+                                    <span
+                                        key={label.name}
+                                        className="inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium leading-none"
+                                        style={{
+                                            backgroundColor: `#${label.color}22`,
+                                            color: `#${label.color}`,
+                                            border: `1px solid #${label.color}44`,
+                                        }}
+                                    >
+                                        {label.name}
+                                    </span>
+                                ))}
+                                {card.item.labels.length > 3 && (
+                                    <span className="text-[10px] text-[var(--app-hint)]">
+                                        +{card.item.labels.length - 3}
                                     </span>
                                 )}
-                            </span>
+                            </div>
                         )}
+
+                        <div className="flex items-center justify-between gap-2 pt-0.5">
+                            <div className="flex items-center gap-1.5">
+                                {githubLatestJob && (
+                                    <span
+                                        className="inline-flex items-center gap-1 text-[10px] font-semibold uppercase tracking-wide"
+                                        style={{ color: statusColor(githubLatestJob.status) }}
+                                    >
+                                        <span
+                                            className="w-1.5 h-1.5 rounded-full"
+                                            style={{ backgroundColor: statusColor(githubLatestJob.status) }}
+                                        />
+                                        {statusLabel(githubLatestJob.status)}
+                                        {isRunning && githubLatestJob.startedAt && (
+                                            <span className="font-normal text-[var(--app-hint)] ml-0.5">
+                                                {elapsed(githubLatestJob.startedAt)}
+                                            </span>
+                                        )}
+                                    </span>
+                                )}
+                            </div>
+
+                            {hasConfig && (
+                                <span className="text-[10px] text-[var(--app-hint)] font-mono">
+                                    {[
+                                        githubSettings?.model?.split('-').pop(),
+                                        githubSettings?.reasoningEffort,
+                                    ].filter(Boolean).join('/')}
+                                </span>
+                            )}
+                        </div>
+                    </div>
+                </>
+            ) : (
+                <div className="px-3 py-2.5 space-y-2">
+                    <div className="flex items-center justify-between gap-2 text-xs">
+                        <span className="text-[var(--app-hint)] font-medium truncate">
+                            {card.agentLabel}
+                        </span>
+                        <span className="text-[var(--app-hint)] shrink-0">
+                            {formatRelativeTime(card.session.updatedAt)}
+                        </span>
                     </div>
 
-                    {hasConfig && (
-                        <span className="text-[10px] text-[var(--app-hint)] font-mono">
-                            {[
-                                settings.model?.split('-').pop(),
-                                settings.reasoningEffort,
-                            ].filter(Boolean).join('/')}
-                        </span>
-                    )}
+                    <div className="text-sm font-medium leading-snug text-[var(--app-fg)] line-clamp-2">
+                        {card.title}
+                    </div>
+
+                    <div className="text-xs text-[var(--app-hint)] truncate">
+                        {card.path}
+                    </div>
+
+                    <div className="flex items-center justify-between gap-2 pt-0.5 text-[10px]">
+                        <div className="flex items-center gap-2 flex-wrap">
+                            <span className="inline-flex items-center gap-1 font-semibold uppercase tracking-wide text-[var(--app-hint)]">
+                                <span
+                                    className={`w-1.5 h-1.5 rounded-full ${card.session.thinking ? 'bg-blue-500' : card.session.active ? 'bg-green-500' : 'bg-[var(--app-hint)]'}`}
+                                />
+                                {card.session.thinking ? 'Thinking' : card.session.active ? 'Active' : 'Idle'}
+                            </span>
+                            {card.session.pendingRequestsCount > 0 && (
+                                <span className="text-[var(--app-hint)]">
+                                    Pending {card.session.pendingRequestsCount}
+                                </span>
+                            )}
+                            {card.session.todoProgress && card.session.todoProgress.completed !== card.session.todoProgress.total && (
+                                <span className="text-[var(--app-hint)]">
+                                    Todos {card.session.todoProgress.completed}/{card.session.todoProgress.total}
+                                </span>
+                            )}
+                        </div>
+                    </div>
                 </div>
-            </div>
+            )}
         </div>
     )
 }, (prev, next) => {
     return (
         prev.card.key === next.card.key
+        && prev.card.kind === next.card.kind
         && prev.isSelected === next.isSelected
         && prev.isDragDisabled === next.isDragDisabled
-        && prev.card.item.title === next.card.item.title
-        && prev.card.item.state === next.card.item.state
-        && prev.card.latestJob?.status === next.card.latestJob?.status
-        && prev.card.latestJob?.startedAt === next.card.latestJob?.startedAt
-        && prev.card.settings === next.card.settings
         && prev.repoColor === next.repoColor
         && prev.repoLabel === next.repoLabel
+        && (
+            prev.card.kind === 'github' && next.card.kind === 'github'
+                ? (
+                    prev.card.item.title === next.card.item.title
+                    && prev.card.item.state === next.card.item.state
+                    && prev.card.latestJob?.status === next.card.latestJob?.status
+                    && prev.card.latestJob?.startedAt === next.card.latestJob?.startedAt
+                    && prev.card.settings === next.card.settings
+                )
+                : prev.card.kind === 'session' && next.card.kind === 'session'
+                    ? (
+                        prev.card.title === next.card.title
+                        && prev.card.path === next.card.path
+                        && prev.card.agentLabel === next.card.agentLabel
+                        && prev.card.session.active === next.card.session.active
+                        && prev.card.session.thinking === next.card.session.thinking
+                        && prev.card.session.pendingRequestsCount === next.card.session.pendingRequestsCount
+                        && prev.card.session.updatedAt === next.card.session.updatedAt
+                        && prev.card.session.todoProgress?.completed === next.card.session.todoProgress?.completed
+                        && prev.card.session.todoProgress?.total === next.card.session.todoProgress?.total
+                    )
+                    : false
+        )
     )
 })
 

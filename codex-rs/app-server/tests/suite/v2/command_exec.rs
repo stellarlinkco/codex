@@ -15,8 +15,11 @@ use codex_app_server_protocol::CommandExecTerminateParams;
 use codex_app_server_protocol::CommandExecWriteParams;
 use codex_app_server_protocol::JSONRPCMessage;
 use codex_app_server_protocol::JSONRPCNotification;
+use codex_app_server_protocol::NetworkAccess;
 use codex_app_server_protocol::RequestId;
+use codex_app_server_protocol::SandboxPolicy;
 use pretty_assertions::assert_eq;
+use serial_test::serial;
 use std::collections::HashMap;
 use tempfile::TempDir;
 use tokio::time::Duration;
@@ -34,13 +37,25 @@ use super::connection_handling_websocket::send_initialize_request;
 use super::connection_handling_websocket::send_request;
 use super::connection_handling_websocket::spawn_websocket_server;
 
+const COMMAND_EXEC_INIT_TIMEOUT: Duration = Duration::from_secs(60);
+
+fn command_exec_sandbox_policy() -> Option<SandboxPolicy> {
+    // These tests validate command/exec protocol behavior. Run them in an
+    // external sandbox so they stay valid even when the test harness itself is
+    // already wrapped by a platform sandbox.
+    Some(SandboxPolicy::ExternalSandbox {
+        network_access: NetworkAccess::Restricted,
+    })
+}
+
 #[tokio::test]
+#[serial(command_exec)]
 async fn command_exec_without_streams_can_be_terminated() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri(), "never")?;
     let mut mcp = McpProcess::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    timeout(COMMAND_EXEC_INIT_TIMEOUT, mcp.initialize()).await??;
 
     let process_id = "sleep-1".to_string();
     let command_request_id = mcp
@@ -57,7 +72,7 @@ async fn command_exec_without_streams_can_be_terminated() -> Result<()> {
             cwd: None,
             env: None,
             size: None,
-            sandbox_policy: None,
+            sandbox_policy: command_exec_sandbox_policy(),
         })
         .await?;
     let terminate_request_id = mcp
@@ -84,12 +99,13 @@ async fn command_exec_without_streams_can_be_terminated() -> Result<()> {
 }
 
 #[tokio::test]
+#[serial(command_exec)]
 async fn command_exec_without_process_id_keeps_buffered_compatibility() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri(), "never")?;
     let mut mcp = McpProcess::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    timeout(COMMAND_EXEC_INIT_TIMEOUT, mcp.initialize()).await??;
 
     let command_request_id = mcp
         .send_command_exec_request(CommandExecParams {
@@ -109,7 +125,7 @@ async fn command_exec_without_process_id_keeps_buffered_compatibility() -> Resul
             cwd: None,
             env: None,
             size: None,
-            sandbox_policy: None,
+            sandbox_policy: command_exec_sandbox_policy(),
         })
         .await?;
 
@@ -130,6 +146,7 @@ async fn command_exec_without_process_id_keeps_buffered_compatibility() -> Resul
 }
 
 #[tokio::test]
+#[serial(command_exec)]
 async fn command_exec_env_overrides_merge_with_server_environment_and_support_unset() -> Result<()>
 {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
@@ -140,7 +157,7 @@ async fn command_exec_env_overrides_merge_with_server_environment_and_support_un
         &[("COMMAND_EXEC_BASELINE", Some("server"))],
     )
     .await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    timeout(COMMAND_EXEC_INIT_TIMEOUT, mcp.initialize()).await??;
 
     let command_request_id = mcp
         .send_command_exec_request(CommandExecParams {
@@ -167,7 +184,7 @@ async fn command_exec_env_overrides_merge_with_server_environment_and_support_un
                 ("RUST_LOG".to_string(), None),
             ])),
             size: None,
-            sandbox_policy: None,
+            sandbox_policy: command_exec_sandbox_policy(),
         })
         .await?;
 
@@ -188,12 +205,13 @@ async fn command_exec_env_overrides_merge_with_server_environment_and_support_un
 }
 
 #[tokio::test]
+#[serial(command_exec)]
 async fn command_exec_rejects_disable_timeout_with_timeout_ms() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri(), "never")?;
     let mut mcp = McpProcess::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    timeout(COMMAND_EXEC_INIT_TIMEOUT, mcp.initialize()).await??;
 
     let command_request_id = mcp
         .send_command_exec_request(CommandExecParams {
@@ -209,7 +227,7 @@ async fn command_exec_rejects_disable_timeout_with_timeout_ms() -> Result<()> {
             cwd: None,
             env: None,
             size: None,
-            sandbox_policy: None,
+            sandbox_policy: command_exec_sandbox_policy(),
         })
         .await?;
 
@@ -225,12 +243,13 @@ async fn command_exec_rejects_disable_timeout_with_timeout_ms() -> Result<()> {
 }
 
 #[tokio::test]
+#[serial(command_exec)]
 async fn command_exec_rejects_disable_output_cap_with_output_bytes_cap() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri(), "never")?;
     let mut mcp = McpProcess::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    timeout(COMMAND_EXEC_INIT_TIMEOUT, mcp.initialize()).await??;
 
     let command_request_id = mcp
         .send_command_exec_request(CommandExecParams {
@@ -246,7 +265,7 @@ async fn command_exec_rejects_disable_output_cap_with_output_bytes_cap() -> Resu
             cwd: None,
             env: None,
             size: None,
-            sandbox_policy: None,
+            sandbox_policy: command_exec_sandbox_policy(),
         })
         .await?;
 
@@ -262,12 +281,13 @@ async fn command_exec_rejects_disable_output_cap_with_output_bytes_cap() -> Resu
 }
 
 #[tokio::test]
+#[serial(command_exec)]
 async fn command_exec_rejects_negative_timeout_ms() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri(), "never")?;
     let mut mcp = McpProcess::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    timeout(COMMAND_EXEC_INIT_TIMEOUT, mcp.initialize()).await??;
 
     let command_request_id = mcp
         .send_command_exec_request(CommandExecParams {
@@ -283,7 +303,7 @@ async fn command_exec_rejects_negative_timeout_ms() -> Result<()> {
             cwd: None,
             env: None,
             size: None,
-            sandbox_policy: None,
+            sandbox_policy: command_exec_sandbox_policy(),
         })
         .await?;
 
@@ -299,12 +319,13 @@ async fn command_exec_rejects_negative_timeout_ms() -> Result<()> {
 }
 
 #[tokio::test]
+#[serial(command_exec)]
 async fn command_exec_without_process_id_rejects_streaming() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri(), "never")?;
     let mut mcp = McpProcess::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    timeout(COMMAND_EXEC_INIT_TIMEOUT, mcp.initialize()).await??;
 
     let command_request_id = mcp
         .send_command_exec_request(CommandExecParams {
@@ -320,7 +341,7 @@ async fn command_exec_without_process_id_rejects_streaming() -> Result<()> {
             cwd: None,
             env: None,
             size: None,
-            sandbox_policy: None,
+            sandbox_policy: command_exec_sandbox_policy(),
         })
         .await?;
 
@@ -336,12 +357,13 @@ async fn command_exec_without_process_id_rejects_streaming() -> Result<()> {
 }
 
 #[tokio::test]
+#[serial(command_exec)]
 async fn command_exec_non_streaming_respects_output_cap() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri(), "never")?;
     let mut mcp = McpProcess::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    timeout(COMMAND_EXEC_INIT_TIMEOUT, mcp.initialize()).await??;
 
     let command_request_id = mcp
         .send_command_exec_request(CommandExecParams {
@@ -361,7 +383,7 @@ async fn command_exec_non_streaming_respects_output_cap() -> Result<()> {
             cwd: None,
             env: None,
             size: None,
-            sandbox_policy: None,
+            sandbox_policy: command_exec_sandbox_policy(),
         })
         .await?;
 
@@ -382,12 +404,13 @@ async fn command_exec_non_streaming_respects_output_cap() -> Result<()> {
 }
 
 #[tokio::test]
+#[serial(command_exec)]
 async fn command_exec_streaming_does_not_buffer_output() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri(), "never")?;
     let mut mcp = McpProcess::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    timeout(COMMAND_EXEC_INIT_TIMEOUT, mcp.initialize()).await??;
 
     let process_id = "stream-cap-1".to_string();
     let command_request_id = mcp
@@ -408,7 +431,7 @@ async fn command_exec_streaming_does_not_buffer_output() -> Result<()> {
             cwd: None,
             env: None,
             size: None,
-            sandbox_policy: None,
+            sandbox_policy: command_exec_sandbox_policy(),
         })
         .await?;
 
@@ -442,12 +465,13 @@ async fn command_exec_streaming_does_not_buffer_output() -> Result<()> {
 }
 
 #[tokio::test]
+#[serial(command_exec)]
 async fn command_exec_pipe_streams_output_and_accepts_write() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri(), "never")?;
     let mut mcp = McpProcess::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    timeout(COMMAND_EXEC_INIT_TIMEOUT, mcp.initialize()).await??;
 
     let process_id = "pipe-1".to_string();
     let command_request_id = mcp
@@ -468,7 +492,7 @@ async fn command_exec_pipe_streams_output_and_accepts_write() -> Result<()> {
             cwd: None,
             env: None,
             size: None,
-            sandbox_policy: None,
+            sandbox_policy: command_exec_sandbox_policy(),
         })
         .await?;
 
@@ -533,12 +557,13 @@ async fn command_exec_pipe_streams_output_and_accepts_write() -> Result<()> {
 }
 
 #[tokio::test]
+#[serial(command_exec)]
 async fn command_exec_tty_implies_streaming_and_reports_pty_output() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri(), "never")?;
     let mut mcp = McpProcess::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    timeout(COMMAND_EXEC_INIT_TIMEOUT, mcp.initialize()).await??;
 
     let process_id = "tty-1".to_string();
     let command_request_id = mcp
@@ -559,7 +584,7 @@ async fn command_exec_tty_implies_streaming_and_reports_pty_output() -> Result<(
             cwd: None,
             env: None,
             size: None,
-            sandbox_policy: None,
+            sandbox_policy: command_exec_sandbox_policy(),
         })
         .await?;
 
@@ -611,12 +636,13 @@ async fn command_exec_tty_implies_streaming_and_reports_pty_output() -> Result<(
 }
 
 #[tokio::test]
+#[serial(command_exec)]
 async fn command_exec_tty_supports_initial_size_and_resize() -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
     let codex_home = TempDir::new()?;
     create_config_toml(codex_home.path(), &server.uri(), "never")?;
     let mut mcp = McpProcess::new(codex_home.path()).await?;
-    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+    timeout(COMMAND_EXEC_INIT_TIMEOUT, mcp.initialize()).await??;
 
     let process_id = "tty-size-1".to_string();
     let command_request_id = mcp
@@ -640,7 +666,7 @@ async fn command_exec_tty_supports_initial_size_and_resize() -> Result<()> {
                 rows: 31,
                 cols: 101,
             }),
-            sandbox_policy: None,
+            sandbox_policy: command_exec_sandbox_policy(),
         })
         .await?;
 
@@ -706,6 +732,7 @@ async fn command_exec_tty_supports_initial_size_and_resize() -> Result<()> {
 }
 
 #[tokio::test]
+#[serial(command_exec)]
 async fn command_exec_process_ids_are_connection_scoped_and_disconnect_terminates_process()
 -> Result<()> {
     let server = create_mock_responses_server_sequence_unchecked(Vec::new()).await;
@@ -731,6 +758,7 @@ async fn command_exec_process_ids_are_connection_scoped_and_disconnect_terminate
             "command": ["sh", "-lc", "printf 'ready\\n%s\\n' $$; sleep 30"],
             "processId": "shared-process",
             "streamStdoutStderr": true,
+            "sandboxPolicy": { "type": "externalSandbox", "networkAccess": "restricted" },
         })),
     )
     .await?;

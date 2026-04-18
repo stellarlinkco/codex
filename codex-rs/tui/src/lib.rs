@@ -554,6 +554,7 @@ async fn run_ratatui_app(
     terminal.clear()?;
 
     let mut tui = Tui::new(terminal);
+    let mut terminal_restore_guard = TerminalRestoreGuard::new();
 
     #[cfg(not(debug_assertions))]
     {
@@ -564,7 +565,7 @@ async fn run_ratatui_app(
             match update_prompt::run_update_prompt_if_needed(&mut tui, &initial_config).await? {
                 UpdatePromptOutcome::Continue => {}
                 UpdatePromptOutcome::RunUpdate(action) => {
-                    crate::tui::restore()?;
+                    terminal_restore_guard.restore()?;
                     return Ok(AppExitInfo {
                         token_usage: codex_protocol::protocol::TokenUsage::default(),
                         thread_id: None,
@@ -605,7 +606,7 @@ async fn run_ratatui_app(
         )
         .await?;
         if onboarding_result.should_exit {
-            restore();
+            terminal_restore_guard.restore_silently();
             session_log::log_session_end();
             let _ = tui.terminal.clear();
             return Ok(AppExitInfo {
@@ -646,7 +647,7 @@ async fn run_ratatui_app(
 
     let mut missing_session_exit = |id_str: &str, action: &str| {
         error!("Error finding conversation path: {id_str}");
-        restore();
+        terminal_restore_guard.restore_silently();
         session_log::log_session_end();
         let _ = tui.terminal.clear();
         Ok(AppExitInfo {
@@ -713,7 +714,7 @@ async fn run_ratatui_app(
                                 error!(
                                     "Error reading session metadata from latest rollout: {rollout_path}"
                                 );
-                                restore();
+                                terminal_restore_guard.restore_silently();
                                 session_log::log_session_end();
                                 let _ = tui.terminal.clear();
                                 return Ok(AppExitInfo {
@@ -735,7 +736,7 @@ async fn run_ratatui_app(
         } else if cli.fork_picker {
             match resume_picker::run_fork_picker(&mut tui, &config, cli.fork_show_all).await? {
                 resume_picker::SessionSelection::Exit => {
-                    restore();
+                    terminal_restore_guard.restore_silently();
                     session_log::log_session_end();
                     return Ok(AppExitInfo {
                         token_usage: codex_protocol::protocol::TokenUsage::default(),
@@ -804,7 +805,7 @@ async fn run_ratatui_app(
                 None => {
                     let rollout_path = path.display();
                     error!("Error reading session metadata from latest rollout: {rollout_path}");
-                    restore();
+                    terminal_restore_guard.restore_silently();
                     session_log::log_session_end();
                     let _ = tui.terminal.clear();
                     return Ok(AppExitInfo {
@@ -823,7 +824,7 @@ async fn run_ratatui_app(
     } else if cli.resume_picker {
         match resume_picker::run_resume_picker(&mut tui, &config, cli.resume_show_all).await? {
             resume_picker::SessionSelection::Exit => {
-                restore();
+                terminal_restore_guard.restore_silently();
                 session_log::log_session_end();
                 return Ok(AppExitInfo {
                     token_usage: codex_protocol::protocol::TokenUsage::default(),
@@ -865,7 +866,7 @@ async fn run_ratatui_app(
             {
                 ResolveCwdOutcome::Continue(cwd) => cwd,
                 ResolveCwdOutcome::Exit => {
-                    restore();
+                    terminal_restore_guard.restore_silently();
                     session_log::log_session_end();
                     return Ok(AppExitInfo {
                         token_usage: codex_protocol::protocol::TokenUsage::default(),
@@ -936,7 +937,7 @@ async fn run_ratatui_app(
     )
     .await;
 
-    restore();
+    terminal_restore_guard.restore_silently();
     // Mark the end of the recorded session.
     session_log::log_session_end();
     // ignore error when collecting usage – report underlying error instead
@@ -1058,6 +1059,67 @@ fn restore() {
         eprintln!(
             "failed to restore terminal. Run `reset` or restart your terminal to recover: {err}"
         );
+    }
+}
+
+struct TerminalRestoreGuard {
+    active: bool,
+    #[cfg(test)]
+    restore_fn: Option<Box<dyn FnMut() -> color_eyre::Result<()> + Send>>,
+}
+
+impl TerminalRestoreGuard {
+    fn new() -> Self {
+        Self {
+            active: true,
+            #[cfg(test)]
+            restore_fn: None,
+        }
+    }
+
+    #[cfg(test)]
+    fn new_for_test<F>(restore_fn: F) -> Self
+    where
+        F: FnMut() -> color_eyre::Result<()> + Send + 'static,
+    {
+        Self {
+            active: true,
+            restore_fn: Some(Box::new(restore_fn)),
+        }
+    }
+
+    #[cfg_attr(debug_assertions, allow(dead_code))]
+    fn restore(&mut self) -> color_eyre::Result<()> {
+        if self.active {
+            #[cfg(test)]
+            if let Some(restore_fn) = self.restore_fn.as_mut() {
+                restore_fn()?;
+                self.active = false;
+                return Ok(());
+            }
+            crate::tui::restore()?;
+            self.active = false;
+        }
+        Ok(())
+    }
+
+    fn restore_silently(&mut self) {
+        if self.active {
+            #[cfg(test)]
+            if let Some(restore_fn) = self.restore_fn.as_mut() {
+                let _ = restore_fn();
+                self.active = false;
+                return;
+            }
+            restore();
+            self.active = false;
+        }
+    }
+}
+
+impl Drop for TerminalRestoreGuard {
+    fn drop(&mut self) {
+        self.restore_silently();
     }
 }
 
@@ -1191,6 +1253,9 @@ mod tests {
     use codex_protocol::protocol::SessionSource;
     use codex_protocol::protocol::TurnContextItem;
     use serial_test::serial;
+    use std::sync::Arc;
+    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::Ordering;
     use tempfile::TempDir;
 
     async fn build_config(temp_dir: &TempDir) -> std::io::Result<Config> {
@@ -1545,5 +1610,54 @@ trust_level = "untrusted"
             .expect("expected cwd");
         assert_eq!(cwd, sqlite_cwd);
         Ok(())
+    }
+
+    #[test]
+    fn terminal_restore_guard_restores_once_on_drop() {
+        let restore_calls = Arc::new(AtomicUsize::new(0));
+        {
+            let restore_calls = Arc::clone(&restore_calls);
+            let _guard = TerminalRestoreGuard::new_for_test(move || {
+                restore_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            });
+        }
+
+        assert_eq!(restore_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn terminal_restore_guard_manual_restore_disables_drop_restore() {
+        let restore_calls = Arc::new(AtomicUsize::new(0));
+        let mut guard = {
+            let restore_calls = Arc::clone(&restore_calls);
+            TerminalRestoreGuard::new_for_test(move || {
+                restore_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        };
+
+        guard.restore().expect("manual restore should succeed");
+        drop(guard);
+
+        assert_eq!(restore_calls.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn terminal_restore_guard_silent_restore_is_idempotent() {
+        let restore_calls = Arc::new(AtomicUsize::new(0));
+        let mut guard = {
+            let restore_calls = Arc::clone(&restore_calls);
+            TerminalRestoreGuard::new_for_test(move || {
+                restore_calls.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        };
+
+        guard.restore_silently();
+        guard.restore_silently();
+        drop(guard);
+
+        assert_eq!(restore_calls.load(Ordering::SeqCst), 1);
     }
 }

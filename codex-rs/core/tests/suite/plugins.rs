@@ -272,23 +272,16 @@ async fn explicit_plugin_mentions_inject_plugin_guidance() -> Result<()> {
     let request_body = request.body_json();
     let request_tools = tool_names(&request_body);
     assert!(
-        request_tools
+        !request_tools
             .iter()
             .any(|name| name == "mcp__codex_apps__calendar_create_event"),
-        "expected plugin app tools to become visible for this turn: {request_tools:?}"
+        "plugin app tools should stay hidden until canonical app mention: {request_tools:?}"
     );
     let echo_description = tool_description(&request_body, "mcp__sample__echo")
         .expect("plugin MCP tool description should be present");
     assert!(
         echo_description.contains("This tool is part of plugin `sample`."),
         "expected plugin MCP provenance in tool description: {echo_description:?}"
-    );
-    let calendar_description =
-        tool_description(&request_body, "mcp__codex_apps__calendar_create_event")
-            .expect("plugin app tool description should be present");
-    assert!(
-        calendar_description.contains("This tool is part of plugin `sample`."),
-        "expected plugin app provenance in tool description: {calendar_description:?}"
     );
 
     Ok(())

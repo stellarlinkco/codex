@@ -70,6 +70,7 @@ export type { ForcedLoginMethod } from "./ForcedLoginMethod";
 export type { FunctionCallOutputBody } from "./FunctionCallOutputBody";
 export type { FunctionCallOutputContentItem } from "./FunctionCallOutputContentItem";
 export type { FunctionCallOutputPayload } from "./FunctionCallOutputPayload";
+export type { FuzzyFileSearchMatchType } from "./FuzzyFileSearchMatchType";
 export type { FuzzyFileSearchParams } from "./FuzzyFileSearchParams";
 export type { FuzzyFileSearchResponse } from "./FuzzyFileSearchResponse";
 export type { FuzzyFileSearchResult } from "./FuzzyFileSearchResult";

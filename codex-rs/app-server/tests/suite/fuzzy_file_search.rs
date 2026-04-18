@@ -11,7 +11,7 @@ use std::path::Path;
 use tempfile::TempDir;
 use tokio::time::timeout;
 
-const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const SHORT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(500);
 const STOP_GRACE_PERIOD: std::time::Duration = std::time::Duration::from_millis(250);
 const SESSION_UPDATED_METHOD: &str = "fuzzyFileSearch/sessionUpdated";
@@ -225,6 +225,7 @@ async fn test_fuzzy_file_search_sorts_and_includes_indices() -> Result<()> {
                 {
                     "root": root_path.clone(),
                     "path": "abexy",
+                    "match_type": "file",
                     "file_name": "abexy",
                     "score": 84,
                     "indices": [0, 1, 2],
@@ -232,6 +233,7 @@ async fn test_fuzzy_file_search_sorts_and_includes_indices() -> Result<()> {
                 {
                     "root": root_path.clone(),
                     "path": sub_abce_rel,
+                    "match_type": "file",
                     "file_name": "abce",
                     "score": expected_score,
                     "indices": [4, 5, 7],
@@ -239,6 +241,7 @@ async fn test_fuzzy_file_search_sorts_and_includes_indices() -> Result<()> {
                 {
                     "root": root_path.clone(),
                     "path": "abcde",
+                    "match_type": "file",
                     "file_name": "abcde",
                     "score": 71,
                     "indices": [0, 1, 4],

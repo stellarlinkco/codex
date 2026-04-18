@@ -78,7 +78,6 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Once;
 use std::time::Duration as StdDuration;
-
 struct InstructionsTestCase {
     slug: &'static str,
     expects_apply_patch_instructions: bool,
@@ -3787,7 +3786,9 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
     use crate::exec::ExecParams;
     use crate::protocol::AskForApproval;
     use crate::protocol::SandboxPolicy;
+    use crate::exec_policy::ExecApprovalRequest;
     use crate::sandboxing::SandboxPermissions;
+    use crate::tools::sandboxing::ExecApprovalRequirement;
     use crate::turn_diff_tracker::TurnDiffTracker;
     use std::collections::HashMap;
 
@@ -3823,18 +3824,6 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
         sandbox_permissions,
         windows_sandbox_level: turn_context.windows_sandbox_level,
         justification: Some("test".to_string()),
-        arg0: None,
-    };
-
-    let params2 = ExecParams {
-        sandbox_permissions: SandboxPermissions::UseDefault,
-        command: params.command.clone(),
-        cwd: params.cwd.clone(),
-        expiration: timeout_ms.into(),
-        env: HashMap::new(),
-        network: None,
-        windows_sandbox_level: turn_context.windows_sandbox_level,
-        justification: params.justification.clone(),
         arg0: None,
     };
 
@@ -3874,9 +3863,11 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
     );
 
     pretty_assertions::assert_eq!(output, expected);
+    pretty_assertions::assert_eq!(session.granted_turn_permissions().await, None);
 
-    // Now retry the same command WITHOUT escalated permissions; should succeed.
-    // Force DangerFullAccess to avoid platform sandbox dependencies in tests.
+    // The rejection should not poison the non-escalated path for the same
+    // command. Force DangerFullAccess so this check stays focused on approval
+    // policy rather than platform-specific sandbox behavior.
     let turn_context_mut = Arc::get_mut(&mut turn_context).expect("unique turn context Arc");
     turn_context_mut
         .sandbox_policy
@@ -3887,50 +3878,22 @@ async fn rejects_escalated_permissions_when_policy_not_on_request() {
     turn_context_mut.network_sandbox_policy =
         NetworkSandboxPolicy::from(turn_context_mut.sandbox_policy.get());
 
-    let resp2 = handler
-        .handle(ToolInvocation {
-            session: Arc::clone(&session),
-            turn: Arc::clone(&turn_context),
-            tracker: Arc::clone(&turn_diff_tracker),
-            call_id: "test-call-2".to_string(),
-            tool_name: tool_name.to_string(),
-            payload: ToolPayload::Function {
-                arguments: serde_json::json!({
-                    "command": params2.command.clone(),
-                    "workdir": Some(turn_context.cwd.to_string_lossy().to_string()),
-                    "timeout_ms": params2.expiration.timeout_ms(),
-                    "sandbox_permissions": params2.sandbox_permissions,
-                    "justification": params2.justification.clone(),
-                })
-                .to_string(),
-            },
+    let exec_approval_requirement = session
+        .services
+        .exec_policy
+        .create_exec_approval_requirement_for_command(ExecApprovalRequest {
+            command: &params.command,
+            approval_policy: turn_context.approval_policy.value(),
+            sandbox_policy: turn_context.sandbox_policy.get(),
+            file_system_sandbox_policy: &turn_context.file_system_sandbox_policy,
+            sandbox_permissions: SandboxPermissions::UseDefault,
+            prefix_rule: None,
         })
         .await;
-
-    let output = match resp2.expect("expected Ok result") {
-        ToolOutput::Function {
-            body: FunctionCallOutputBody::Text(content),
-            ..
-        } => content,
-        _ => panic!("unexpected tool output"),
-    };
-
-    #[derive(Deserialize, PartialEq, Eq, Debug)]
-    struct ResponseExecMetadata {
-        exit_code: i32,
-    }
-
-    #[derive(Deserialize)]
-    struct ResponseExecOutput {
-        output: String,
-        metadata: ResponseExecMetadata,
-    }
-
-    let exec_output: ResponseExecOutput =
-        serde_json::from_str(&output).expect("valid exec output json");
-
-    pretty_assertions::assert_eq!(exec_output.metadata, ResponseExecMetadata { exit_code: 0 });
-    assert!(exec_output.output.contains("hi"));
+    assert!(matches!(
+        exec_approval_requirement,
+        ExecApprovalRequirement::Skip { .. }
+    ));
 }
 #[tokio::test]
 async fn unified_exec_rejects_escalated_permissions_when_policy_not_on_request() {

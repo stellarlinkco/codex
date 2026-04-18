@@ -1,10 +1,10 @@
 import { memo, useCallback, useEffect, useState } from 'react'
 import { StandaloneMarkdown } from '@/components/StandaloneMarkdown'
-import type { CardData, GithubJob } from './types'
+import type { GithubCardData, GithubJob } from './types'
 import type { GithubWorkItemDetail, ModelCatalogModel, ReasoningEffort } from '@/types/api'
 
 type CardDetailPanelProps = {
-    card: CardData | null
+    card: GithubCardData | null
     detail: GithubWorkItemDetail | null
     detailLoading: boolean
     jobs: GithubJob[]

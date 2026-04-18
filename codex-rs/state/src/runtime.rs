@@ -37,6 +37,7 @@ use sqlx::Row;
 use sqlx::Sqlite;
 use sqlx::SqliteConnection;
 use sqlx::SqlitePool;
+use sqlx::migrate::MigrateError;
 use sqlx::migrate::Migrator;
 use sqlx::sqlite::SqliteConnectOptions;
 use sqlx::sqlite::SqliteJournalMode;
@@ -47,6 +48,8 @@ use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use tracing::warn;
 
 mod agent_jobs;
@@ -98,14 +101,14 @@ impl StateRuntime {
         .await;
         let state_path = state_db_path(codex_home.as_path());
         let logs_path = logs_db_path(codex_home.as_path());
-        let pool = match open_sqlite(&state_path, &STATE_MIGRATOR).await {
+        let pool = match open_sqlite(&state_path, &STATE_MIGRATOR, "state").await {
             Ok(db) => Arc::new(db),
             Err(err) => {
                 warn!("failed to open state db at {}: {err}", state_path.display());
                 return Err(err);
             }
         };
-        let logs_pool = match open_sqlite(&logs_path, &LOGS_MIGRATOR).await {
+        let logs_pool = match open_sqlite(&logs_path, &LOGS_MIGRATOR, "logs").await {
             Ok(db) => Arc::new(db),
             Err(err) => {
                 warn!("failed to open logs db at {}: {err}", logs_path.display());
@@ -127,20 +130,76 @@ impl StateRuntime {
     }
 }
 
-async fn open_sqlite(path: &Path, migrator: &'static Migrator) -> anyhow::Result<SqlitePool> {
-    let options = SqliteConnectOptions::new()
+async fn open_sqlite(
+    path: &Path,
+    migrator: &'static Migrator,
+    db_label: &str,
+) -> anyhow::Result<SqlitePool> {
+    let pool = connect_sqlite(path).await?;
+    match migrator.run(&pool).await {
+        Ok(()) => Ok(pool),
+        Err(MigrateError::VersionMissing(_) | MigrateError::VersionMismatch(_)) => {
+            pool.close().await;
+            quarantine_incompatible_db_files(path, db_label).await?;
+            let rebuilt_pool = connect_sqlite(path).await?;
+            migrator.run(&rebuilt_pool).await?;
+            warn!(
+                "recreated incompatible {db_label} db at {} after migration drift",
+                path.display()
+            );
+            Ok(rebuilt_pool)
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
+async fn connect_sqlite(path: &Path) -> anyhow::Result<SqlitePool> {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect_with(sqlite_connect_options(path))
+        .await?;
+    Ok(pool)
+}
+
+fn sqlite_connect_options(path: &Path) -> SqliteConnectOptions {
+    SqliteConnectOptions::new()
         .filename(path)
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal)
         .synchronous(SqliteSynchronous::Normal)
         .busy_timeout(Duration::from_secs(5))
-        .log_statements(LevelFilter::Off);
-    let pool = SqlitePoolOptions::new()
-        .max_connections(5)
-        .connect_with(options)
-        .await?;
-    migrator.run(&pool).await?;
-    Ok(pool)
+        .log_statements(LevelFilter::Off)
+}
+
+async fn quarantine_incompatible_db_files(path: &Path, db_label: &str) -> anyhow::Result<()> {
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        anyhow::bail!("invalid {db_label} db path: {}", path.display());
+    };
+    let stamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    for suffix in ["", "-wal", "-shm", "-journal"] {
+        let source = if suffix.is_empty() {
+            path.to_path_buf()
+        } else {
+            path.with_file_name(format!("{file_name}{suffix}"))
+        };
+        if !tokio::fs::try_exists(&source).await.unwrap_or(false) {
+            continue;
+        }
+        let Some(source_name) = source.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        let target = source.with_file_name(format!("{source_name}.incompatible-{stamp}"));
+        tokio::fs::rename(&source, &target).await?;
+        warn!(
+            "moved incompatible {db_label} db file {} to {}",
+            source.display(),
+            target.display()
+        );
+    }
+    Ok(())
 }
 
 fn db_filename(base_name: &str, version: u32) -> String {
@@ -228,4 +287,84 @@ fn should_remove_db_file(file_name: &str, current_name: &str, base_name: &str) -
         return false;
     };
     !version_suffix.is_empty() && version_suffix.chars().all(|ch| ch.is_ascii_digit())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use pretty_assertions::assert_eq;
+
+    fn unique_test_codex_home() -> PathBuf {
+        std::env::temp_dir().join(format!("codex-state-runtime-{}", uuid::Uuid::new_v4()))
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn init_rebuilds_state_db_when_applied_migration_is_missing() {
+        let codex_home = unique_test_codex_home();
+        tokio::fs::create_dir_all(&codex_home)
+            .await
+            .expect("create codex home");
+        let state_path = state_db_path(codex_home.as_path());
+        let latest_migration_version = STATE_MIGRATOR
+            .iter()
+            .map(|migration| migration.version)
+            .max()
+            .expect("state migrator should include at least one migration");
+        let future_version = latest_migration_version + 1;
+
+        let pool = open_sqlite(&state_path, &STATE_MIGRATOR, "state")
+            .await
+            .expect("create initial state db");
+        sqlx::query(
+            "INSERT INTO _sqlx_migrations (version, description, success, checksum, execution_time) VALUES (?1, ?2, ?3, ?4, ?5)",
+        )
+        .bind(future_version)
+        .bind("future_migration")
+        .bind(true)
+        .bind(vec![0_u8])
+        .bind(0_i64)
+        .execute(&pool)
+        .await
+        .expect("insert incompatible migration row");
+        pool.close().await;
+
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("rebuild incompatible state db");
+        let versions: Vec<(i64,)> =
+            sqlx::query_as("SELECT version FROM _sqlx_migrations ORDER BY version")
+                .fetch_all(runtime.pool.as_ref())
+                .await
+                .expect("read rebuilt migration table");
+        assert_eq!(
+            versions.last().map(|row| row.0),
+            Some(latest_migration_version)
+        );
+        assert!(
+            !versions.iter().any(|row| row.0 == future_version),
+            "expected rebuilt state db to drop incompatible migration record"
+        );
+
+        let mut quarantined = Vec::new();
+        let mut entries = tokio::fs::read_dir(&codex_home)
+            .await
+            .expect("read codex home");
+        while let Some(entry) = entries.next_entry().await.expect("read dir entry") {
+            let file_name = entry.file_name();
+            let file_name = file_name.to_string_lossy();
+            if file_name.starts_with("state_5.sqlite.incompatible-") {
+                quarantined.push(file_name.to_string());
+            }
+        }
+        assert_eq!(
+            quarantined.len(),
+            1,
+            "expected exactly one quarantined state db"
+        );
+
+        tokio::fs::remove_dir_all(&codex_home)
+            .await
+            .expect("clean test codex home");
+    }
 }

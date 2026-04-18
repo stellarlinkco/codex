@@ -95,10 +95,18 @@ pub(crate) fn compose_account_display(
         CoreAuthMode::Chatgpt => {
             let email = auth.get_account_email();
             let plan = plan
-                .map(|plan_type| title_case(format!("{plan_type:?}").as_str()))
+                .map(plan_type_display_name)
                 .or_else(|| Some("Unknown".to_string()));
             Some(StatusAccountDisplay::ChatGpt { email, plan })
         }
+    }
+}
+
+pub(crate) fn plan_type_display_name(plan_type: PlanType) -> String {
+    if plan_type == PlanType::ProLite {
+        "Pro Lite".to_string()
+    } else {
+        title_case(format!("{plan_type:?}").as_str())
     }
 }
 
@@ -186,4 +194,17 @@ pub(crate) fn title_case(s: &str) -> String {
     };
     let rest: String = chars.as_str().to_ascii_lowercase();
     first.to_uppercase().collect::<String>() + &rest
+}
+
+#[cfg(test)]
+mod tests {
+    use super::plan_type_display_name;
+    use codex_protocol::account::PlanType;
+    use pretty_assertions::assert_eq;
+
+    #[test]
+    fn plan_type_display_name_formats_prolite() {
+        assert_eq!(plan_type_display_name(PlanType::ProLite), "Pro Lite");
+        assert_eq!(plan_type_display_name(PlanType::Pro), "Pro");
+    }
 }

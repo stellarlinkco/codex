@@ -47,6 +47,7 @@ AGENTS.override.md
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+*.bak
 
 # env
 .env*
@@ -101,3 +102,4 @@ harness-*
 .worktrees/
 run/
 tasks/
+harness-runtime.json.bak

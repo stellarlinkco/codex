@@ -23,7 +23,13 @@ const KanbanColumn = memo(function KanbanColumn({
     repoLabels,
     onSelectCard,
 }: KanbanColumnProps) {
-    const { setNodeRef, isOver } = useDroppable({ id: column.id })
+    const { setNodeRef, isOver } = useDroppable({
+        id: column.id,
+        data: {
+            type: 'column',
+            columnId: column.id,
+        },
+    })
 
     return (
         <div className="flex flex-col shrink-0 w-[85vw] sm:w-[320px] min-w-[260px] sm:min-w-[280px] max-w-[360px] h-full snap-start">
@@ -58,8 +64,8 @@ const KanbanColumn = memo(function KanbanColumn({
                             card={card}
                             isSelected={selectedCardKey === card.key}
                             isDragDisabled={isDragDisabled}
-                            repoColor={repoColors.get(card.item.repo)}
-                            repoLabel={repoLabels.get(card.item.repo)}
+                            repoColor={card.kind === 'github' ? repoColors.get(card.item.repo) : undefined}
+                            repoLabel={card.kind === 'github' ? repoLabels.get(card.item.repo) : undefined}
                             onSelect={onSelectCard}
                         />
                     ))}

@@ -85,6 +85,7 @@ use codex_protocol::protocol::RateLimitWindow;
 use codex_protocol::protocol::ReviewRequest;
 use codex_protocol::protocol::ReviewTarget;
 use codex_protocol::protocol::SessionSource;
+use codex_protocol::protocol::SkillMetadata as ProtocolSkillMetadata;
 use codex_protocol::protocol::SkillScope;
 use codex_protocol::protocol::StreamErrorEvent;
 use codex_protocol::protocol::TerminalInteractionEvent;
@@ -1841,6 +1842,7 @@ async fn make_chatwidget_manual(
         stream_controller: None,
         plan_stream_controller: None,
         last_copyable_output: None,
+        pending_turn_copyable_output: None,
         running_commands: HashMap::new(),
         suppressed_exec_calls: HashSet::new(),
         skills_all: Vec::new(),
@@ -1938,7 +1940,7 @@ fn assert_no_submit_op(op_rx: &mut tokio::sync::mpsc::UnboundedReceiver<Op>) {
     }
 }
 
-fn set_chatgpt_auth(chat: &mut ChatWidget) {
+pub(crate) fn set_chatgpt_auth(chat: &mut ChatWidget) {
     chat.auth_manager = codex_core::test_support::auth_manager_from_auth(
         CodexAuth::create_dummy_chatgpt_auth_for_testing(),
     );
@@ -1985,6 +1987,60 @@ pub(crate) async fn make_chatwidget_manual_with_sender() -> (
     let (widget, rx, op_rx) = make_chatwidget_manual(None).await;
     let app_event_tx = widget.app_event_tx.clone();
     (widget, app_event_tx, rx, op_rx)
+}
+
+#[tokio::test]
+async fn new_from_existing_ignores_startup_tooltip_override_and_preserves_nux_counts() {
+    let mut cfg = test_config().await;
+    cfg.model_availability_nux
+        .shown_count
+        .insert("gpt-5.4".to_string(), 1);
+
+    let model = codex_core::test_support::get_model_offline(cfg.model.as_deref());
+    let session_telemetry = test_session_telemetry(&cfg, model.as_str());
+    let auth_manager =
+        codex_core::test_support::auth_manager_from_auth(CodexAuth::from_api_key("test"));
+    let thread_manager = Arc::new(
+        codex_core::test_support::thread_manager_with_models_provider(
+            CodexAuth::from_api_key("test"),
+            cfg.model_provider.clone(),
+        ),
+    );
+    let started = thread_manager
+        .start_thread(cfg.clone())
+        .await
+        .expect("thread should start");
+
+    let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+    let tx = AppEventSender::new(tx_raw);
+    let init = ChatWidgetInit {
+        config: cfg,
+        frame_requester: FrameRequester::test_dummy(),
+        app_event_tx: tx,
+        initial_user_message: None,
+        enhanced_keys_supported: false,
+        auth_manager,
+        models_manager: thread_manager.get_models_manager(),
+        feedback: codex_feedback::CodexFeedback::new(),
+        is_first_run: false,
+        feedback_audience: FeedbackAudience::External,
+        model: Some(model),
+        startup_tooltip_override: Some("Model now available".to_string()),
+        status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
+        session_telemetry,
+    };
+
+    let widget = ChatWidget::new_from_existing(init, started.thread, started.session_configured);
+
+    assert_eq!(widget.startup_tooltip_override, None);
+    assert_eq!(
+        widget
+            .config
+            .model_availability_nux
+            .shown_count
+            .get("gpt-5.4"),
+        Some(&1)
+    );
 }
 
 fn drain_insert_history(
@@ -5923,6 +5979,69 @@ async fn slash_copy_state_is_preserved_during_running_task() {
 }
 
 #[tokio::test]
+async fn annotate_skill_reads_in_parsed_cmd_appends_skill_name() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let skill_path = PathBuf::from("/tmp/skills/pr-babysitter/SKILL.md");
+    chat.skills_all = vec![ProtocolSkillMetadata {
+        name: "pr-babysitter".to_string(),
+        description: "Babysit a PR".to_string(),
+        short_description: None,
+        interface: None,
+        dependencies: None,
+        path: skill_path.clone(),
+        scope: SkillScope::Repo,
+        enabled: true,
+    }];
+
+    let annotated = chat.annotate_skill_reads_in_parsed_cmd(vec![ParsedCommand::Read {
+        name: "SKILL.md".to_string(),
+        cmd: "cat /tmp/skills/pr-babysitter/SKILL.md".to_string(),
+        path: skill_path.clone(),
+    }]);
+
+    assert_eq!(
+        annotated,
+        vec![ParsedCommand::Read {
+            name: "SKILL.md (pr-babysitter skill)".to_string(),
+            cmd: "cat /tmp/skills/pr-babysitter/SKILL.md".to_string(),
+            path: skill_path,
+        }]
+    );
+}
+
+#[tokio::test]
+async fn slash_copy_state_tracks_commentary_only_turn_completion() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.handle_codex_event(Event {
+        id: "turn-1".into(),
+        msg: EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-1".to_string(),
+            last_agent_message: Some("Previous completed reply".to_string()),
+        }),
+    });
+    chat.on_task_started();
+    complete_assistant_message(
+        &mut chat,
+        "msg-1",
+        "Commentary-only update",
+        Some(MessagePhase::Commentary),
+    );
+    chat.handle_codex_event(Event {
+        id: "turn-2".into(),
+        msg: EventMsg::TurnComplete(TurnCompleteEvent {
+            turn_id: "turn-2".to_string(),
+            last_agent_message: None,
+        }),
+    });
+
+    assert_eq!(
+        chat.last_copyable_output,
+        Some("Commentary-only update".to_string())
+    );
+}
+
+#[tokio::test]
 async fn slash_copy_state_clears_on_thread_rollback() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
 
@@ -6621,6 +6740,50 @@ fn render_bottom_popup(chat: &ChatWidget, width: u16) -> String {
     lines.join("\n")
 }
 
+fn selected_permissions_popup_line(popup: &str) -> &str {
+    popup
+        .lines()
+        .find(|line| {
+            line.contains('›')
+                && (line.contains("Default")
+                    || line.contains("Read Only")
+                    || line.contains("Guardian Approvals")
+                    || line.contains("Full Access"))
+        })
+        .unwrap_or_else(|| {
+            panic!("expected permissions popup to have a selected preset row: {popup}")
+        })
+}
+
+fn selected_permissions_popup_name(popup: &str) -> &'static str {
+    selected_permissions_popup_line(popup)
+        .trim_start()
+        .strip_prefix('›')
+        .map(str::trim_start)
+        .and_then(|line| line.split_once(". ").map(|(_, rest)| rest))
+        .and_then(|line| {
+            ["Read Only", "Default", "Guardian Approvals", "Full Access"]
+                .into_iter()
+                .find(|label| line.starts_with(label))
+        })
+        .unwrap_or_else(|| {
+            panic!("expected permissions popup row to start with a preset label: {popup}")
+        })
+}
+
+fn move_permissions_popup_selection_to(chat: &mut ChatWidget, label: &str, direction: KeyCode) {
+    for _ in 0..4 {
+        let popup = render_bottom_popup(chat, 120);
+        if selected_permissions_popup_name(&popup) == label {
+            return;
+        }
+        chat.handle_key_event(KeyEvent::from(direction));
+    }
+
+    let popup = render_bottom_popup(chat, 120);
+    panic!("expected permissions popup to select {label}: {popup}");
+}
+
 #[tokio::test]
 async fn apps_popup_refreshes_when_connectors_snapshot_updates() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
@@ -7267,7 +7430,7 @@ async fn multi_agent_enable_prompt_updates_feature_and_emits_notice() {
         other => panic!("expected InsertHistoryCell event, got {other:?}"),
     };
     let rendered = lines_to_single_string(&cell.display_lines(120));
-    assert!(rendered.contains("Multi-agent will be enabled in the next session."));
+    assert!(rendered.contains("Subagents will be enabled in the next session."));
 }
 
 #[tokio::test]
@@ -7846,6 +8009,61 @@ async fn user_turn_carries_service_tier_after_fast_toggle() {
 }
 
 #[tokio::test]
+async fn user_turn_clears_service_tier_after_fast_toggle_off() {
+    let (mut chat, mut rx, mut op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
+    chat.thread_id = Some(ThreadId::new());
+    set_chatgpt_auth(&mut chat);
+    chat.set_feature_enabled(Feature::FastMode, true);
+
+    chat.dispatch_command(SlashCommand::Fast);
+    let _events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+
+    chat.dispatch_command_with_args(SlashCommand::Fast, "off".to_string(), Vec::new());
+    let _events = std::iter::from_fn(|| rx.try_recv().ok()).collect::<Vec<_>>();
+
+    chat.bottom_pane
+        .set_composer_text("hello".to_string(), Vec::new(), Vec::new());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+
+    match next_submit_op(&mut op_rx) {
+        Op::UserTurn {
+            service_tier: Some(None),
+            ..
+        } => {}
+        other => panic!("expected Op::UserTurn with cleared service tier, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn fast_status_indicator_requires_chatgpt_auth() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.set_service_tier(Some(ServiceTier::Fast));
+
+    assert!(!chat.should_show_fast_status(chat.current_model(), chat.current_service_tier(),));
+
+    set_chatgpt_auth(&mut chat);
+
+    assert!(chat.should_show_fast_status(chat.current_model(), chat.current_service_tier(),));
+}
+
+#[tokio::test]
+async fn fast_status_indicator_is_hidden_for_non_gpt54_model() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.3-codex")).await;
+    chat.set_service_tier(Some(ServiceTier::Fast));
+    set_chatgpt_auth(&mut chat);
+
+    assert!(!chat.should_show_fast_status(chat.current_model(), chat.current_service_tier(),));
+}
+
+#[tokio::test]
+async fn fast_status_indicator_is_hidden_when_fast_mode_is_off() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    set_chatgpt_auth(&mut chat);
+
+    assert!(!chat.should_show_fast_status(chat.current_model(), chat.current_service_tier(),));
+}
+
+#[tokio::test]
 async fn approvals_popup_shows_disabled_presets() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
 
@@ -7963,7 +8181,25 @@ async fn permissions_selection_emits_history_cell_when_selection_changes() {
     chat.config.notices.hide_full_access_warning = Some(true);
 
     chat.open_permissions_popup();
+    let popup = render_bottom_popup(&chat, 120);
+    #[cfg(target_os = "windows")]
+    let expected_initial = "Read Only";
+    #[cfg(not(target_os = "windows"))]
+    let expected_initial = "Default";
+    assert!(
+        selected_permissions_popup_name(&popup) == expected_initial,
+        "expected permissions popup to open with {expected_initial} selected: {popup}"
+    );
     chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    let popup = render_bottom_popup(&chat, 120);
+    #[cfg(target_os = "windows")]
+    let expected_after_one_down = "Default";
+    #[cfg(not(target_os = "windows"))]
+    let expected_after_one_down = "Full Access";
+    assert!(
+        selected_permissions_popup_name(&popup) == expected_after_one_down,
+        "expected moving down to select {expected_after_one_down} before confirmation: {popup}"
+    );
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
     let cells = drain_insert_history(&mut rx);
@@ -7990,9 +8226,21 @@ async fn permissions_selection_history_snapshot_after_mode_switch() {
     chat.config.notices.hide_full_access_warning = Some(true);
 
     chat.open_permissions_popup();
-    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    let popup = render_bottom_popup(&chat, 120);
     #[cfg(target_os = "windows")]
-    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    let expected_initial = "Read Only";
+    #[cfg(not(target_os = "windows"))]
+    let expected_initial = "Default";
+    assert!(
+        selected_permissions_popup_name(&popup) == expected_initial,
+        "expected permissions popup to open with {expected_initial} selected: {popup}"
+    );
+    move_permissions_popup_selection_to(&mut chat, "Full Access", KeyCode::Down);
+    let popup = render_bottom_popup(&chat, 120);
+    assert!(
+        selected_permissions_popup_name(&popup) == "Full Access",
+        "expected navigation to land on Full Access before confirmation: {popup}"
+    );
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
     let cells = drain_insert_history(&mut rx);
@@ -8024,7 +8272,17 @@ async fn permissions_selection_history_snapshot_full_access_to_default() {
         .expect("set sandbox policy");
 
     chat.open_permissions_popup();
-    chat.handle_key_event(KeyEvent::from(KeyCode::Up));
+    let popup = render_bottom_popup(&chat, 120);
+    assert!(
+        selected_permissions_popup_name(&popup) == "Full Access",
+        "expected permissions popup to open with Full Access selected: {popup}"
+    );
+    move_permissions_popup_selection_to(&mut chat, "Default", KeyCode::Up);
+    let popup = render_bottom_popup(&chat, 120);
+    assert!(
+        selected_permissions_popup_name(&popup) == "Default",
+        "expected navigation to land on Default before confirmation: {popup}"
+    );
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
     let cells = drain_insert_history(&mut rx);
@@ -8061,6 +8319,11 @@ async fn permissions_selection_emits_history_cell_when_current_is_selected() {
         .expect("set sandbox policy");
 
     chat.open_permissions_popup();
+    let popup = render_bottom_popup(&chat, 120);
+    assert!(
+        selected_permissions_popup_name(&popup) == "Default",
+        "expected permissions popup to open with Default selected: {popup}"
+    );
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
     let cells = drain_insert_history(&mut rx);
@@ -8077,6 +8340,25 @@ async fn permissions_selection_emits_history_cell_when_current_is_selected() {
 }
 
 #[tokio::test]
+async fn permissions_selection_hides_guardian_approvals_when_feature_disabled() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    #[cfg(target_os = "windows")]
+    {
+        chat.config.notices.hide_world_writable_warning = Some(true);
+        chat.set_windows_sandbox_mode(Some(WindowsSandboxModeToml::Unelevated));
+    }
+    chat.config.notices.hide_full_access_warning = Some(true);
+
+    chat.open_permissions_popup();
+    let popup = render_bottom_popup(&chat, 120);
+
+    assert!(
+        !popup.contains("Guardian Approvals"),
+        "expected Guardian Approvals to stay hidden until the experimental feature is enabled: {popup}"
+    );
+}
+
+#[tokio::test]
 async fn permissions_full_access_history_cell_emitted_only_after_confirmation() {
     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
     #[cfg(target_os = "windows")]
@@ -8087,9 +8369,7 @@ async fn permissions_full_access_history_cell_emitted_only_after_confirmation() 
     chat.config.notices.hide_full_access_warning = None;
 
     chat.open_permissions_popup();
-    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
-    #[cfg(target_os = "windows")]
-    chat.handle_key_event(KeyEvent::from(KeyCode::Down));
+    move_permissions_popup_selection_to(&mut chat, "Full Access", KeyCode::Down);
     chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
 
     let mut open_confirmation_event = None;
@@ -9590,6 +9870,64 @@ async fn status_line_fast_mode_footer_snapshot() {
         .draw(|f| chat.render(f.area(), f.buffer_mut()))
         .expect("draw fast-mode footer");
     assert_snapshot!("status_line_fast_mode_footer", terminal.backend());
+}
+
+#[tokio::test]
+async fn status_line_model_with_reasoning_includes_fast_for_gpt54_only() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.config.cwd = PathBuf::from("/tmp/project");
+    chat.config.tui_status_line = Some(vec![
+        "model-with-reasoning".to_string(),
+        "context-remaining".to_string(),
+        "current-dir".to_string(),
+    ]);
+    chat.set_reasoning_effort(Some(ReasoningEffortConfig::XHigh));
+    chat.set_service_tier(Some(ServiceTier::Fast));
+    set_chatgpt_auth(&mut chat);
+    chat.refresh_status_line();
+
+    assert_eq!(
+        status_line_text(&chat),
+        Some("gpt-5.4 xhigh fast · 100% left · /tmp/project".to_string())
+    );
+
+    chat.set_model("gpt-5.3-codex");
+    chat.refresh_status_line();
+
+    assert_eq!(
+        status_line_text(&chat),
+        Some("gpt-5.3-codex xhigh · 100% left · /tmp/project".to_string())
+    );
+}
+
+#[tokio::test]
+async fn status_line_model_with_reasoning_fast_footer_snapshot() {
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(Some("gpt-5.4")).await;
+    chat.show_welcome_banner = false;
+    chat.config.cwd = PathBuf::from("/tmp/project");
+    chat.config.tui_status_line = Some(vec![
+        "model-with-reasoning".to_string(),
+        "context-remaining".to_string(),
+        "current-dir".to_string(),
+    ]);
+    chat.set_reasoning_effort(Some(ReasoningEffortConfig::XHigh));
+    chat.set_service_tier(Some(ServiceTier::Fast));
+    set_chatgpt_auth(&mut chat);
+    chat.refresh_status_line();
+
+    let width = 80;
+    let height = chat.desired_height(width);
+    let mut terminal = Terminal::new(TestBackend::new(width, height)).expect("create terminal");
+    terminal
+        .draw(|f| chat.render(f.area(), f.buffer_mut()))
+        .expect("draw model-with-reasoning footer");
+    assert_snapshot!(
+        "status_line_model_with_reasoning_fast_footer",
+        terminal.backend()
+    );
 }
 
 #[tokio::test]

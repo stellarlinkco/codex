@@ -1,13 +1,33 @@
-import type { GithubJob, GithubKanbanCardSettings, GithubWorkItem, ReasoningEffort, Workspace, WorkspaceSummary } from '@/types/api'
+import type {
+    GithubJob,
+    GithubKanbanCardSettings,
+    GithubWorkItem,
+    ReasoningEffort,
+    SessionSummary,
+    Workspace,
+    WorkspaceSummary,
+} from '@/types/api'
 
 export type KanbanScope = 'sessions' | 'github' | 'workspace'
 
-export type CardData = {
+export type GithubCardData = {
+    kind: 'github'
     key: string
     item: GithubWorkItem
     latestJob: GithubJob | null
     settings: GithubKanbanCardSettings
 }
+
+export type SessionCardData = {
+    kind: 'session'
+    key: string
+    session: SessionSummary
+    title: string
+    path: string
+    agentLabel: string
+}
+
+export type CardData = GithubCardData | SessionCardData
 
 export type ColumnData = {
     id: string
@@ -39,4 +59,4 @@ export type WorkspaceFormData = {
     repos: Array<{ fullName: string; color?: string; shortLabel?: string }>
 }
 
-export { type GithubJob, type GithubWorkItem, type Workspace, type WorkspaceSummary }
+export { type GithubJob, type GithubWorkItem, type SessionSummary, type Workspace, type WorkspaceSummary }

@@ -73,10 +73,6 @@ use tokio::process::Command;
 
 pub struct McpProcess {
     next_request_id: AtomicI64,
-    /// Retain this child process until the client is dropped. The Tokio runtime
-    /// will make a "best effort" to reap the process after it exits, but it is
-    /// not a guarantee. See the `kill_on_drop` documentation for details.
-    #[allow(dead_code)]
     process: Child,
     stdin: Option<ChildStdin>,
     stdout: BufReader<ChildStdout>,
@@ -122,10 +118,7 @@ impl McpProcess {
             }
         }
 
-        let mut process = cmd
-            .kill_on_drop(true)
-            .spawn()
-            .context("codex-mcp-server proc should start")?;
+        let mut process = cmd.spawn().context("codex-mcp-server proc should start")?;
         let stdin = process
             .stdin
             .take()
@@ -886,7 +879,10 @@ impl McpProcess {
 
     async fn read_jsonrpc_message(&mut self) -> anyhow::Result<JSONRPCMessage> {
         let mut line = String::new();
-        self.stdout.read_line(&mut line).await?;
+        let bytes = self.stdout.read_line(&mut line).await?;
+        if bytes == 0 {
+            anyhow::bail!("mcp should not close stdout");
+        }
         let message = serde_json::from_str::<JSONRPCMessage>(&line)?;
         eprintln!("read message from stdout: {message:?}");
         Ok(message)

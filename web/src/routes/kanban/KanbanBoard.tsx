@@ -1,6 +1,16 @@
 import { useCallback, useMemo } from 'react'
-import { DndContext, DragOverlay, PointerSensor, useSensor, useSensors } from '@dnd-kit/core'
-import type { DragEndEvent, DragStartEvent } from '@dnd-kit/core'
+import {
+    closestCorners,
+    DndContext,
+    DragOverlay,
+    KeyboardSensor,
+    PointerSensor,
+    pointerWithin,
+    useSensor,
+    useSensors,
+} from '@dnd-kit/core'
+import type { CollisionDetection, DragEndEvent, DragStartEvent } from '@dnd-kit/core'
+import { sortableKeyboardCoordinates } from '@dnd-kit/sortable'
 import { KanbanColumn } from './KanbanColumn'
 import { KanbanCard } from './KanbanCard'
 import type { CardData, ColumnData } from './types'
@@ -35,6 +45,9 @@ export function KanbanBoard({
     const sensors = useSensors(
         useSensor(PointerSensor, {
             activationConstraint: { distance: 5 },
+        }),
+        useSensor(KeyboardSensor, {
+            coordinateGetter: sortableKeyboardCoordinates,
         })
     )
 
@@ -91,9 +104,48 @@ export function KanbanBoard({
 
     const activeCard = activeCardKey ? cardsByKey.get(activeCardKey) : null
 
+    const collisionDetection = useCallback<CollisionDetection>((args) => {
+        const cardContainers = args.droppableContainers.filter(
+            container => container.data.current?.type === 'card'
+        )
+        const columnContainers = args.droppableContainers.filter(
+            container => container.data.current?.type === 'column'
+        )
+
+        const cardHits = pointerWithin({
+            ...args,
+            droppableContainers: cardContainers,
+        })
+        if (cardHits.length > 0) {
+            return cardHits
+        }
+
+        const columnHits = pointerWithin({
+            ...args,
+            droppableContainers: columnContainers,
+        })
+        if (columnHits.length > 0) {
+            return columnHits
+        }
+
+        const cardFallbackHits = closestCorners({
+            ...args,
+            droppableContainers: cardContainers,
+        })
+        if (cardFallbackHits.length > 0) {
+            return cardFallbackHits
+        }
+
+        return closestCorners({
+            ...args,
+            droppableContainers: columnContainers,
+        })
+    }, [])
+
     return (
         <DndContext
             sensors={sensors}
+            collisionDetection={collisionDetection}
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
             onDragCancel={onDragCancel}
@@ -122,8 +174,8 @@ export function KanbanBoard({
                             card={activeCard}
                             isSelected={false}
                             isDragDisabled
-                            repoColor={repoColors.get(activeCard.item.repo)}
-                            repoLabel={repoLabels.get(activeCard.item.repo)}
+                            repoColor={activeCard.kind === 'github' ? repoColors.get(activeCard.item.repo) : undefined}
+                            repoLabel={activeCard.kind === 'github' ? repoLabels.get(activeCard.item.repo) : undefined}
                             onSelect={() => {}}
                         />
                     </div>

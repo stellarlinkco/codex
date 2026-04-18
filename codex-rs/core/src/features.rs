@@ -643,9 +643,9 @@ pub const FEATURES: &[FeatureSpec] = &[
         id: Feature::Collab,
         key: "multi_agent",
         stage: Stage::Experimental {
-            name: "Multi-agents",
-            menu_description: "Ask Codex to spawn multiple agents to parallelize the work and win in efficiency.",
-            announcement: "NEW: Multi-agents can now be spawned by Codex. Enable in /experimental and restart Codex!",
+            name: "Subagents",
+            menu_description: "Ask Codex to spawn subagents to parallelize the work and move faster.",
+            announcement: "NEW: Subagents can now be spawned by Codex. Enable in /experimental and restart Codex!",
         },
         default_enabled: false,
     },
@@ -921,5 +921,13 @@ mod tests {
     fn collab_is_legacy_alias_for_multi_agent() {
         assert_eq!(feature_for_key("multi_agent"), Some(Feature::Collab));
         assert_eq!(feature_for_key("collab"), Some(Feature::Collab));
+    }
+
+    #[test]
+    fn guardian_approval_is_legacy_alias_for_request_permissions() {
+        assert_eq!(
+            feature_for_key("guardian_approval"),
+            Some(Feature::RequestPermissions)
+        );
     }
 }

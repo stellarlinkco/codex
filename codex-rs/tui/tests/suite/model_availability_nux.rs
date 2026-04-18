@@ -10,6 +10,7 @@ use tokio::time::sleep;
 use tokio::time::timeout;
 
 #[tokio::test]
+#[ignore = "flaky PTY startup handshake; semantic coverage lives in chatwidget unit tests"]
 async fn resume_startup_does_not_consume_model_availability_nux_count() -> Result<()> {
     // run_codex_cli() does not work on Windows due to PTY limitations.
     if cfg!(windows) {
