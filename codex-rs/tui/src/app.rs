@@ -72,6 +72,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::FinalOutput;
+use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::ListSkillsResponseEvent;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SandboxPolicy;
@@ -1523,7 +1524,11 @@ impl App {
         self.chat_widget.set_pending_thread_approvals(Vec::new());
     }
 
-    async fn start_fresh_session_with_summary_hint(&mut self, tui: &mut tui::Tui) {
+    async fn start_fresh_session_with_summary_hint(
+        &mut self,
+        tui: &mut tui::Tui,
+        initial_history: InitialHistory,
+    ) {
         // Start a fresh in-memory session while preserving resumability via persisted rollout
         // history.
         self.refresh_in_memory_config_from_disk_best_effort("starting a new thread")
@@ -1556,7 +1561,8 @@ impl App {
             status_line_invalid_items_warned: self.status_line_invalid_items_warned.clone(),
             session_telemetry: self.session_telemetry.clone(),
         };
-        self.chat_widget = ChatWidget::new(init, self.server.clone());
+        self.chat_widget =
+            ChatWidget::new_with_initial_history(init, self.server.clone(), initial_history);
         self.reset_thread_event_state();
         if let Some(summary) = summary {
             let mut lines: Vec<Line<'static>> = vec![summary.usage_line.clone().into()];
@@ -2099,13 +2105,14 @@ impl App {
     async fn handle_event(&mut self, tui: &mut tui::Tui, event: AppEvent) -> Result<AppRunControl> {
         match event {
             AppEvent::NewSession => {
-                self.start_fresh_session_with_summary_hint(tui).await;
+                self.start_fresh_session_with_summary_hint(tui, InitialHistory::New)
+                    .await;
             }
             AppEvent::ClearUi => {
                 self.clear_terminal_ui(tui, false)?;
                 self.reset_app_ui_state_after_clear();
-
-                self.start_fresh_session_with_summary_hint(tui).await;
+                self.start_fresh_session_with_summary_hint(tui, InitialHistory::Cleared)
+                    .await;
             }
             AppEvent::OpenResumePicker => {
                 match crate::resume_picker::run_resume_picker(tui, &self.config, false).await? {

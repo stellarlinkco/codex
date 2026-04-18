@@ -299,6 +299,7 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::plan_tool::UpdatePlanArgs;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_utils_approval_presets::ApprovalPreset;
 use codex_utils_approval_presets::builtin_approval_presets;
@@ -3265,6 +3266,14 @@ impl ChatWidget {
     }
 
     pub(crate) fn new(common: ChatWidgetInit, thread_manager: Arc<ThreadManager>) -> Self {
+        Self::new_with_initial_history(common, thread_manager, InitialHistory::New)
+    }
+
+    pub(crate) fn new_with_initial_history(
+        common: ChatWidgetInit,
+        thread_manager: Arc<ThreadManager>,
+        initial_history: InitialHistory,
+    ) -> Self {
         let ChatWidgetInit {
             config,
             frame_requester,
@@ -3287,7 +3296,12 @@ impl ChatWidget {
         let prevent_idle_sleep = config.features.enabled(Feature::PreventIdleSleep);
         let mut rng = rand::rng();
         let placeholder = PLACEHOLDERS[rng.random_range(0..PLACEHOLDERS.len())].to_string();
-        let codex_op_tx = spawn_agent(config.clone(), app_event_tx.clone(), thread_manager);
+        let codex_op_tx = spawn_agent(
+            config.clone(),
+            app_event_tx.clone(),
+            thread_manager,
+            initial_history,
+        );
 
         let model_override = model.as_deref();
         let model_for_header = model

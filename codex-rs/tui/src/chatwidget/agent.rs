@@ -6,6 +6,7 @@ use codex_core::ThreadManager;
 use codex_core::config::Config;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
+use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::Op;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::unbounded_channel;
@@ -30,6 +31,7 @@ pub(crate) fn spawn_agent(
     config: Config,
     app_event_tx: AppEventSender,
     server: Arc<ThreadManager>,
+    initial_history: InitialHistory,
 ) -> UnboundedSender<Op> {
     let (codex_op_tx, mut codex_op_rx) = unbounded_channel::<Op>();
 
@@ -39,7 +41,16 @@ pub(crate) fn spawn_agent(
             thread,
             session_configured,
             ..
-        } = match server.start_thread(config).await {
+        } = match server
+            .start_thread_with_tools_and_service_name(
+                config,
+                initial_history,
+                Vec::new(),
+                false,
+                None,
+            )
+            .await
+        {
             Ok(v) => v,
             Err(err) => {
                 let message = format!("Failed to initialize codex: {err}");

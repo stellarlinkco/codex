@@ -5817,7 +5817,7 @@ async fn build_session_json(session: &ActiveSession) -> Session {
 
 fn extract_reasoning_effort_from_history(history: &InitialHistory) -> Option<ReasoningEffort> {
     let items = match history {
-        InitialHistory::New => return None,
+        InitialHistory::New | InitialHistory::Cleared => return None,
         InitialHistory::Resumed(resumed) => &resumed.history,
         InitialHistory::Forked(items) => items,
     };

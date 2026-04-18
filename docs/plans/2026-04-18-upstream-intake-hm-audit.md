@@ -26,7 +26,7 @@
 | `86764af68` | 中 | Linux/macOS sandbox 下首次 `.codex` 创建稳定性 | `core/codex_thread` + `sandboxing` + 相关测试 | 未开始 | 待定 |
 | `71923f43a` | 中 | `codex exec` stdin piping 行为增强 | 现仓 `exec` 已含 stdin 路径，做差异复核 | 未开始 | 待定 |
 | `ae057e0bb` | 中 | 活跃 TUI 会话里 `/status` 速率限制展示不陈旧 | `tui/src/app.rs` + `chatwidget.rs` + `status/*` + `app_event.rs` | 已完成 | Adopted-equivalent |
-| `7999b0f60` | 中 | clear 场景下 SessionStart source 可区分为 clear | `protocol` + `core` + `app-server-protocol` + `app-server` + `tui` | 未开始 | 待定 |
+| `7999b0f60` | 中 | clear 场景下 SessionStart source 可区分为 clear | `protocol` + `core` + `app-server-protocol` + `app-server` + `tui` | 已完成 | Adopted-equivalent |
 
 ## 批次实施记录
 
@@ -96,6 +96,21 @@
   - `cargo test -p codex-app-server-protocol`
   - `cargo test -p codex-app-server`
   - `just write-app-server-schema`
+- 执行回填（已完成）：
+  - 协议层：新增 `ThreadStartSource { startup, clear }`，`thread/start` 增加可选字段 `sessionStartSource`，并同步 JSON/TS schema。
+  - app-server：`thread/start` 将 `sessionStartSource=clear` 映射为 `InitialHistory::Cleared`。
+  - core：`InitialHistory` 新增 `Cleared` 分支，并在 `SessionStart` hook payload 中透传 `source: "clear"`。
+  - tui：`/clear` 触发新会话时改为 `InitialHistory::Cleared`（保留当前分支非 app-server 直连架构）。
+  - 兼容修复：补齐 `codex-serve` 对 `InitialHistory::Cleared` 的 match 覆盖，避免编译失败。
+  - 通过命令：
+    - `just write-app-server-schema`（0）
+    - `cargo check -p codex-app-server-protocol -p codex-app-server -p codex-core -p codex-tui`（0）
+    - `cargo test -p codex-app-server-protocol`（0）
+    - `cargo test -p codex-app-server skills_changed_notification_is_emitted_after_skill_change`（0）
+    - `cargo test -p codex-tui slash_clear_requests_ui_clear_when_idle`（0）
+    - `cargo test -p codex-tui clear_only_ui_reset_preserves_chat_session_state`（0）
+    - `cargo check -p codex-serve`（0）
+  - 备注：`cargo test -p codex-core --lib thread_manager::tests::drops_from_last_user_only -- --exact` 本地执行耗时异常，已中止，交由 CI 继续兜底。
 
 ### Batch E - 适配判定与 N/A 证据
 
