@@ -1148,7 +1148,7 @@ fn try_print_completion(
     let mut app = MultitoolCli::command();
     app.set_bin_name("codex");
     app.build();
-    match cmd.shell.try_generate(&mut app, writer) {
+    match cmd.shell.try_generate(&app, writer) {
         Ok(()) => Ok(()),
         Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
         Err(err) => Err(err).context("failed to write completion file"),

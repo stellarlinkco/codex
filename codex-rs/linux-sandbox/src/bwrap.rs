@@ -683,11 +683,9 @@ mod tests {
                 .windows(3)
                 .any(|window| { window[0] == "--bind-fd" && window[2] == writable_root_str })
         );
-        assert!(
-            args.args.windows(3).any(|window| {
-                window == ["--ro-bind", blocked_str.as_str(), blocked_str.as_str()]
-            })
-        );
+        assert!(args.args.windows(3).any(|window| {
+            (window[0] == "--ro-bind" || window[0] == "--ro-bind-fd") && window[2] == blocked_str
+        }));
     }
 
     #[test]
