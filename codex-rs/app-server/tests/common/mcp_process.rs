@@ -1058,7 +1058,7 @@ impl Drop for McpProcess {
             }
         }
 
-        let _ = self.process.kill();
+        let _ = self.process.start_kill();
 
         let start = std::time::Instant::now();
         let timeout = std::time::Duration::from_secs(5);
