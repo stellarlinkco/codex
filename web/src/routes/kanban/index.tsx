@@ -2,6 +2,7 @@ import { useCallback, useDeferredValue, useMemo, useState } from 'react'
 import { useNavigate } from '@tanstack/react-router'
 import { useQueryClient } from '@tanstack/react-query'
 import { LoadingState } from '@/components/LoadingState'
+import { useKanban } from '@/hooks/queries/useKanban'
 import { useGithubJobs } from '@/hooks/queries/useGithubJobs'
 import { useGithubKanban } from '@/hooks/queries/useGithubKanban'
 import { useGithubJobLog } from '@/hooks/queries/useGithubJobLog'
@@ -9,6 +10,7 @@ import { useModelsCatalog } from '@/hooks/queries/useModelsCatalog'
 import { useGithubRepos } from '@/hooks/queries/useGithubRepos'
 import { useGithubWorkItems } from '@/hooks/queries/useGithubWorkItems'
 import { useGithubWorkItemDetail } from '@/hooks/queries/useGithubWorkItemDetail'
+import { useSessions } from '@/hooks/queries/useSessions'
 import { useWorkspaces } from '@/hooks/queries/useWorkspaces'
 import { useWorkspaceKanban } from '@/hooks/queries/useWorkspaceKanban'
 import { useWorkspaceWorkItems } from '@/hooks/queries/useWorkspaceWorkItems'
@@ -24,7 +26,7 @@ import { CardDetailPanel } from './CardDetailPanel'
 import { WorkspaceDialog } from './WorkspaceDialog'
 import { JobLogViewer } from './JobLogViewer'
 import type { CardData, ColumnData, KanbanScope, WorkspaceFormData } from './types'
-import type { GithubJob, GithubKanbanCardSettings, GithubWorkItem, ReasoningEffort, Workspace } from '@/types/api'
+import type { GithubJob, GithubWorkItem, ReasoningEffort, Workspace } from '@/types/api'
 
 export function KanbanPage() {
     const { api } = useAppContext()
@@ -49,6 +51,11 @@ export function KanbanPage() {
     // Detect GitHub webhook availability (always fetch repos to know)
     const { data: githubReposData } = useGithubRepos(api)
     const hasGithubWebhook = (githubReposData?.repos?.length ?? 0) > 0 || scope === 'github'
+
+    // Data queries - Sessions scope
+    const sessionsEnabled = scope === 'sessions'
+    const { sessions } = useSessions(sessionsEnabled ? api : null)
+    const { data: sessionKanban, refetch: refetchSessionKanban } = useKanban(sessionsEnabled ? api : null)
 
     // Data queries - GitHub scope
     const githubEnabled = scope === 'github'
@@ -95,10 +102,11 @@ export function KanbanPage() {
     }, [scope, githubWorkItems, wsWorkItems])
 
     const kanbanConfig = useMemo(() => {
+        if (scope === 'sessions') return sessionKanban
         if (scope === 'github') return githubKanban
         if (scope === 'workspace') return wsKanban
         return null
-    }, [scope, githubKanban, wsKanban])
+    }, [scope, sessionKanban, githubKanban, wsKanban])
 
     const jobs: GithubJob[] = useMemo(() => {
         if (scope === 'github') return githubJobsData?.jobs ?? []
@@ -136,6 +144,23 @@ export function KanbanPage() {
     // Build card data map
     const cardsByKey = useMemo(() => {
         const map = new Map<string, CardData>()
+        if (scope === 'sessions') {
+            for (const session of sessions) {
+                map.set(session.id, {
+                    kind: 'session',
+                    key: session.id,
+                    session,
+                    title: session.metadata?.name
+                        || session.metadata?.summary?.text
+                        || session.metadata?.path?.split('/').filter(Boolean).pop()
+                        || session.id.slice(0, 8),
+                    path: session.metadata?.worktree?.basePath || session.metadata?.path || session.id,
+                    agentLabel: session.metadata?.flavor?.trim() || 'session',
+                })
+            }
+            return map
+        }
+
         const jobsByItem = new Map<string, GithubJob>()
         for (const job of jobs) {
             const existing = jobsByItem.get(job.workItemKey)
@@ -144,9 +169,10 @@ export function KanbanPage() {
             }
         }
 
-        const settings = kanbanConfig?.cardSettings ?? {}
+        const settings = kanbanConfig && 'cardSettings' in kanbanConfig ? kanbanConfig.cardSettings ?? {} : {}
         for (const item of workItems) {
             map.set(item.workItemKey, {
+                kind: 'github',
                 key: item.workItemKey,
                 item,
                 latestJob: jobsByItem.get(item.workItemKey) ?? null,
@@ -154,7 +180,7 @@ export function KanbanPage() {
             })
         }
         return map
-    }, [workItems, jobs, kanbanConfig])
+    }, [scope, sessions, workItems, jobs, kanbanConfig])
 
     // Build columns with card keys
     const columns: ColumnData[] = useMemo(() => {
@@ -167,11 +193,24 @@ export function KanbanPage() {
         // Filter matching search/repo
         const matchingKeys = new Set<string>()
         for (const [key, card] of cardsByKey) {
-            const matchSearch = !deferredSearch
-                || card.item.title.toLowerCase().includes(deferredSearch.toLowerCase())
-                || card.item.repo.toLowerCase().includes(deferredSearch.toLowerCase())
-                || `#${card.item.number}`.includes(deferredSearch)
-            const matchRepo = !repoFilter || card.item.repo === repoFilter
+            const needle = deferredSearch.toLowerCase()
+            const matchSearch = !deferredSearch || (
+                card.kind === 'session'
+                    ? (
+                        card.title.toLowerCase().includes(needle)
+                        || card.path.toLowerCase().includes(needle)
+                        || card.agentLabel.toLowerCase().includes(needle)
+                        || card.session.id.toLowerCase().includes(needle)
+                    )
+                    : (
+                        card.item.title.toLowerCase().includes(needle)
+                        || card.item.repo.toLowerCase().includes(needle)
+                        || `#${card.item.number}`.includes(deferredSearch)
+                    )
+            )
+            const matchRepo = card.kind === 'github'
+                ? (!repoFilter || card.item.repo === repoFilter)
+                : true
             if (matchSearch && matchRepo) {
                 matchingKeys.add(key)
             }
@@ -233,7 +272,10 @@ export function KanbanPage() {
 
         const card = cardsByKey.get(cardKey)
         try {
-            if (scope === 'github') {
+            if (scope === 'sessions') {
+                await api.moveKanbanCard(cardKey, { columnId, position })
+                void refetchSessionKanban()
+            } else if (scope === 'github' && card?.kind === 'github') {
                 await api.moveGithubKanbanCard({
                     workItemKey: cardKey,
                     columnId,
@@ -244,7 +286,7 @@ export function KanbanPage() {
                 })
                 void refetchGithubKanban()
                 void queryClient.invalidateQueries({ queryKey: queryKeys.githubJobs })
-            } else if (scope === 'workspace' && selectedWorkspaceId) {
+            } else if (scope === 'workspace' && selectedWorkspaceId && card?.kind === 'github') {
                 await api.moveWorkspaceKanbanCard(selectedWorkspaceId, {
                     workItemKey: cardKey,
                     columnId,
@@ -259,7 +301,7 @@ export function KanbanPage() {
         } catch {
             addToast({ title: 'Move failed', body: 'Could not move card', sessionId: '', url: '' })
         }
-    }, [api, scope, selectedWorkspaceId, cardsByKey, queryClient, refetchGithubKanban, refetchWsKanban, addToast])
+    }, [api, scope, selectedWorkspaceId, cardsByKey, queryClient, refetchSessionKanban, refetchGithubKanban, refetchWsKanban, addToast])
 
     const handleDragCancel = useCallback(() => {
         setActiveCardKey(null)
@@ -373,6 +415,7 @@ export function KanbanPage() {
     const isDragDisabled = deferredSearch.length > 0
 
     const selectedCard = selectedCardKey ? cardsByKey.get(selectedCardKey) ?? null : null
+    const selectedGithubCard = selectedCard?.kind === 'github' ? selectedCard : null
 
     // Empty state for workspace scope
     const showEmptyWorkspace = scope === 'workspace' && !selectedWorkspaceId
@@ -448,9 +491,9 @@ export function KanbanPage() {
                 )}
 
                 {/* Detail panel */}
-                {selectedCard && (
+                {selectedGithubCard && (
                     <CardDetailPanel
-                        card={selectedCard}
+                        card={selectedGithubCard}
                         detail={itemDetail ?? null}
                         detailLoading={detailLoading}
                         jobs={jobs}
