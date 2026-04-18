@@ -2597,6 +2597,7 @@ name = "codex-utils-absolute-path"
 version = "1.3.0"
 dependencies = [
  "dirs",
+ "dunce",
  "path-absolutize",
  "pretty_assertions",
  "schemars 0.8.22",

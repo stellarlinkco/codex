@@ -20,7 +20,7 @@
 | `e9e7ef3d3` | 高 | Windows verbatim/non-verbatim 路径比较一致化，修复 cwd 过滤误判 | `codex-rs/core/src/path_utils.rs` + `app-server`/`tui` 调用点 | 已完成 | Adopted-equivalent |
 | `04fc208b6` | 高 | 保留 tool_search_output 原始顺序，不被分组排序打散 | 本仓无同名 `tools` 模块，映射到连接器/工具发现链路评估 | 未开始 | 待定 |
 | `36712d854` | 高 | remote websocket client 建连前安装 rustls provider | 本仓无 `app-server-client` crate，需评估等价入口 | 未开始 | 待定 |
-| `b11478149` | 中 | sandbox writable roots 与 symlink 路径处理一致化 | `core/path_utils` + `protocol/permissions` + `linux-sandbox` | 未开始 | 待定 |
+| `b11478149` | 中 | sandbox writable roots 与 symlink 路径处理一致化 | `utils/absolute-path` + `core/sandboxing/mod.rs` + `linux-sandbox/bwrap.rs` + `exec/tui cwd` | 已完成 | Adopted-equivalent |
 | `b976e701a` | 中 | Windows elevated sandbox 支持 split carveouts | `windows-sandbox-rs` + `core/sandboxing` + `core/exec` | 未开始 | 待定 |
 | `95ba76262` | 中 | Windows restricted-token sandbox 支持 split carveouts | `windows-sandbox-rs` + `core/sandboxing` + `core/exec` | 未开始 | 待定 |
 | `86764af68` | 中 | Linux/macOS sandbox 下首次 `.codex` 创建稳定性 | `core/codex_thread` + `sandboxing` + 相关测试 | 未开始 | 待定 |
@@ -74,8 +74,18 @@
   - `cargo test -p codex-windows-sandbox`（CI Windows 任务）
 - 执行回填（已完成子项）：
   - `e9e7ef3d3` 已语义吸纳：新增 `paths_match_after_normalization` 并统一替换 app-server/core/tui 多处 cwd 比较。
+  - `b11478149` 已语义吸纳：
+    - 新增 `canonicalize_preserving_symlinks` / `canonicalize_existing_preserving_symlinks`（`utils/absolute-path`）
+    - `exec` 与 `tui` 的 `config_cwd` 改为保留逻辑 symlink 路径且对不存在路径显式报错
+    - `core/sandboxing` 追加 symlink 路径归一化回归测试，避免额外权限归一化时提前解链
+    - `linux-sandbox/bwrap` 同步上游实现，按 symlink 真实目标挂载并重映射 carveout/unreadable roots
   - 通过命令：
     - `cargo check -p codex-core -p codex-tui -p codex-app-server`（0）
+    - `cargo check -p codex-utils-absolute-path -p codex-core -p codex-exec -p codex-tui -p codex-linux-sandbox`（0）
+    - `cargo test -p codex-utils-absolute-path canonicalize_preserving_symlinks`（0）
+    - `cargo test -p codex-utils-absolute-path canonicalize_existing_preserving_symlinks`（0）
+    - `cargo test -p codex-core normalize_additional_permissions_preserves_symlinked_write_paths`（0）
+    - `cargo check -p codex-linux-sandbox --target x86_64-unknown-linux-gnu`（失败：本机缺少 cross OpenSSL，待 CI Linux 环境验证）
   - 备注：`codex-core` 单测二进制编译耗时长，本地未完成该项测试执行，交由 CI 验收。
 
 ### Batch D - SessionStart clear source

@@ -40,7 +40,7 @@ use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::NetworkAccess;
 use codex_protocol::protocol::ReadOnlyAccess;
 use codex_utils_absolute_path::AbsolutePathBuf;
-use dunce::canonicalize;
+use codex_utils_absolute_path::canonicalize_preserving_symlinks;
 use macos_permissions::intersect_macos_seatbelt_profile_extensions;
 use macos_permissions::merge_macos_seatbelt_profile_extensions;
 use std::collections::HashMap;
@@ -287,7 +287,7 @@ fn normalize_permission_paths(
     let mut seen = HashSet::new();
 
     for path in paths {
-        let canonicalized = canonicalize(path.as_path())
+        let canonicalized = canonicalize_preserving_symlinks(path.as_path())
             .ok()
             .and_then(|path| AbsolutePathBuf::from_absolute_path(path).ok())
             .unwrap_or(path);
@@ -929,6 +929,39 @@ mod tests {
             Some(FileSystemPermissions {
                 read: Some(vec![path.clone()]),
                 write: Some(vec![path]),
+            })
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn normalize_additional_permissions_preserves_symlinked_write_paths() {
+        let temp_dir = TempDir::new().expect("create temp dir");
+        let real_root = temp_dir.path().join("real");
+        let link_root = temp_dir.path().join("link");
+        let write_dir = real_root.join("write");
+        std::fs::create_dir_all(&write_dir).expect("create write dir");
+        std::os::unix::fs::symlink(&real_root, &link_root).expect("create symlinked root");
+
+        let link_write_dir =
+            AbsolutePathBuf::from_absolute_path(link_root.join("write")).expect("link write dir");
+        let permissions = normalize_additional_permissions(PermissionProfile {
+            file_system: Some(FileSystemPermissions {
+                read: Some(vec![]),
+                write: Some(vec![link_write_dir]),
+            }),
+            ..Default::default()
+        })
+        .expect("permissions");
+
+        assert_eq!(
+            permissions.file_system,
+            Some(FileSystemPermissions {
+                read: Some(vec![]),
+                write: Some(vec![
+                    AbsolutePathBuf::from_absolute_path(link_root.join("write"))
+                        .expect("link write dir"),
+                ]),
             })
         );
     }
