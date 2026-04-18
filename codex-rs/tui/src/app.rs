@@ -2398,6 +2398,20 @@ impl App {
             AppEvent::RateLimitSnapshotFetched(snapshot) => {
                 self.chat_widget.on_rate_limit_snapshot(Some(snapshot));
             }
+            AppEvent::RateLimitsLoaded { request_id, result } => {
+                match result {
+                    Ok(snapshots) => {
+                        for snapshot in snapshots {
+                            self.chat_widget.on_rate_limit_snapshot(Some(snapshot));
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!("failed to refresh rate limits for /status: {err}");
+                    }
+                }
+                self.chat_widget
+                    .finish_status_rate_limit_refresh(request_id);
+            }
             AppEvent::ConnectorsLoaded { result, is_final } => {
                 self.chat_widget.on_connectors_loaded(result, is_final);
             }

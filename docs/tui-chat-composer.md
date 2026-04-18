@@ -190,6 +190,18 @@ large-paste placeholders are expanded into their full text before being recorded
 - Large-paste placeholders are not expected in recalled submitted history; the text is the
   expanded paste content.
 
+### Slash command recall
+
+Recognized slash commands now stage a pending local-history entry before clearing the composer.
+`ChatWidget` commits that staged entry after command dispatch, so command-heavy workflows can use
+Up-arrow recall just like normal submitted prompts.
+
+- Bare commands (`/diff`) are recallable after dispatch.
+- Popup-selected commands use canonical command text (for example selecting `/diff` from `/di`
+  recalls `/diff`).
+- Inline-arg commands (`/plan investigate`) recall the original invocation text.
+- Unrecognized slash commands are restored as draft text and are not added to local recall.
+
 ### Backtrack prefill
 
 Backtrack selections read `UserHistoryCell` data from the transcript. The composer prefill now
