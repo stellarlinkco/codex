@@ -2,6 +2,9 @@
 
 ## Summary
 
+- 文档定位：
+  - 当前目录仅保留本文件作为本轮 upstream 选择性吸纳的收口记录。
+  - 2026-04-09 和 2026-04-11 的阶段性快照已清理，避免多份状态文档并存导致口径漂移。
 - 审计对象：
   - 当前执行分支：`fix/ci-watchdog-rust-test-stability-20260409`
   - 项目上游：`origin = https://github.com/stellarlinkco/codex.git`
