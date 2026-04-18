@@ -14,10 +14,10 @@
 
 | 上游提交 | 优先级 | 目标行为 | 本仓映射 | 执行状态 | 结论 |
 | --- | --- | --- | --- | --- | --- |
-| `8d5889929` | 高 | app-server 连接断开后，最后订阅者线程必须卸载，避免状态泄漏 | `codex-rs/app-server/src/codex_message_processor.rs` + `thread_state.rs` + websocket suite | 进行中 | 待定 |
-| `0bdeab330` | 高 | 已提交 slash 命令可在本地输入历史中回忆 | `codex-rs/tui/src/bottom_pane/chat_composer.rs` | 未开始 | 待定 |
+| `8d5889929` | 高 | app-server 连接断开后，最后订阅者线程必须卸载，避免状态泄漏 | `codex-rs/app-server/src/codex_message_processor.rs` + `thread_state.rs` + websocket suite | 已完成 | Adopted-equivalent |
+| `0bdeab330` | 高 | 已提交 slash 命令可在本地输入历史中回忆 | `codex-rs/tui/src/bottom_pane/chat_composer.rs` + `bottom_pane/mod.rs` + `chatwidget.rs` | 已完成 | Adopted-equivalent |
 | `0393a485e` | 高 | Composer 支持反向历史搜索 | `codex-rs/tui/src/bottom_pane/chat_composer.rs` + `chat_composer_history.rs` + `footer.rs` | 未开始 | 待定 |
-| `e9e7ef3d3` | 高 | Windows verbatim/non-verbatim 路径比较一致化，修复 cwd 过滤误判 | `codex-rs/core/src/path_utils.rs` + `app-server`/`tui`/`exec` 调用点 | 未开始 | 待定 |
+| `e9e7ef3d3` | 高 | Windows verbatim/non-verbatim 路径比较一致化，修复 cwd 过滤误判 | `codex-rs/core/src/path_utils.rs` + `app-server`/`tui` 调用点 | 已完成 | Adopted-equivalent |
 | `04fc208b6` | 高 | 保留 tool_search_output 原始顺序，不被分组排序打散 | 本仓无同名 `tools` 模块，映射到连接器/工具发现链路评估 | 未开始 | 待定 |
 | `36712d854` | 高 | remote websocket client 建连前安装 rustls provider | 本仓无 `app-server-client` crate，需评估等价入口 | 未开始 | 待定 |
 | `b11478149` | 中 | sandbox writable roots 与 symlink 路径处理一致化 | `core/path_utils` + `protocol/permissions` + `linux-sandbox` | 未开始 | 待定 |
@@ -25,7 +25,7 @@
 | `95ba76262` | 中 | Windows restricted-token sandbox 支持 split carveouts | `windows-sandbox-rs` + `core/sandboxing` + `core/exec` | 未开始 | 待定 |
 | `86764af68` | 中 | Linux/macOS sandbox 下首次 `.codex` 创建稳定性 | `core/codex_thread` + `sandboxing` + 相关测试 | 未开始 | 待定 |
 | `71923f43a` | 中 | `codex exec` stdin piping 行为增强 | 现仓 `exec` 已含 stdin 路径，做差异复核 | 未开始 | 待定 |
-| `ae057e0bb` | 中 | 活跃 TUI 会话里 `/status` 速率限制展示不陈旧 | `tui/src/app.rs` + `chatwidget.rs` + `status/*` | 未开始 | 待定 |
+| `ae057e0bb` | 中 | 活跃 TUI 会话里 `/status` 速率限制展示不陈旧 | `tui/src/app.rs` + `chatwidget.rs` + `status/*` + `app_event.rs` | 已完成 | Adopted-equivalent |
 | `7999b0f60` | 中 | clear 场景下 SessionStart source 可区分为 clear | `protocol` + `core` + `app-server-protocol` + `app-server` + `tui` | 未开始 | 待定 |
 
 ## 批次实施记录
@@ -37,6 +37,10 @@
 - 预期验证：
   - `cargo test -p codex-app-server connection_handling_websocket`
   - `cargo test -p codex-app-server thread_unsubscribe`
+- 执行回填：
+  - 已落地：`115c49af8c`
+  - 本地尝试：`cargo test -p codex-app-server websocket_disconnect_unloads_last_subscribed_thread -- --nocapture`（编译阶段耗时过长，转 CI 作为最终验收）
+  - 结论：代码已吸纳，等待 CI 补完端到端证据。
 
 ### Batch B - TUI 高优先级交互
 
@@ -45,6 +49,17 @@
 - 预期验证：
   - `cargo test -p codex-tui`
   - 必要时更新 `insta` 快照并显式记录。
+- 执行回填（已完成子项）：
+  - `0bdeab330` 已语义吸纳（slash 命令本地历史回忆）
+  - `ae057e0bb` 已语义吸纳（`/status` 首帧显示刷新中并在刷新完成后更新）
+  - 通过命令：
+    - `cargo check -p codex-tui`（0）
+    - `cargo test -p codex-tui --lib bare_slash_command_can_be_recalled_after_recording_pending_history -- --nocapture`（0）
+    - `cargo test -p codex-tui --lib slash_command_is_recallable_via_up_history_after_dispatch -- --nocapture`（0）
+    - `cargo test -p codex-tui --lib slash_command_with_args_is_recallable_via_up_history_after_dispatch -- --nocapture`（0）
+    - `cargo test -p codex-tui --lib status_output_refresh_notice_clears_after_rate_limit_refresh -- --nocapture`（0）
+    - `cargo test -p codex-tui --lib slash_status_shows_refresh_notice_for_chatgpt_auth -- --nocapture`（0）
+  - 未完成子项：`0393a485e`（反向历史搜索）待续。
 
 ### Batch C - 路径与沙箱
 
@@ -54,6 +69,11 @@
   - `cargo test -p codex-core`
   - `cargo test -p codex-exec`
   - `cargo test -p codex-windows-sandbox`（CI Windows 任务）
+- 执行回填（已完成子项）：
+  - `e9e7ef3d3` 已语义吸纳：新增 `paths_match_after_normalization` 并统一替换 app-server/core/tui 多处 cwd 比较。
+  - 通过命令：
+    - `cargo check -p codex-core -p codex-tui -p codex-app-server`（0）
+  - 备注：`codex-core` 单测二进制编译耗时长，本地未完成该项测试执行，交由 CI 验收。
 
 ### Batch D - SessionStart clear source
 

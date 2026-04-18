@@ -214,6 +214,7 @@ use codex_core::mcp::collect_mcp_snapshot;
 use codex_core::mcp::group_tools_by_server;
 use codex_core::models_manager::collaboration_mode_presets::CollaborationModesConfig;
 use codex_core::parse_cursor;
+use codex_core::path_utils;
 use codex_core::plugins::AppConnectorId;
 use codex_core::plugins::MarketplaceError;
 use codex_core::plugins::MarketplacePluginSourceSummary;
@@ -4011,9 +4012,9 @@ impl CodexMessageProcessor {
                 if source_kind_filter
                     .as_ref()
                     .is_none_or(|filter| source_kind_matches(&summary.source, filter))
-                    && cwd
-                        .as_ref()
-                        .is_none_or(|expected_cwd| &summary.cwd == expected_cwd)
+                    && cwd.as_ref().is_none_or(|expected_cwd| {
+                        path_utils::paths_match_after_normalization(&summary.cwd, expected_cwd)
+                    })
                 {
                     filtered.push(summary);
                     if filtered.len() >= remaining {
