@@ -1,8 +1,9 @@
+use anyhow::Context;
 use clap::Args;
 use clap::CommandFactory;
 use clap::Parser;
+use clap_complete::Generator;
 use clap_complete::Shell;
-use clap_complete::generate;
 use codex_arg0::Arg0DispatchPaths;
 use codex_arg0::arg0_dispatch_or_else;
 use codex_chatgpt::apply_command::ApplyCommand;
@@ -600,6 +601,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
         Some(Subcommand::Review(review_args)) => {
             let mut exec_cli = ExecCli::try_parse_from(["codex", "exec"])?;
             exec_cli.command = Some(ExecCommand::Review(review_args));
+            merge_exec_cli_flags(&mut exec_cli, &interactive);
             prepend_config_flags(
                 &mut exec_cli.config_overrides,
                 root_config_overrides.clone(),
@@ -721,7 +723,7 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
             run_logout(logout_cli.config_overrides).await;
         }
         Some(Subcommand::Completion(completion_cli)) => {
-            print_completion(completion_cli);
+            print_completion(completion_cli)?;
         }
         Some(Subcommand::Cloud(mut cloud_cli)) => {
             prepend_config_flags(
@@ -1100,10 +1102,57 @@ fn merge_interactive_cli_flags(interactive: &mut TuiCli, subcommand_cli: TuiCli)
         .extend(subcommand_cli.config_overrides.raw_overrides);
 }
 
-fn print_completion(cmd: CompletionCommand) {
+/// Merge root-level shared CLI flags into an `exec` invocation synthesized for wrapper
+/// subcommands like `codex review`.
+fn merge_exec_cli_flags(exec_cli: &mut ExecCli, root_cli: &TuiCli) {
+    if let Some(model) = &root_cli.model {
+        exec_cli.model = Some(model.clone());
+    }
+    if root_cli.oss {
+        exec_cli.oss = true;
+    }
+    if let Some(oss_provider) = &root_cli.oss_provider {
+        exec_cli.oss_provider = Some(oss_provider.clone());
+    }
+    if let Some(profile) = &root_cli.config_profile {
+        exec_cli.config_profile = Some(profile.clone());
+    }
+    if let Some(sandbox) = root_cli.sandbox_mode {
+        exec_cli.sandbox_mode = Some(sandbox);
+    }
+    if root_cli.full_auto {
+        exec_cli.full_auto = true;
+    }
+    if root_cli.dangerously_bypass_approvals_and_sandbox {
+        exec_cli.dangerously_bypass_approvals_and_sandbox = true;
+    }
+    if let Some(cwd) = &root_cli.cwd {
+        exec_cli.cwd = Some(cwd.clone());
+    }
+    if !root_cli.images.is_empty() {
+        exec_cli.images = root_cli.images.clone();
+    }
+    if !root_cli.add_dir.is_empty() {
+        exec_cli.add_dir.extend(root_cli.add_dir.clone());
+    }
+}
+
+fn print_completion(cmd: CompletionCommand) -> anyhow::Result<()> {
+    try_print_completion(&mut std::io::stdout(), cmd)
+}
+
+fn try_print_completion(
+    writer: &mut dyn std::io::Write,
+    cmd: CompletionCommand,
+) -> anyhow::Result<()> {
     let mut app = MultitoolCli::command();
-    let name = "codex";
-    generate(cmd.shell, &mut app, name, &mut std::io::stdout());
+    app.set_bin_name("codex");
+    app.build();
+    match cmd.shell.try_generate(&mut app, writer) {
+        Ok(()) => Ok(()),
+        Err(err) if err.kind() == std::io::ErrorKind::BrokenPipe => Ok(()),
+        Err(err) => Err(err).context("failed to write completion file"),
+    }
 }
 
 #[cfg(test)]
@@ -1113,6 +1162,20 @@ mod tests {
     use codex_protocol::ThreadId;
     use codex_protocol::protocol::TokenUsage;
     use pretty_assertions::assert_eq;
+    use std::io;
+    use std::io::Write;
+
+    struct BrokenPipeWriter;
+
+    impl Write for BrokenPipeWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::from(io::ErrorKind::BrokenPipe))
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
 
     #[test]
     fn github_subcommand_alias_parses_as_serve() {
@@ -1170,6 +1233,29 @@ mod tests {
         };
 
         finalize_fork_interactive(interactive, root_overrides, session_id, last, all, fork_cli)
+    }
+
+    fn review_exec_from_args(args: &[&str]) -> ExecCli {
+        let cli = MultitoolCli::try_parse_from(args).expect("parse");
+        let MultitoolCli {
+            config_overrides: mut root_config_overrides,
+            feature_toggles,
+            interactive,
+            subcommand,
+        } = cli;
+
+        let toggle_overrides = feature_toggles.to_overrides().expect("feature toggles");
+        root_config_overrides.raw_overrides.extend(toggle_overrides);
+
+        let Some(Subcommand::Review(review_args)) = subcommand else {
+            panic!("expected review subcommand");
+        };
+
+        let mut exec_cli = ExecCli::try_parse_from(["codex", "exec"]).expect("exec parse");
+        exec_cli.command = Some(ExecCommand::Review(review_args));
+        merge_exec_cli_flags(&mut exec_cli, &interactive);
+        prepend_config_flags(&mut exec_cli.config_overrides, root_config_overrides);
+        exec_cli
     }
 
     #[test]
@@ -1410,6 +1496,62 @@ mod tests {
         assert!(interactive.resume_picker);
         assert!(!interactive.resume_last);
         assert_eq!(interactive.resume_session_id, None);
+    }
+
+    #[test]
+    fn review_merges_root_sandbox_and_cwd_flags() {
+        let exec_cli = review_exec_from_args(
+            [
+                "codex",
+                "--sandbox",
+                "workspace-write",
+                "-C",
+                "/tmp/review-root",
+                "review",
+                "--uncommitted",
+            ]
+            .as_ref(),
+        );
+
+        assert_matches!(
+            exec_cli.sandbox_mode,
+            Some(codex_utils_cli::SandboxModeCliArg::WorkspaceWrite)
+        );
+        assert_eq!(
+            exec_cli.cwd.as_deref(),
+            Some(std::path::Path::new("/tmp/review-root"))
+        );
+        let Some(ExecCommand::Review(review_args)) = exec_cli.command else {
+            panic!("expected review command");
+        };
+        assert!(review_args.uncommitted);
+    }
+
+    #[test]
+    fn review_merges_root_dangerously_bypass_flag() {
+        let exec_cli = review_exec_from_args(
+            [
+                "codex",
+                "--dangerously-bypass-approvals-and-sandbox",
+                "review",
+                "--uncommitted",
+            ]
+            .as_ref(),
+        );
+
+        assert!(exec_cli.dangerously_bypass_approvals_and_sandbox);
+        let Some(ExecCommand::Review(review_args)) = exec_cli.command else {
+            panic!("expected review command");
+        };
+        assert!(review_args.uncommitted);
+    }
+
+    #[test]
+    fn completion_ignores_broken_pipe() {
+        let cmd = CompletionCommand { shell: Shell::Zsh };
+        let result = try_print_completion(&mut BrokenPipeWriter, cmd);
+
+        assert!(result.is_ok());
     }
 
     #[test]

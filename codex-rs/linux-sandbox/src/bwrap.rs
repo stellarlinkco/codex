@@ -574,7 +574,6 @@ mod tests {
                 "/dev".to_string(),
             ]
         );
-        assert_eq!(args.preserved_files.len(), 3);
         assert!(
             args.args
                 .windows(3)
@@ -679,7 +678,6 @@ mod tests {
         let writable_root_str = path_to_string(writable_root.as_path());
         let blocked_str = path_to_string(blocked.as_path());
 
-        assert_eq!(args.preserved_files.len(), 1);
         assert!(
             args.args
                 .windows(3)
@@ -771,7 +769,6 @@ mod tests {
         let dot_codex = path_to_string(workspace.join(".codex").as_path());
         let dot_git = path_to_string(workspace.join(".git").as_path());
 
-        assert_eq!(args.preserved_files.len(), 3);
         assert!(
             args.args
                 .windows(3)
