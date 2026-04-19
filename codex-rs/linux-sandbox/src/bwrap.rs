@@ -845,7 +845,7 @@ mod tests {
 
         let link_root =
             AbsolutePathBuf::from_absolute_path(&link_root).expect("absolute symlinked root");
-        let link_blocked = link_root.join("blocked");
+        let link_blocked = link_root.join("blocked").expect("join blocked path");
         let real_root_str = path_to_string(&real_root);
         let real_blocked_str = path_to_string(&blocked);
         let policy = FileSystemSandboxPolicy::restricted(vec![
@@ -969,7 +969,9 @@ mod tests {
 
         let link_root =
             AbsolutePathBuf::from_absolute_path(&link_root).expect("absolute symlinked root");
-        let link_private = link_root.join("linked-private");
+        let link_private = link_root
+            .join("linked-private")
+            .expect("join linked private path");
         let real_linked_private_str = path_to_string(&linked_private);
         let outside_str = path_to_string(&outside);
         let policy = FileSystemSandboxPolicy::restricted(vec![
