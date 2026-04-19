@@ -1,6 +1,10 @@
 name: cross-platform-binary-validation
 
 on:
+  pull_request:
+    paths:
+      - "codex-rs/**"
+      - ".github/workflows/cross-platform-binary-validation.yml"
   workflow_dispatch:
 
 jobs:
@@ -88,4 +92,3 @@ jobs:
             echo ">>> ${cmd}"
             eval "${cmd}"
           done
-
