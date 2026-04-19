@@ -57,12 +57,23 @@ jobs:
         run: |
           set -euo pipefail
           if [[ "${RUNNER_OS}" == "Windows" ]]; then
-            ./target/ci-test/codex.exe --version
-            ./target/ci-test/codex-responses-api-proxy.exe --help
+            CODEX_BIN="./target/ci-test/codex.exe"
+            PROXY_BIN="./target/ci-test/codex-responses-api-proxy.exe"
           else
-            ./target/ci-test/codex --version
-            ./target/ci-test/codex-responses-api-proxy --help
+            CODEX_BIN="./target/ci-test/codex"
+            PROXY_BIN="./target/ci-test/codex-responses-api-proxy"
           fi
+
+          # 用户视角 CLI 场景：基础启动、参数解析、子命令入口
+          "${CODEX_BIN}" --version
+          "${CODEX_BIN}" --help > /dev/null
+          "${CODEX_BIN}" exec --help > /dev/null
+          "${CODEX_BIN}" mcp --help > /dev/null
+          "${CODEX_BIN}" app-server --help > /dev/null
+          "${CODEX_BIN}" completion bash > /dev/null
+
+          # 代理二进制参数入口
+          "${PROXY_BIN}" --help > /dev/null
 
       - name: Validate modified feature tests
         shell: bash
@@ -85,6 +96,11 @@ jobs:
             "cargo test -p codex-tui slash_command_with_args_is_recallable_via_up_history_after_dispatch -- --nocapture"
             "cargo test -p codex-tui status_output_refresh_notice_clears_after_rate_limit_refresh -- --nocapture"
             "cargo test -p codex-tui slash_clear_requests_ui_clear_when_idle -- --nocapture"
+            "cargo test -p codex-cli --test features -- --nocapture"
+            "cargo test -p codex-cli --test mcp_list -- --nocapture"
+            "cargo test -p codex-cli --test mcp_add_remove -- --nocapture"
+            "cargo test -p codex-cli --test execpolicy -- --nocapture"
+            "cargo test -p codex-cli --test debug_clear_memories -- --nocapture"
             "cargo test -p codex-windows-sandbox -- --nocapture"
           )
 
