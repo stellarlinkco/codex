@@ -1397,7 +1397,7 @@ mod tests {
     }
 
     #[test]
-    fn windows_restricted_token_allows_legacy_restricted_policies() {
+    fn windows_restricted_token_rejects_legacy_restricted_policies() {
         let policy = SandboxPolicy::new_read_only_policy();
         let file_system_policy = FileSystemSandboxPolicy::restricted(vec![]);
         let cwd = if cfg!(windows) {
@@ -1415,7 +1415,10 @@ mod tests {
                 cwd,
                 WindowsSandboxLevel::RestrictedToken,
             ),
-            None
+            Some(
+                "windows sandbox backend cannot enforce split filesystem read restrictions directly; refusing to run unsandboxed"
+                    .to_string()
+            )
         );
     }
 
