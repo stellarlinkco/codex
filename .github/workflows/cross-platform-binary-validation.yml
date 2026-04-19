@@ -70,7 +70,7 @@ jobs:
           set -euo pipefail
 
           commands=(
-            "cargo test -p codex-exec --test suite prompt_stdin -- --nocapture"
+            "cargo test -p codex-exec --test all prompt_stdin -- --nocapture"
             "cargo test -p codex-protocol workspace_write_proactively_protects_missing_dot_codex -- --nocapture"
             "cargo test -p codex-protocol restricted_policy_skips_default_dot_codex_when_explicit_write_rule_exists -- --nocapture"
             "cargo test -p codex-core windows_restricted_token_ -- --nocapture"
