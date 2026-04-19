@@ -86,7 +86,7 @@ impl StatusHistoryHandle {
         let mut state = self
             .rate_limit_state
             .write()
-            .expect("status history rate-limit state poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         state.rate_limits = rate_limits;
         state.refreshing_rate_limits = false;
     }
@@ -563,7 +563,7 @@ impl HistoryCell for StatusHistoryCell {
         let rate_limit_state = self
             .rate_limit_state
             .read()
-            .expect("status history rate-limit state poisoned");
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
 
         if self.model_provider.is_some() {
             push_label(&mut labels, &mut seen, "Model provider");
