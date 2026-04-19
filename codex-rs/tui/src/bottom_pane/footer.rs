@@ -115,6 +115,8 @@ impl CollaborationModeIndicator {
 /// (for example, showing `QuitShortcutReminder` only while its timer is active).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum FooterMode {
+    /// Single-line incremental history search prompt shown while Ctrl+R search is active.
+    HistorySearch,
     /// Transient "press again to quit" reminder (Ctrl+C/Ctrl+D).
     QuitShortcutReminder,
     /// Multi-line shortcut overlay shown after pressing `?`.
@@ -164,6 +166,7 @@ pub(crate) fn reset_mode_after_activity(current: FooterMode) -> FooterMode {
         FooterMode::EscHint
         | FooterMode::ShortcutOverlay
         | FooterMode::QuitShortcutReminder
+        | FooterMode::HistorySearch
         | FooterMode::ComposerHasDraft => FooterMode::ComposerEmpty,
         other => other,
     }
@@ -173,13 +176,15 @@ pub(crate) fn footer_height(props: &FooterProps) -> u16 {
     let show_shortcuts_hint = match props.mode {
         FooterMode::ComposerEmpty => true,
         FooterMode::ComposerHasDraft => false,
-        FooterMode::QuitShortcutReminder | FooterMode::ShortcutOverlay | FooterMode::EscHint => {
-            false
-        }
+        FooterMode::HistorySearch
+        | FooterMode::QuitShortcutReminder
+        | FooterMode::ShortcutOverlay
+        | FooterMode::EscHint => false,
     };
     let show_queue_hint = match props.mode {
         FooterMode::ComposerHasDraft => props.is_task_running,
         FooterMode::QuitShortcutReminder
+        | FooterMode::HistorySearch
         | FooterMode::ComposerEmpty
         | FooterMode::ShortcutOverlay
         | FooterMode::EscHint => false,
@@ -570,7 +575,8 @@ fn footer_from_props_lines(
         && match props.mode {
             FooterMode::ComposerEmpty => true,
             FooterMode::ComposerHasDraft => !props.is_task_running,
-            FooterMode::QuitShortcutReminder
+            FooterMode::HistorySearch
+            | FooterMode::QuitShortcutReminder
             | FooterMode::ShortcutOverlay
             | FooterMode::EscHint => false,
         }
@@ -581,6 +587,7 @@ fn footer_from_props_lines(
         FooterMode::QuitShortcutReminder => {
             vec![quit_shortcut_reminder_line(props.quit_shortcut_key)]
         }
+        FooterMode::HistorySearch => vec![Line::from("reverse-i-search: ").dim()],
         FooterMode::ComposerEmpty => {
             let state = LeftSideState {
                 hint: if show_shortcuts_hint {
@@ -618,6 +625,45 @@ fn footer_from_props_lines(
     }
 }
 
+/// Returns the contextual footer row when the footer is not busy showing an instructional hint.
+///
+/// Active instructional states such as quit reminders, shortcut overlays, and queue prompts
+/// deliberately return `None` so those call-to-action hints stay visible.
+pub(crate) fn passive_footer_status_line(props: &FooterProps) -> Option<Line<'static>> {
+    if !shows_passive_footer_line(props) {
+        return None;
+    }
+
+    if props.status_line_enabled {
+        props.status_line_value.clone()
+    } else {
+        None
+    }
+}
+
+/// Whether the current footer mode allows contextual information to replace instructional hints.
+///
+/// In practice this means the composer is idle, or it has a draft but is not currently running a
+/// task, so the footer can spend the row on ambient context instead of "what to do next" text.
+pub(crate) fn shows_passive_footer_line(props: &FooterProps) -> bool {
+    match props.mode {
+        FooterMode::ComposerEmpty => true,
+        FooterMode::ComposerHasDraft => !props.is_task_running,
+        FooterMode::HistorySearch
+        | FooterMode::QuitShortcutReminder
+        | FooterMode::ShortcutOverlay
+        | FooterMode::EscHint => false,
+    }
+}
+
+/// Whether callers should reserve the dedicated status-line layout for a contextual footer row.
+///
+/// The dedicated layout exists for the configurable `/statusline` row, so this only becomes
+/// `true` when the status line feature is enabled and the current mode allows contextual footer
+/// content.
+pub(crate) fn uses_passive_footer_status_layout(props: &FooterProps) -> bool {
+    props.status_line_enabled && shows_passive_footer_line(props)
+}
 pub(crate) fn footer_line_width(
     props: &FooterProps,
     collaboration_mode_indicator: Option<CollaborationModeIndicator>,
@@ -693,6 +739,7 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
     let mut paste_image = Line::from("");
     let mut external_editor = Line::from("");
     let mut edit_previous = Line::from("");
+    let mut history_search = Line::from("");
     let mut quit = Line::from("");
     let mut show_transcript = Line::from("");
     let mut change_mode = Line::from("");
@@ -708,6 +755,7 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
                 ShortcutId::PasteImage => paste_image = text,
                 ShortcutId::ExternalEditor => external_editor = text,
                 ShortcutId::EditPrevious => edit_previous = text,
+                ShortcutId::HistorySearch => history_search = text,
                 ShortcutId::Quit => quit = text,
                 ShortcutId::ShowTranscript => show_transcript = text,
                 ShortcutId::ChangeMode => change_mode = text,
@@ -724,6 +772,7 @@ fn shortcut_overlay_lines(state: ShortcutsState) -> Vec<Line<'static>> {
         paste_image,
         external_editor,
         edit_previous,
+        history_search,
         quit,
     ];
     if change_mode.width() > 0 {
@@ -806,6 +855,7 @@ enum ShortcutId {
     PasteImage,
     ExternalEditor,
     EditPrevious,
+    HistorySearch,
     Quit,
     ShowTranscript,
     ChangeMode,
@@ -965,6 +1015,15 @@ const SHORTCUTS: &[ShortcutDescriptor] = &[
         label: "",
     },
     ShortcutDescriptor {
+        id: ShortcutId::HistorySearch,
+        bindings: &[ShortcutBinding {
+            key: key_hint::ctrl(KeyCode::Char('r')),
+            condition: DisplayCondition::Always,
+        }],
+        prefix: "",
+        label: " search history",
+    },
+    ShortcutDescriptor {
         id: ShortcutId::Quit,
         bindings: &[ShortcutBinding {
             key: key_hint::ctrl(KeyCode::Char('c')),
@@ -1021,13 +1080,15 @@ mod tests {
                 let show_shortcuts_hint = match props.mode {
                     FooterMode::ComposerEmpty => true,
                     FooterMode::ComposerHasDraft => false,
-                    FooterMode::QuitShortcutReminder
+                    FooterMode::HistorySearch
+                    | FooterMode::QuitShortcutReminder
                     | FooterMode::ShortcutOverlay
                     | FooterMode::EscHint => false,
                 };
                 let show_queue_hint = match props.mode {
                     FooterMode::ComposerHasDraft => props.is_task_running,
-                    FooterMode::QuitShortcutReminder
+                    FooterMode::HistorySearch
+                    | FooterMode::QuitShortcutReminder
                     | FooterMode::ComposerEmpty
                     | FooterMode::ShortcutOverlay
                     | FooterMode::EscHint => false,
@@ -1036,7 +1097,8 @@ mod tests {
                     && match props.mode {
                         FooterMode::ComposerEmpty => true,
                         FooterMode::ComposerHasDraft => !props.is_task_running,
-                        FooterMode::QuitShortcutReminder
+                        FooterMode::HistorySearch
+                        | FooterMode::QuitShortcutReminder
                         | FooterMode::ShortcutOverlay
                         | FooterMode::EscHint => false,
                     };
@@ -1163,6 +1225,7 @@ mod tests {
                         && !matches!(
                             props.mode,
                             FooterMode::EscHint
+                                | FooterMode::HistorySearch
                                 | FooterMode::QuitShortcutReminder
                                 | FooterMode::ShortcutOverlay
                         );

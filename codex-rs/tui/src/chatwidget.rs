@@ -45,6 +45,7 @@ use crate::bottom_pane::StatusLineItem;
 use crate::bottom_pane::StatusLinePreviewData;
 use crate::bottom_pane::StatusLineSetupView;
 use crate::status::RateLimitWindowDisplay;
+use crate::status::StatusHistoryHandle;
 use crate::status::format_directory_display;
 use crate::status::format_tokens_compact;
 use crate::status::rate_limit_snapshot_display_for_limit;
@@ -298,6 +299,7 @@ use codex_protocol::openai_models::ModelPreset;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::plan_tool::UpdatePlanArgs;
 use codex_protocol::protocol::AskForApproval;
+use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_utils_approval_presets::ApprovalPreset;
 use codex_utils_approval_presets::builtin_approval_presets;
@@ -566,6 +568,8 @@ pub(crate) struct ChatWidget {
     initial_user_message: Option<UserMessage>,
     token_info: Option<TokenUsageInfo>,
     rate_limit_snapshots_by_limit_id: BTreeMap<String, RateLimitSnapshotDisplay>,
+    refreshing_status_outputs: Vec<(u64, StatusHistoryHandle)>,
+    next_status_refresh_request_id: u64,
     plan_type: Option<PlanType>,
     rate_limit_warnings: RateLimitWarningState,
     rate_limit_switch_prompt: RateLimitSwitchPromptState,
@@ -3262,6 +3266,14 @@ impl ChatWidget {
     }
 
     pub(crate) fn new(common: ChatWidgetInit, thread_manager: Arc<ThreadManager>) -> Self {
+        Self::new_with_initial_history(common, thread_manager, InitialHistory::New)
+    }
+
+    pub(crate) fn new_with_initial_history(
+        common: ChatWidgetInit,
+        thread_manager: Arc<ThreadManager>,
+        initial_history: InitialHistory,
+    ) -> Self {
         let ChatWidgetInit {
             config,
             frame_requester,
@@ -3284,7 +3296,12 @@ impl ChatWidget {
         let prevent_idle_sleep = config.features.enabled(Feature::PreventIdleSleep);
         let mut rng = rand::rng();
         let placeholder = PLACEHOLDERS[rng.random_range(0..PLACEHOLDERS.len())].to_string();
-        let codex_op_tx = spawn_agent(config.clone(), app_event_tx.clone(), thread_manager);
+        let codex_op_tx = spawn_agent(
+            config.clone(),
+            app_event_tx.clone(),
+            thread_manager,
+            initial_history,
+        );
 
         let model_override = model.as_deref();
         let model_for_header = model
@@ -3340,6 +3357,8 @@ impl ChatWidget {
             initial_user_message,
             token_info: None,
             rate_limit_snapshots_by_limit_id: BTreeMap::new(),
+            refreshing_status_outputs: Vec::new(),
+            next_status_refresh_request_id: 0,
             plan_type: None,
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
@@ -3526,6 +3545,8 @@ impl ChatWidget {
             initial_user_message,
             token_info: None,
             rate_limit_snapshots_by_limit_id: BTreeMap::new(),
+            refreshing_status_outputs: Vec::new(),
+            next_status_refresh_request_id: 0,
             plan_type: None,
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
@@ -3704,6 +3725,8 @@ impl ChatWidget {
             initial_user_message,
             token_info: None,
             rate_limit_snapshots_by_limit_id: BTreeMap::new(),
+            refreshing_status_outputs: Vec::new(),
+            next_status_refresh_request_id: 0,
             plan_type: None,
             rate_limit_warnings: RateLimitWarningState::default(),
             rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
@@ -3971,9 +3994,11 @@ impl ChatWidget {
                 }
                 InputResult::Command(cmd) => {
                     self.dispatch_command(cmd);
+                    self.bottom_pane.record_pending_slash_command_history();
                 }
                 InputResult::CommandWithArgs(cmd, args, text_elements) => {
                     self.dispatch_command_with_args(cmd, args, text_elements);
+                    self.bottom_pane.record_pending_slash_command_history();
                 }
                 InputResult::None => {}
             },
@@ -4299,7 +4324,15 @@ impl ChatWidget {
                 self.open_skills_menu();
             }
             SlashCommand::Status => {
-                self.add_status_output();
+                if self.should_prefetch_rate_limits() {
+                    let request_id = self.next_status_refresh_request_id;
+                    self.next_status_refresh_request_id =
+                        self.next_status_refresh_request_id.wrapping_add(1);
+                    self.add_status_output(/*refreshing_rate_limits*/ true, Some(request_id));
+                    self.refresh_status_rate_limits(request_id);
+                } else {
+                    self.add_status_output(/*refreshing_rate_limits*/ false, None);
+                }
             }
             SlashCommand::DebugConfig => {
                 self.add_debug_config_output();
@@ -5442,7 +5475,11 @@ impl ChatWidget {
         self.request_redraw();
     }
 
-    pub(crate) fn add_status_output(&mut self) {
+    pub(crate) fn add_status_output(
+        &mut self,
+        refreshing_rate_limits: bool,
+        request_id: Option<u64>,
+    ) {
         let default_usage = TokenUsage::default();
         let token_info = self.token_info.as_ref();
         let total_usage = token_info
@@ -5455,7 +5492,7 @@ impl ChatWidget {
             .values()
             .cloned()
             .collect();
-        self.add_to_history(crate::status::new_status_output_with_rate_limits(
+        let (cell, handle) = crate::status::new_status_output_with_rate_limits_handle(
             &self.config,
             self.auth_manager.as_ref(),
             token_info,
@@ -5469,7 +5506,39 @@ impl ChatWidget {
             self.model_display_name(),
             collaboration_mode,
             reasoning_effort_override,
-        ));
+            refreshing_rate_limits,
+        );
+        if let Some(request_id) = request_id {
+            self.refreshing_status_outputs.push((request_id, handle));
+        }
+        self.add_to_history(cell);
+    }
+
+    pub(crate) fn finish_status_rate_limit_refresh(&mut self, request_id: u64) {
+        if self.refreshing_status_outputs.is_empty() {
+            return;
+        }
+
+        let rate_limit_snapshots: Vec<RateLimitSnapshotDisplay> = self
+            .rate_limit_snapshots_by_limit_id
+            .values()
+            .cloned()
+            .collect();
+        let now = Local::now();
+        let mut remaining = Vec::with_capacity(self.refreshing_status_outputs.len());
+        let mut updated_any = false;
+        for (pending_request_id, handle) in self.refreshing_status_outputs.drain(..) {
+            if pending_request_id == request_id {
+                updated_any = true;
+                handle.finish_rate_limit_refresh(rate_limit_snapshots.as_slice(), now);
+            } else {
+                remaining.push((pending_request_id, handle));
+            }
+        }
+        self.refreshing_status_outputs = remaining;
+        if updated_any {
+            self.request_redraw();
+        }
     }
 
     pub(crate) fn add_debug_config_output(&mut self) {
@@ -5864,6 +5933,20 @@ impl ChatWidget {
         });
 
         self.rate_limit_poller = Some(handle);
+    }
+
+    fn refresh_status_rate_limits(&self, request_id: u64) {
+        let base_url = self.config.chatgpt_base_url.clone();
+        let app_event_tx = self.app_event_tx.clone();
+        let auth_manager = Arc::clone(&self.auth_manager);
+        tokio::spawn(async move {
+            let result = match auth_manager.auth().await {
+                Some(auth) if auth.is_chatgpt_auth() => Ok(fetch_rate_limits(base_url, auth).await),
+                Some(_) => Err("auth mode is not chatgpt auth".to_string()),
+                None => Err("auth is unavailable".to_string()),
+            };
+            app_event_tx.send(AppEvent::RateLimitsLoaded { request_id, result });
+        });
     }
 
     fn should_prefetch_rate_limits(&self) -> bool {

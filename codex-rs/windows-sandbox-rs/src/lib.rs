@@ -122,6 +122,8 @@ pub use token::get_current_token_for_restriction;
 #[cfg(target_os = "windows")]
 pub use windows_impl::run_windows_sandbox_capture;
 #[cfg(target_os = "windows")]
+pub use windows_impl::run_windows_sandbox_capture_with_extra_deny_write_paths;
+#[cfg(target_os = "windows")]
 pub use windows_impl::run_windows_sandbox_legacy_preflight;
 #[cfg(target_os = "windows")]
 pub use windows_impl::CaptureResult;
@@ -140,6 +142,8 @@ pub use workspace_acl::protect_workspace_codex_dir;
 pub use stub::apply_world_writable_scan_and_denies;
 #[cfg(not(target_os = "windows"))]
 pub use stub::run_windows_sandbox_capture;
+#[cfg(not(target_os = "windows"))]
+pub use stub::run_windows_sandbox_capture_with_extra_deny_write_paths;
 #[cfg(not(target_os = "windows"))]
 pub use stub::run_windows_sandbox_legacy_preflight;
 #[cfg(not(target_os = "windows"))]
@@ -248,8 +252,30 @@ mod windows_impl {
         codex_home: &Path,
         command: Vec<String>,
         cwd: &Path,
+        env_map: HashMap<String, String>,
+        timeout_ms: Option<u64>,
+    ) -> Result<CaptureResult> {
+        run_windows_sandbox_capture_with_extra_deny_write_paths(
+            policy_json_or_preset,
+            sandbox_policy_cwd,
+            codex_home,
+            command,
+            cwd,
+            env_map,
+            timeout_ms,
+            &[],
+        )
+    }
+
+    pub fn run_windows_sandbox_capture_with_extra_deny_write_paths(
+        policy_json_or_preset: &str,
+        sandbox_policy_cwd: &Path,
+        codex_home: &Path,
+        command: Vec<String>,
+        cwd: &Path,
         mut env_map: HashMap<String, String>,
         timeout_ms: Option<u64>,
+        additional_deny_write_paths: &[PathBuf],
     ) -> Result<CaptureResult> {
         let policy = parse_policy(policy_json_or_preset)?;
         let apply_network_block = should_apply_network_block(&policy);
@@ -318,8 +344,13 @@ mod windows_impl {
         }
 
         let persist_aces = is_workspace_write;
-        let AllowDenyPaths { allow, deny } =
+        let AllowDenyPaths { allow, mut deny } =
             compute_allow_paths(&policy, sandbox_policy_cwd, &current_dir, &env_map);
+        for path in additional_deny_write_paths {
+            if path.exists() {
+                deny.insert(path.clone());
+            }
+        }
         let canonical_cwd = canonicalize_path(&current_dir);
         let mut guards: Vec<(PathBuf, *mut c_void)> = Vec::new();
         unsafe {
@@ -608,6 +639,7 @@ mod stub {
     use codex_protocol::protocol::SandboxPolicy;
     use std::collections::HashMap;
     use std::path::Path;
+    use std::path::PathBuf;
 
     #[derive(Debug, Default)]
     pub struct CaptureResult {
@@ -625,6 +657,20 @@ mod stub {
         _cwd: &Path,
         _env_map: HashMap<String, String>,
         _timeout_ms: Option<u64>,
+    ) -> Result<CaptureResult> {
+        bail!("Windows sandbox is only available on Windows")
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn run_windows_sandbox_capture_with_extra_deny_write_paths(
+        _policy_json_or_preset: &str,
+        _sandbox_policy_cwd: &Path,
+        _codex_home: &Path,
+        _command: Vec<String>,
+        _cwd: &Path,
+        _env_map: HashMap<String, String>,
+        _timeout_ms: Option<u64>,
+        _additional_deny_write_paths: &[PathBuf],
     ) -> Result<CaptureResult> {
         bail!("Windows sandbox is only available on Windows")
     }

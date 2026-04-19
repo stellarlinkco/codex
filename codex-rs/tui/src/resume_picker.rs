@@ -848,13 +848,7 @@ fn head_to_row(item: &ThreadItem) -> Row {
 }
 
 fn paths_match(a: &Path, b: &Path) -> bool {
-    if let (Ok(ca), Ok(cb)) = (
-        path_utils::normalize_for_path_comparison(a),
-        path_utils::normalize_for_path_comparison(b),
-    ) {
-        return ca == cb;
-    }
-    a == b
+    path_utils::paths_match_after_normalization(a, b)
 }
 
 fn parse_timestamp_str(ts: &str) -> Option<DateTime<Utc>> {

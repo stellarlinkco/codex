@@ -1684,7 +1684,7 @@ async fn turn_started_uses_runtime_context_window_before_first_token_count() {
     );
     assert_eq!(chat.bottom_pane.context_window_percent(), Some(100));
 
-    chat.add_status_output();
+    chat.add_status_output(false, None);
 
     let cells = drain_insert_history(&mut rx);
     let context_line = cells
@@ -1707,6 +1707,48 @@ async fn turn_started_uses_runtime_context_window_before_first_token_count() {
     assert!(
         !context_line.contains("1M"),
         "expected /status to avoid raw config context window, got: {context_line}"
+    );
+}
+
+#[tokio::test]
+async fn status_output_refresh_notice_clears_after_rate_limit_refresh() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+
+    chat.add_status_output(true, Some(42));
+    let cell = match rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => cell,
+        other => panic!("expected status output cell, got {other:?}"),
+    };
+    let initial = lines_to_single_string(&cell.display_lines(80));
+    assert!(
+        initial.contains("refreshing limits"),
+        "expected status output to show refresh notice, got: {initial}"
+    );
+
+    chat.on_rate_limit_snapshot(Some(snapshot(92.0)));
+    chat.finish_status_rate_limit_refresh(42);
+
+    let updated = lines_to_single_string(&cell.display_lines(80));
+    assert!(
+        !updated.contains("refreshing limits"),
+        "expected refresh notice to clear after refresh, got: {updated}"
+    );
+}
+
+#[tokio::test]
+async fn slash_status_shows_refresh_notice_for_chatgpt_auth() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+    set_chatgpt_auth(&mut chat);
+
+    chat.dispatch_command(SlashCommand::Status);
+
+    let rendered = match rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => lines_to_single_string(&cell.display_lines(80)),
+        other => panic!("expected status output before refresh result, got {other:?}"),
+    };
+    assert!(
+        rendered.contains("refreshing limits"),
+        "expected status output to show refresh notice, got: {rendered}"
     );
 }
 
@@ -1833,6 +1875,8 @@ async fn make_chatwidget_manual(
         initial_user_message: None,
         token_info: None,
         rate_limit_snapshots_by_limit_id: BTreeMap::new(),
+        refreshing_status_outputs: Vec::new(),
+        next_status_refresh_request_id: 0,
         plan_type: None,
         rate_limit_warnings: RateLimitWarningState::default(),
         rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
@@ -5249,6 +5293,34 @@ async fn slash_init_skips_when_project_doc_exists() {
         std::fs::read_to_string(existing_path).unwrap(),
         "existing instructions"
     );
+}
+
+#[tokio::test]
+async fn slash_command_is_recallable_via_up_history_after_dispatch() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.bottom_pane
+        .set_composer_text("/diff".to_string(), Vec::new(), Vec::new());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Up));
+
+    assert_eq!(chat.composer_text_with_pending(), "/diff");
+}
+
+#[tokio::test]
+async fn slash_command_with_args_is_recallable_via_up_history_after_dispatch() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+
+    chat.bottom_pane.set_composer_text(
+        "/plan investigate this".to_string(),
+        Vec::new(),
+        Vec::new(),
+    );
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Up));
+
+    assert_eq!(chat.composer_text_with_pending(), "/plan investigate this");
 }
 
 #[tokio::test]
