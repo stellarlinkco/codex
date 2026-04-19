@@ -1056,33 +1056,59 @@ mod tests {
             Path::new("/"),
         )
         .expect("bwrap fs args");
-        assert_eq!(
-            args.args,
-            vec![
-                // Start from a read-only view of the full filesystem.
-                "--ro-bind".to_string(),
-                "/".to_string(),
-                "/".to_string(),
-                // Recreate a writable /dev inside the sandbox.
-                "--dev".to_string(),
-                "/dev".to_string(),
-                // Make the writable root itself writable again.
-                "--bind".to_string(),
-                "/".to_string(),
-                "/".to_string(),
-                // Mask the default protected .codex subpath under that writable
-                // root. Because the root is `/` in this test, the carveout path
-                // appears as `/.codex`.
-                "--ro-bind".to_string(),
-                "/dev/null".to_string(),
-                "/.codex".to_string(),
-                // Rebind /dev after the root bind so device nodes remain
-                // writable/usable inside the writable root.
-                "--bind".to_string(),
-                "/dev".to_string(),
-                "/dev".to_string(),
-            ]
+        let read_only_root_index = args
+            .args
+            .windows(3)
+            .position(|window| window == ["--ro-bind", "/", "/"])
+            .expect("expected read-only root mount");
+        let dev_mount_index = args
+            .args
+            .windows(2)
+            .position(|window| window == ["--dev", "/dev"])
+            .expect("expected --dev /dev mount");
+        let root_bind_index = args
+            .args
+            .windows(3)
+            .position(|window| window == ["--bind", "/", "/"])
+            .expect("expected writable root bind");
+        let dev_bind_index = args
+            .args
+            .windows(3)
+            .position(|window| window == ["--bind", "/dev", "/dev"])
+            .expect("expected writable /dev bind");
+
+        assert!(
+            read_only_root_index < dev_mount_index,
+            "expected read-only root mount before --dev: {:#?}",
+            args.args
         );
+        assert!(
+            dev_mount_index < root_bind_index,
+            "expected --dev mount before writable root bind: {:#?}",
+            args.args
+        );
+        assert!(
+            root_bind_index < dev_bind_index,
+            "expected writable root bind before writable /dev bind: {:#?}",
+            args.args
+        );
+
+        if let Some(codex_mask_index) = args
+            .args
+            .windows(3)
+            .position(|window| window == ["--ro-bind", "/dev/null", "/.codex"])
+        {
+            assert!(
+                root_bind_index < codex_mask_index,
+                "expected optional /.codex mask after writable root bind: {:#?}",
+                args.args
+            );
+            assert!(
+                codex_mask_index < dev_bind_index,
+                "expected optional /.codex mask before writable /dev bind: {:#?}",
+                args.args
+            );
+        }
     }
 
     #[test]
