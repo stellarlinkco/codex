@@ -863,13 +863,14 @@ impl SandboxPolicy {
             } => {
                 // Start from explicitly configured writable roots.
                 let mut roots: Vec<AbsolutePathBuf> = writable_roots.clone();
+                let mut cwd_absolute: Option<AbsolutePathBuf> = None;
 
                 // Always include defaults: cwd, /tmp (if present on Unix), and
                 // on macOS, the per-user TMPDIR unless explicitly excluded.
                 // TODO(mbolin): cwd param should be AbsolutePathBuf.
-                let cwd_absolute = AbsolutePathBuf::from_absolute_path(cwd);
-                match cwd_absolute {
+                match AbsolutePathBuf::from_absolute_path(cwd) {
                     Ok(cwd) => {
+                        cwd_absolute = Some(cwd.clone());
                         roots.push(cwd);
                     }
                     Err(e) => {
@@ -917,11 +918,17 @@ impl SandboxPolicy {
                 // For each root, compute subpaths that should remain read-only.
                 roots
                     .into_iter()
-                    .map(|writable_root| WritableRoot {
-                        read_only_subpaths: default_read_only_subpaths_for_writable_root(
-                            &writable_root,
-                        ),
-                        root: writable_root,
+                    .map(|writable_root| {
+                        let protect_missing_dot_codex = cwd_absolute
+                            .as_ref()
+                            .is_some_and(|cwd| cwd == &writable_root);
+                        WritableRoot {
+                            read_only_subpaths: default_read_only_subpaths_for_writable_root(
+                                &writable_root,
+                                protect_missing_dot_codex,
+                            ),
+                            root: writable_root,
+                        }
                     })
                     .collect()
             }
@@ -931,6 +938,7 @@ impl SandboxPolicy {
 
 fn default_read_only_subpaths_for_writable_root(
     writable_root: &AbsolutePathBuf,
+    protect_missing_dot_codex: bool,
 ) -> Vec<AbsolutePathBuf> {
     let mut subpaths: Vec<AbsolutePathBuf> = Vec::new();
     #[allow(clippy::expect_used)]
@@ -957,7 +965,8 @@ fn default_read_only_subpaths_for_writable_root(
     for subdir in &[".agents", ".codex"] {
         #[allow(clippy::expect_used)]
         let top_level_codex = writable_root.join(subdir).expect("valid relative path");
-        if top_level_codex.as_path().is_dir() {
+        if top_level_codex.as_path().is_dir() || (protect_missing_dot_codex && *subdir == ".codex")
+        {
             subpaths.push(top_level_codex);
         }
     }
@@ -3483,6 +3492,68 @@ mod tests {
                 .read_only_subpaths
                 .iter()
                 .any(|path| path.as_path() == codex.as_path())
+        );
+    }
+
+    #[test]
+    fn workspace_write_proactively_protects_missing_dot_codex() {
+        let cwd = TempDir::new().expect("tempdir");
+        let policy = SandboxPolicy::WorkspaceWrite {
+            writable_roots: vec![],
+            read_only_access: ReadOnlyAccess::FullAccess,
+            network_access: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
+        };
+        let expected_dot_codex = AbsolutePathBuf::resolve_path_against_base(".codex", cwd.path())
+            .expect("resolve .codex path");
+        let writable_roots = policy.get_writable_roots_with_cwd(cwd.path());
+        let cwd_root = writable_roots
+            .iter()
+            .find(|root| root.root.as_path() == cwd.path())
+            .expect("cwd writable root");
+
+        assert!(
+            cwd_root
+                .read_only_subpaths
+                .iter()
+                .any(|path| path.as_path() == expected_dot_codex.as_path()),
+            "expected missing .codex to be proactively protected"
+        );
+    }
+
+    #[test]
+    fn restricted_policy_skips_default_dot_codex_when_explicit_write_rule_exists() {
+        let cwd = TempDir::new().expect("tempdir");
+        let expected_dot_codex = AbsolutePathBuf::resolve_path_against_base(".codex", cwd.path())
+            .expect("resolve .codex path");
+        let policy = FileSystemSandboxPolicy::restricted(vec![
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Special {
+                    value: FileSystemSpecialPath::CurrentWorkingDirectory,
+                },
+                access: FileSystemAccessMode::Write,
+            },
+            FileSystemSandboxEntry {
+                path: FileSystemPath::Path {
+                    path: expected_dot_codex.clone(),
+                },
+                access: FileSystemAccessMode::Write,
+            },
+        ]);
+
+        let writable_roots = policy.get_writable_roots_with_cwd(cwd.path());
+        let cwd_root = writable_roots
+            .iter()
+            .find(|root| root.root.as_path() == cwd.path())
+            .expect("cwd writable root");
+
+        assert!(
+            !cwd_root
+                .read_only_subpaths
+                .iter()
+                .any(|path| path.as_path() == expected_dot_codex.as_path()),
+            "explicit write rule should prevent default .codex protection for the same path"
         );
     }
 

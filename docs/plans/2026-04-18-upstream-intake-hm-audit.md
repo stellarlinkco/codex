@@ -18,13 +18,13 @@
 | `0bdeab330` | 高 | 已提交 slash 命令可在本地输入历史中回忆 | `codex-rs/tui/src/bottom_pane/chat_composer.rs` + `bottom_pane/mod.rs` + `chatwidget.rs` | 已完成 | Adopted-equivalent |
 | `0393a485e` | 高 | Composer 支持反向历史搜索 | `codex-rs/tui/src/bottom_pane/chat_composer.rs` + `chat_composer_history.rs` + `footer.rs` | 已完成 | Adopted-equivalent |
 | `e9e7ef3d3` | 高 | Windows verbatim/non-verbatim 路径比较一致化，修复 cwd 过滤误判 | `codex-rs/core/src/path_utils.rs` + `app-server`/`tui` 调用点 | 已完成 | Adopted-equivalent |
-| `04fc208b6` | 高 | 保留 tool_search_output 原始顺序，不被分组排序打散 | 本仓无同名 `tools` 模块，映射到连接器/工具发现链路评估 | 未开始 | 待定 |
-| `36712d854` | 高 | remote websocket client 建连前安装 rustls provider | 本仓无 `app-server-client` crate，需评估等价入口 | 未开始 | 待定 |
+| `04fc208b6` | 高 | 保留 tool_search_output 原始顺序，不被分组排序打散 | 本仓无同名 `tools` 模块，映射到连接器/工具发现链路评估 | 已完成 | N/A（无对应模块） |
+| `36712d854` | 高 | remote websocket client 建连前安装 rustls provider | 本仓无 `app-server-client` crate，需评估等价入口 | 已完成 | Adopted-equivalent |
 | `b11478149` | 中 | sandbox writable roots 与 symlink 路径处理一致化 | `utils/absolute-path` + `core/sandboxing/mod.rs` + `linux-sandbox/bwrap.rs` + `exec/tui cwd` | 已完成 | Adopted-equivalent |
-| `b976e701a` | 中 | Windows elevated sandbox 支持 split carveouts | `windows-sandbox-rs` + `core/sandboxing` + `core/exec` | 未开始 | 待定 |
-| `95ba76262` | 中 | Windows restricted-token sandbox 支持 split carveouts | `windows-sandbox-rs` + `core/sandboxing` + `core/exec` | 未开始 | 待定 |
-| `86764af68` | 中 | Linux/macOS sandbox 下首次 `.codex` 创建稳定性 | `core/codex_thread` + `sandboxing` + 相关测试 | 未开始 | 待定 |
-| `71923f43a` | 中 | `codex exec` stdin piping 行为增强 | 现仓 `exec` 已含 stdin 路径，做差异复核 | 未开始 | 待定 |
+| `b976e701a` | 中 | Windows elevated sandbox 支持 split carveouts | `windows-sandbox-rs` + `core/sandboxing` + `core/exec` | 已完成 | N/A（保持 fail-closed） |
+| `95ba76262` | 中 | Windows restricted-token sandbox 支持 split carveouts | `windows-sandbox-rs` + `core/sandboxing` + `core/exec` | 已完成 | Adopted-equivalent |
+| `86764af68` | 中 | Linux/macOS sandbox 下首次 `.codex` 创建稳定性 | `protocol` 默认 carveout + `linux-sandbox` 掩码链路 | 已完成 | Adopted-equivalent |
+| `71923f43a` | 中 | `codex exec` stdin piping 行为增强 | `exec/src/lib.rs` + `exec/tests/suite/prompt_stdin.rs` | 已完成 | Adopted-equivalent |
 | `ae057e0bb` | 中 | 活跃 TUI 会话里 `/status` 速率限制展示不陈旧 | `tui/src/app.rs` + `chatwidget.rs` + `status/*` + `app_event.rs` | 已完成 | Adopted-equivalent |
 | `7999b0f60` | 中 | clear 场景下 SessionStart source 可区分为 clear | `protocol` + `core` + `app-server-protocol` + `app-server` + `tui` | 已完成 | Adopted-equivalent |
 
@@ -79,14 +79,25 @@
     - `exec` 与 `tui` 的 `config_cwd` 改为保留逻辑 symlink 路径且对不存在路径显式报错
     - `core/sandboxing` 追加 symlink 路径归一化回归测试，避免额外权限归一化时提前解链
     - `linux-sandbox/bwrap` 同步上游实现，按 symlink 真实目标挂载并重映射 carveout/unreadable roots
+  - `86764af68` 已语义吸纳：
+    - `SandboxPolicy` 与 `FileSystemSandboxPolicy` 的默认只读 carveout 现在会在 cwd 根下“预先保护缺失的 `.codex`”
+    - 若用户显式为同一路径声明规则（例如显式 `write`），默认 `.codex` 保护不再覆盖该显式规则
+  - `95ba76262` 已语义吸纳：
+    - `core/exec` 新增 restricted-token split carveout 解析逻辑
+    - `windows-sandbox-rs` 新增 `run_windows_sandbox_capture_with_extra_deny_write_paths`，将新增只读 carveout 映射到额外 deny-write ACL
+  - `b976e701a` 本轮结论：N/A（保持 fail-closed）
+    - 当前 fork 的 elevated backend 与上游该提交依赖链（setup/runner 参数面）不一致，直接吸纳风险高
+    - 已补充 fail-closed 约束：当 `windows_sandbox_level != RestrictedToken` 且需要 split carveout 运行时增强时，直接拒绝执行而非静默放宽权限
   - 通过命令：
     - `cargo check -p codex-core -p codex-tui -p codex-app-server`（0）
     - `cargo check -p codex-utils-absolute-path -p codex-core -p codex-exec -p codex-tui -p codex-linux-sandbox`（0）
     - `cargo test -p codex-utils-absolute-path canonicalize_preserving_symlinks`（0）
     - `cargo test -p codex-utils-absolute-path canonicalize_existing_preserving_symlinks`（0）
     - `cargo test -p codex-core normalize_additional_permissions_preserves_symlinked_write_paths`（0）
+    - `cargo test -p codex-windows-sandbox`（0）
+    - `cargo check -p codex-core -p codex-windows-sandbox`（0）
     - `cargo check -p codex-linux-sandbox --target x86_64-unknown-linux-gnu`（失败：本机缺少 cross OpenSSL，待 CI Linux 环境验证）
-  - 备注：`codex-core` 单测二进制编译耗时长，本地未完成该项测试执行，交由 CI 验收。
+  - 备注：`cargo test -p codex-core` 本地长时间卡在构建/链接阶段，未完成全量执行，交由 CI 验收。
 
 ### Batch D - SessionStart clear source
 
@@ -119,6 +130,21 @@
 - 预期产物：
   - 对每项给出 Adopted / Adopted-equivalent / N/A 的证据结论
   - 若 N/A，明确替代实现位置与用户可见差异。
+- 执行回填（已完成）：
+  - `71923f43a`：Adopted-equivalent  
+    - `codex exec "prompt"` + piped stdin 现会拼接为 `prompt + <stdin>...</stdin>` 上下文
+    - 回归覆盖新增：`exec/tests/suite/prompt_stdin.rs`
+  - `36712d854`：Adopted-equivalent  
+    - 本仓虽无 `app-server-client`，但 websocket 建连入口已统一调用 `ensure_rustls_crypto_provider()`：
+      - `codex-rs/codex-api/src/endpoint/responses_websocket.rs`
+      - `codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs`
+      - `codex-rs/network-proxy/src/proxy.rs`
+  - `04fc208b6`：N/A  
+    - 本仓无 `codex-rs/tools` / `tool_discovery` 路径，故不存在该提交修复的排序打散点位
+    - 现有搜索工具链位于 `core`（`search_tool`）且无同名实现冲突
+  - 通过命令：
+    - `cargo test -p codex-exec`（0）
+    - `cargo test -p codex-protocol`（0）
 
 ## CI/CD 门禁改造（执行项）
 

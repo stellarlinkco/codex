@@ -237,6 +237,12 @@ impl FileSystemSandboxPolicy {
 
         let cwd_absolute = AbsolutePathBuf::from_absolute_path(cwd).ok();
         let unreadable_roots = self.get_unreadable_roots_with_cwd(cwd);
+        let has_explicit_path_entry = |candidate: &AbsolutePathBuf| {
+            self.entries.iter().any(|entry| {
+                resolve_file_system_path(&entry.path, cwd_absolute.as_ref()).as_ref()
+                    == Some(candidate)
+            })
+        };
         let mut writable_roots = Vec::new();
         if self.has_root_access(FileSystemAccessMode::can_write)
             && let Some(cwd_absolute) = cwd_absolute.as_ref()
@@ -259,7 +265,12 @@ impl FileSystemSandboxPolicy {
         )
         .into_iter()
         .map(|root| {
-            let mut read_only_subpaths = default_read_only_subpaths_for_writable_root(&root);
+            let protect_missing_dot_codex = cwd_absolute.as_ref().is_some_and(|cwd| cwd == &root);
+            let mut read_only_subpaths: Vec<AbsolutePathBuf> =
+                default_read_only_subpaths_for_writable_root(&root, protect_missing_dot_codex)
+                    .into_iter()
+                    .filter(|path| !has_explicit_path_entry(path))
+                    .collect();
             read_only_subpaths.extend(
                 unreadable_roots
                     .iter()
@@ -643,6 +654,7 @@ fn dedup_absolute_paths(paths: Vec<AbsolutePathBuf>) -> Vec<AbsolutePathBuf> {
 
 fn default_read_only_subpaths_for_writable_root(
     writable_root: &AbsolutePathBuf,
+    protect_missing_dot_codex: bool,
 ) -> Vec<AbsolutePathBuf> {
     let mut subpaths: Vec<AbsolutePathBuf> = Vec::new();
     #[allow(clippy::expect_used)]
@@ -669,7 +681,8 @@ fn default_read_only_subpaths_for_writable_root(
     for subdir in &[".agents", ".codex"] {
         #[allow(clippy::expect_used)]
         let top_level_codex = writable_root.join(subdir).expect("valid relative path");
-        if top_level_codex.as_path().is_dir() {
+        if top_level_codex.as_path().is_dir() || (protect_missing_dot_codex && *subdir == ".codex")
+        {
             subpaths.push(top_level_codex);
         }
     }
