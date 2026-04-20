@@ -437,6 +437,7 @@ mod phase2 {
     use codex_state::Phase2JobClaimOutcome;
     use codex_state::Stage1Output;
     use codex_state::ThreadMetadataBuilder;
+    use codex_utils_absolute_path::AbsolutePathBuf;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -702,10 +703,12 @@ mod phase2 {
         let writable_roots = turn_context
             .file_system_sandbox_policy
             .get_writable_roots_with_cwd(config_snapshot.cwd.as_path());
+        let config_snapshot_cwd = AbsolutePathBuf::from_absolute_path(&config_snapshot.cwd)
+            .expect("config snapshot cwd should be absolute");
         assert!(
             writable_roots
                 .iter()
-                .any(|root| root.root == config_snapshot.cwd),
+                .any(|root| root.root == config_snapshot_cwd),
             "consolidation subagent should be able to write the memory root"
         );
         assert!(
