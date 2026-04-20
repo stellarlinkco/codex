@@ -682,7 +682,12 @@ mod phase2 {
                 assert!(!*network_access);
                 assert_eq!(
                     writable_roots.as_slice(),
-                    [memory_root(&harness.config.codex_home)],
+                    [
+                        AbsolutePathBuf::from_absolute_path(memory_root(
+                            &harness.config.codex_home
+                        ))
+                        .expect("memory root should be absolute")
+                    ],
                     "consolidation subagent should only be able to write the memory root"
                 );
             }
@@ -694,22 +699,23 @@ mod phase2 {
             FileSystemSandboxPolicy::from(&config_snapshot.sandbox_policy),
             "consolidation subagent split filesystem policy should match the memory-root sandbox"
         );
+        let writable_roots = turn_context
+            .file_system_sandbox_policy
+            .get_writable_roots_with_cwd(config_snapshot.cwd.as_path());
         assert!(
-            turn_context
-                .file_system_sandbox_policy
-                .can_write_path_with_cwd(
-                    memory_root(&harness.config.codex_home).as_path(),
-                    config_snapshot.cwd.as_path(),
-                ),
+            writable_roots
+                .iter()
+                .any(|root| root.root == config_snapshot.cwd),
             "consolidation subagent should be able to write the memory root"
         );
         assert!(
-            !turn_context
-                .file_system_sandbox_policy
-                .can_write_path_with_cwd(
-                    harness.config.codex_home.join("config.toml").as_path(),
-                    config_snapshot.cwd.as_path(),
-                ),
+            !writable_roots.iter().any(|root| {
+                harness
+                    .config
+                    .codex_home
+                    .join("config.toml")
+                    .starts_with(root.root.as_path())
+            }),
             "consolidation subagent should not inherit codex_home write access"
         );
         assert_eq!(
