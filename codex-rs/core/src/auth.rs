@@ -102,7 +102,9 @@ const REFRESH_TOKEN_UNKNOWN_MESSAGE: &str =
     "Your access token could not be refreshed. Please log out and sign in again.";
 const REFRESH_TOKEN_ACCOUNT_MISMATCH_MESSAGE: &str = "Your access token could not be refreshed because you have since logged out or signed in to another account. Please sign in again.";
 const REFRESH_TOKEN_URL: &str = "https://auth.openai.com/oauth/token";
+const REVOKE_TOKEN_URL: &str = "https://auth.openai.com/oauth/revoke";
 pub const REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR: &str = "CODEX_REFRESH_TOKEN_URL_OVERRIDE";
+pub const REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR: &str = "CODEX_REVOKE_TOKEN_URL_OVERRIDE";
 
 #[derive(Debug, Error)]
 pub enum RefreshTokenError {
@@ -387,6 +389,15 @@ pub fn logout(
     storage.delete()
 }
 
+pub async fn logout_with_revoke(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<bool> {
+    AuthManager::new(codex_home.to_path_buf(), false, auth_credentials_store_mode)
+        .logout_with_revoke()
+        .await
+}
+
 /// Writes an `auth.json` that contains only the API key.
 pub fn login_with_api_key(
     codex_home: &Path,
@@ -542,6 +553,138 @@ fn logout_all_stores(
     let removed_ephemeral = logout(codex_home, AuthCredentialsStoreMode::Ephemeral)?;
     let removed_managed = logout(codex_home, auth_credentials_store_mode)?;
     Ok(removed_ephemeral || removed_managed)
+}
+
+fn load_auth_dot_json_for_logout(
+    codex_home: &Path,
+    auth_credentials_store_mode: AuthCredentialsStoreMode,
+) -> std::io::Result<Option<AuthDotJson>> {
+    let ephemeral_storage = create_auth_storage(
+        codex_home.to_path_buf(),
+        AuthCredentialsStoreMode::Ephemeral,
+    );
+    if let Some(auth_dot_json) = ephemeral_storage.load()? {
+        return Ok(Some(auth_dot_json));
+    }
+    if auth_credentials_store_mode == AuthCredentialsStoreMode::Ephemeral {
+        return Ok(None);
+    }
+    let storage = create_auth_storage(codex_home.to_path_buf(), auth_credentials_store_mode);
+    storage.load()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RevokeTokenKind {
+    Access,
+    Refresh,
+}
+
+impl RevokeTokenKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Access => "access_token",
+            Self::Refresh => "refresh_token",
+        }
+    }
+
+    fn client_id(self) -> Option<&'static str> {
+        match self {
+            Self::Access => None,
+            Self::Refresh => Some(CLIENT_ID),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RevokeTokenRequest<'a> {
+    token: &'a str,
+    token_type_hint: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    client_id: Option<&'static str>,
+}
+
+fn managed_chatgpt_tokens(auth_dot_json: &AuthDotJson) -> Option<&TokenData> {
+    if auth_dot_json.resolved_mode() == ApiAuthMode::Chatgpt {
+        auth_dot_json.tokens.as_ref()
+    } else {
+        None
+    }
+}
+
+fn revoke_token_endpoint() -> String {
+    if let Ok(endpoint) = env::var(REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR) {
+        return endpoint;
+    }
+    if let Ok(refresh_endpoint) = env::var(REFRESH_TOKEN_URL_OVERRIDE_ENV_VAR)
+        && let Some(endpoint) = derive_revoke_token_endpoint(&refresh_endpoint)
+    {
+        return endpoint;
+    }
+    REVOKE_TOKEN_URL.to_string()
+}
+
+fn derive_revoke_token_endpoint(refresh_endpoint: &str) -> Option<String> {
+    let mut url = url::Url::parse(refresh_endpoint).ok()?;
+    url.set_path("/oauth/revoke");
+    url.set_query(None);
+    Some(url.to_string())
+}
+
+async fn revoke_oauth_token(
+    client: &CodexHttpClient,
+    endpoint: &str,
+    token: &str,
+    kind: RevokeTokenKind,
+) -> std::io::Result<()> {
+    let request = RevokeTokenRequest {
+        token,
+        token_type_hint: kind.as_str(),
+        client_id: kind.client_id(),
+    };
+    let response = client
+        .post(endpoint)
+        .header("Content-Type", "application/json")
+        .json(&request)
+        .send()
+        .await
+        .map_err(std::io::Error::other)?;
+    let status = response.status();
+    if status.is_success() {
+        return Ok(());
+    }
+    let body = response.text().await.unwrap_or_default();
+    let message = try_parse_error_message(&body);
+    Err(std::io::Error::other(format!(
+        "failed to revoke {}: {status}: {message}",
+        kind.as_str()
+    )))
+}
+
+async fn revoke_auth_tokens(auth_dot_json: Option<&AuthDotJson>) -> std::io::Result<()> {
+    let Some(tokens) = auth_dot_json.and_then(managed_chatgpt_tokens) else {
+        return Ok(());
+    };
+    let client = crate::default_client::create_client();
+    let endpoint = revoke_token_endpoint();
+    if !tokens.refresh_token.is_empty() {
+        return revoke_oauth_token(
+            &client,
+            endpoint.as_str(),
+            tokens.refresh_token.as_str(),
+            RevokeTokenKind::Refresh,
+        )
+        .await;
+    }
+    if !tokens.access_token.is_empty() {
+        return revoke_oauth_token(
+            &client,
+            endpoint.as_str(),
+            tokens.access_token.as_str(),
+            RevokeTokenKind::Access,
+        )
+        .await;
+    }
+    Ok(())
 }
 
 fn load_auth(
@@ -1247,6 +1390,22 @@ impl AuthManager {
         Ok(removed)
     }
 
+    pub async fn logout_with_revoke(&self) -> std::io::Result<bool> {
+        let cached_auth_dot_json = self
+            .auth_cached()
+            .and_then(|auth| auth.get_current_auth_json());
+        let auth_dot_json = match cached_auth_dot_json {
+            Some(auth_dot_json) => Some(auth_dot_json),
+            None => {
+                load_auth_dot_json_for_logout(&self.codex_home, self.auth_credentials_store_mode)?
+            }
+        };
+        revoke_auth_tokens(auth_dot_json.as_ref()).await?;
+        let removed = logout_all_stores(&self.codex_home, self.auth_credentials_store_mode)?;
+        self.reload();
+        Ok(removed)
+    }
+
     pub fn get_api_auth_mode(&self) -> Option<ApiAuthMode> {
         self.auth_cached().as_ref().map(CodexAuth::api_auth_mode)
     }
@@ -1373,6 +1532,11 @@ mod tests {
     use serde::Serialize;
     use serde_json::json;
     use tempfile::tempdir;
+    use wiremock::Mock;
+    use wiremock::MockServer;
+    use wiremock::ResponseTemplate;
+    use wiremock::matchers::method;
+    use wiremock::matchers::path;
 
     #[tokio::test]
     async fn refresh_without_id_token() {
@@ -1527,6 +1691,188 @@ mod tests {
         assert!(logout(dir.path(), AuthCredentialsStoreMode::File)?);
         assert!(!auth_file.exists());
         Ok(())
+    }
+
+    #[tokio::test]
+    #[serial(codex_api_key)]
+    async fn logout_with_revoke_revokes_refresh_token_before_removing_auth() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth/revoke"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "message": "success"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _guard = EnvVarGuard::set(
+            REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+            &format!("{}/oauth/revoke", server.uri()),
+        );
+        let codex_home = tempdir().unwrap();
+        let _jwt = write_auth_file(
+            AuthFileParams {
+                openai_api_key: None,
+                chatgpt_plan_type: Some("pro".to_string()),
+                chatgpt_account_id: Some("org_mine".to_string()),
+            },
+            codex_home.path(),
+        )
+        .expect("failed to write auth file");
+
+        let removed = super::logout_with_revoke(codex_home.path(), AuthCredentialsStoreMode::File)
+            .await
+            .expect("logout_with_revoke should succeed");
+
+        assert!(removed);
+        assert!(
+            !codex_home.path().join("auth.json").exists(),
+            "auth.json should be removed after successful revoke"
+        );
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("failed to read revoke requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .body_json::<serde_json::Value>()
+                .expect("revoke request should be json"),
+            json!({
+                "token": "test-refresh-token",
+                "token_type_hint": "refresh_token",
+                "client_id": CLIENT_ID,
+            })
+        );
+    }
+
+    #[tokio::test]
+    #[serial(codex_api_key)]
+    async fn logout_with_revoke_preserves_auth_when_revoke_fails() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth/revoke"))
+            .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+                "error": { "message": "revoke failed" }
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _guard = EnvVarGuard::set(
+            REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+            &format!("{}/oauth/revoke", server.uri()),
+        );
+        let codex_home = tempdir().unwrap();
+        let _jwt = write_auth_file(
+            AuthFileParams {
+                openai_api_key: None,
+                chatgpt_plan_type: Some("pro".to_string()),
+                chatgpt_account_id: Some("org_mine".to_string()),
+            },
+            codex_home.path(),
+        )
+        .expect("failed to write auth file");
+
+        let err = super::logout_with_revoke(codex_home.path(), AuthCredentialsStoreMode::File)
+            .await
+            .expect_err("logout_with_revoke should fail closed when revoke fails");
+        assert!(err.to_string().contains("failed to revoke refresh_token"));
+        assert!(
+            codex_home.path().join("auth.json").exists(),
+            "auth.json should remain when revoke fails"
+        );
+    }
+
+    #[tokio::test]
+    #[serial(codex_api_key)]
+    async fn auth_manager_logout_with_revoke_uses_cached_auth_state() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/oauth/revoke"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "message": "success"
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let _guard = EnvVarGuard::set(
+            REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR,
+            &format!("{}/oauth/revoke", server.uri()),
+        );
+        let codex_home = tempdir().unwrap();
+        let initial_auth = AuthDotJson {
+            auth_mode: Some(ApiAuthMode::Chatgpt),
+            openai_api_key: None,
+            tokens: Some(TokenData {
+                id_token: IdTokenInfo {
+                    raw_jwt: "header.payload.sig".to_string(),
+                    ..Default::default()
+                },
+                access_token: "test-access-token".to_string(),
+                refresh_token: "cached-refresh-token".to_string(),
+                account_id: Some("org_mine".to_string()),
+            }),
+            last_refresh: Some(Utc::now()),
+        };
+        super::save_auth(
+            codex_home.path(),
+            &initial_auth,
+            AuthCredentialsStoreMode::File,
+        )
+        .expect("seed cached auth");
+        let manager = AuthManager::new(
+            codex_home.path().to_path_buf(),
+            false,
+            AuthCredentialsStoreMode::File,
+        );
+
+        let newer_disk_auth = AuthDotJson {
+            auth_mode: Some(ApiAuthMode::Chatgpt),
+            openai_api_key: None,
+            tokens: Some(TokenData {
+                id_token: IdTokenInfo {
+                    raw_jwt: "header.payload.sig".to_string(),
+                    ..Default::default()
+                },
+                access_token: "new-access-token".to_string(),
+                refresh_token: "disk-refresh-token".to_string(),
+                account_id: Some("org_mine".to_string()),
+            }),
+            last_refresh: Some(Utc::now()),
+        };
+        super::save_auth(
+            codex_home.path(),
+            &newer_disk_auth,
+            AuthCredentialsStoreMode::File,
+        )
+        .expect("overwrite on-disk auth");
+
+        let removed = manager
+            .logout_with_revoke()
+            .await
+            .expect("logout_with_revoke should succeed");
+        assert!(removed);
+        assert!(manager.auth_cached().is_none());
+
+        let requests = server
+            .received_requests()
+            .await
+            .expect("failed to read revoke requests");
+        assert_eq!(requests.len(), 1);
+        assert_eq!(
+            requests[0]
+                .body_json::<serde_json::Value>()
+                .expect("revoke request should be json"),
+            json!({
+                "token": "cached-refresh-token",
+                "token_type_hint": "refresh_token",
+                "client_id": CLIENT_ID,
+            })
+        );
     }
 
     struct AuthFileParams {

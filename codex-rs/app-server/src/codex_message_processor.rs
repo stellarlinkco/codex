@@ -1278,7 +1278,7 @@ impl CodexMessageProcessor {
             }
         }
 
-        if let Err(err) = self.auth_manager.logout() {
+        if let Err(err) = self.auth_manager.logout_with_revoke().await {
             return Err(JSONRPCErrorError {
                 code: INTERNAL_ERROR_CODE,
                 message: format!("logout failed: {err}"),

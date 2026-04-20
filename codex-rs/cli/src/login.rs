@@ -12,7 +12,7 @@ use codex_core::auth::AuthCredentialsStoreMode;
 use codex_core::auth::AuthMode;
 use codex_core::auth::CLIENT_ID;
 use codex_core::auth::login_with_api_key;
-use codex_core::auth::logout;
+use codex_core::auth::logout_with_revoke;
 use codex_core::config::Config;
 use codex_login::ServerOptions;
 use codex_login::run_device_code_login;
@@ -347,7 +347,7 @@ pub async fn run_login_status(cli_config_overrides: CliConfigOverrides) -> ! {
 pub async fn run_logout(cli_config_overrides: CliConfigOverrides) -> ! {
     let config = load_config_or_exit(cli_config_overrides).await;
 
-    match logout(&config.codex_home, config.cli_auth_credentials_store_mode) {
+    match logout_with_revoke(&config.codex_home, config.cli_auth_credentials_store_mode).await {
         Ok(true) => {
             eprintln!("Successfully logged out");
             std::process::exit(0);

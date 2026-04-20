@@ -107,6 +107,9 @@ pub(crate) enum AppEvent {
     /// background tasks, rollout flush, or child process cleanup).
     Exit(ExitMode),
 
+    /// Request logout, then exit after the logout path completes.
+    Logout,
+
     /// Request to exit the application due to a fatal error.
     FatalExitRequest(String),
 

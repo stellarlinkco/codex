@@ -2383,6 +2383,16 @@ impl App {
             AppEvent::Exit(mode) => {
                 return Ok(self.handle_exit_mode(mode));
             }
+            AppEvent::Logout => match self.auth_manager.logout_with_revoke().await {
+                Ok(_) => {
+                    return Ok(self.handle_exit_mode(ExitMode::ShutdownFirst));
+                }
+                Err(err) => {
+                    tracing::error!("failed to logout: {err}");
+                    self.chat_widget
+                        .add_error_message(format!("Logout failed: {err}"));
+                }
+            },
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
             }

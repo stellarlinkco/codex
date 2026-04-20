@@ -16,6 +16,20 @@
 - 决策分布：推进吸纳 12，选择性吸纳 71，暂缓 23，不吸纳 24
 - 主要冲突面：Core / TUI / AppServer / Protocol / Plugin（均为 fork 深改区）。
 
+## 2026-04-20 第一层重校准
+- 已在当前分支吸纳或具备等价实现：
+  - `4cd85b28d2`
+  - `8475d51655`
+  - `ab82568536`
+  - `baaf42b2e4`
+  - `fe7c959e90`
+  - `c3ecb557d3`
+- 当前 fork 结构下无同层落点，按 N/A 处理：
+  - `76ea694db5`
+- 第一层剩余并已进入本轮实现收口：
+  - `22f7ef1cb7`
+  - `64177aaa22`
+
 ## 历史遗留未吸纳（117~121）
 | Commit | 事项 | 决策 | 冲突 | 判定依据 |
 | --- | --- | --- | --- | --- |
@@ -57,7 +71,7 @@
 | `b33478c236` | AppServer | **不吸纳** | 高 | CI/抖动治理类提交，当前分支门禁已覆盖。 重叠 6/8；关键文件 codex-rs/app-server/src/codex_message_processor.rs, codex-rs/cli/src/main.rs |
 | `895e2d056f` | Misc | **不吸纳** | 高 | CI/抖动治理类提交，当前分支门禁已覆盖。 重叠 1/1；关键文件 codex-rs/protocol/src/protocol.rs |
 | `6adba99f4d` | Plugin | **不吸纳** | 中 | CI/抖动治理类提交，当前分支门禁已覆盖。 重叠 15/34；关键文件 codex-rs/app-server/src/message_processor.rs, codex-rs/app-server/src/transport/remote_control/websocket.rs |
-| `76ea694db5` | AppServer | **推进吸纳** | 低 | auth preflight 修复，影响登录前置链路。 重叠 0/2；关键文件 codex-rs/app-server/src/transport/remote_control/mod.rs, codex-rs/app-server/src/transport/remote_control/tests.rs |
+| `76ea694db5` | AppServer | **不吸纳（当前分支 N/A）** | 低 | 当前 fork 不包含上游 `app-server/src/transport/remote_control/*` 远控传输栈，没有同层补丁落点。该项不是“遗漏未修”，而是分支结构差异导致的功能域 N/A。 |
 | `b178d1cf17` | Misc | **不吸纳** | 高 | CI/抖动治理类提交，当前分支门禁已覆盖。 重叠 1/1；关键文件 justfile |
 | `b4be3617f9` | Plugin | **选择性吸纳** | 低 | 能力有价值，但与 fork 自研插件/MCP 路径耦合，需要兼容层。 重叠 3/23；关键文件 codex-rs/cli/src/mcp_cmd.rs, codex-rs/codex-mcp/src/mcp/mod.rs |
 | `8475d51655` | TUI | **推进吸纳** | 低 | 去除重复 context 状态项，TUI 展示修复。 重叠 1/5；关键文件 codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__status_line_setup__tests__setup_view_snapshot_uses_runtime_preview_values.snap, codex-rs/tui/src/bottom_pane/status_line_setup.rs |
