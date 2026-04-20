@@ -74,6 +74,7 @@ impl ModelsManager {
         auth_manager: Arc<AuthManager>,
         model_catalog: Option<ModelsResponse>,
         collaboration_modes_config: CollaborationModesConfig,
+        provider: ModelProviderInfo,
     ) -> Self {
         let cache_path = codex_home.join(MODEL_CACHE_FILE);
         let cache_manager = ModelsCacheManager::new(cache_path, DEFAULT_MODEL_CACHE_TTL);
@@ -95,7 +96,7 @@ impl ModelsManager {
             auth_manager,
             etag: RwLock::new(None),
             cache_manager,
-            provider: ModelProviderInfo::create_openai_provider(),
+            provider,
         }
     }
 
@@ -553,6 +554,7 @@ mod tests {
             auth_manager,
             None,
             CollaborationModesConfig::default(),
+            ModelProviderInfo::create_openai_provider(),
         );
         let known_slug = manager
             .get_remote_models()
@@ -593,6 +595,7 @@ mod tests {
                 models: vec![overlay],
             }),
             CollaborationModesConfig::default(),
+            ModelProviderInfo::create_openai_provider(),
         );
 
         let model_info = manager
@@ -626,6 +629,7 @@ mod tests {
                 models: vec![remote],
             }),
             CollaborationModesConfig::default(),
+            ModelProviderInfo::create_openai_provider(),
         );
         let namespaced_model = "custom/gpt-image".to_string();
 
@@ -651,6 +655,7 @@ mod tests {
             auth_manager,
             None,
             CollaborationModesConfig::default(),
+            ModelProviderInfo::create_openai_provider(),
         );
         let known_slug = manager
             .get_remote_models()

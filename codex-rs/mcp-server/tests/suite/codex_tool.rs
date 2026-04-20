@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::env;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::OnceLock;
 
 use codex_core::spawn::CODEX_SANDBOX_NETWORK_DISABLED_ENV_VAR;
 use codex_mcp_server::CodexToolCallParam;
@@ -32,6 +33,11 @@ use mcp_test_support::format_with_current_shell;
 // Allow ample time on slower CI or under load to avoid flakes.
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
+fn codex_tool_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
 /// Test that a shell command that is not on the "trusted" list triggers an
 /// elicitation request to the MCP and that sending the approval runs the
 /// command, as expected.
@@ -52,6 +58,8 @@ async fn test_shell_command_approval_triggers_elicitation() {
 }
 
 async fn shell_command_approval_triggers_elicitation() -> anyhow::Result<()> {
+    let _guard = codex_tool_test_lock().lock().await;
+
     // Use a simple, untrusted command that creates a file so we can
     // observe a side-effect.
     let workdir_for_shell_function_call = TempDir::new()?;
@@ -223,6 +231,8 @@ async fn test_patch_approval_triggers_elicitation() {
 }
 
 async fn patch_approval_triggers_elicitation() -> anyhow::Result<()> {
+    let _guard = codex_tool_test_lock().lock().await;
+
     if cfg!(windows) {
         // powershell apply_patch shell calls are not parsed into apply patch approvals
 
@@ -350,6 +360,8 @@ async fn test_codex_tool_passes_base_instructions() {
 
 async fn codex_tool_passes_base_instructions() -> anyhow::Result<()> {
     #![expect(clippy::expect_used, clippy::unwrap_used)]
+
+    let _guard = codex_tool_test_lock().lock().await;
 
     let server =
         create_mock_responses_server(vec![create_final_assistant_message_sse_response("Enjoy!")?])

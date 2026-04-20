@@ -9,15 +9,19 @@ use crate::path_utils;
 use crate::sandboxing::CommandSpec;
 use crate::sandboxing::SandboxPermissions;
 use crate::shell::Shell;
+use crate::shell::ShellType;
 use crate::skills::SkillMetadata;
 use crate::tools::sandboxing::ToolError;
 use codex_protocol::models::PermissionProfile;
 use std::collections::HashMap;
 use std::path::Path;
+use std::time::Duration;
 
 pub mod apply_patch;
 pub mod shell;
 pub mod unified_exec;
+
+const INITIAL_SHELL_SNAPSHOT_WAIT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone)]
 pub(crate) struct ExecveSessionApproval {
@@ -117,6 +121,36 @@ pub(crate) fn maybe_wrap_shell_lc_with_snapshot(
     };
 
     vec![shell_path.to_string(), "-c".to_string(), rewritten_script]
+}
+
+pub(crate) async fn maybe_wait_for_shell_snapshot(command: &[String], session_shell: &Shell) {
+    if cfg!(windows) {
+        return;
+    }
+
+    if !matches!(
+        session_shell.shell_type,
+        ShellType::Zsh | ShellType::Bash | ShellType::Sh
+    ) {
+        return;
+    }
+
+    if command.len() < 3 || command[1] != "-lc" || session_shell.shell_snapshot().is_some() {
+        return;
+    }
+
+    let mut shell_snapshot = session_shell.shell_snapshot.clone();
+    let _ = tokio::time::timeout(INITIAL_SHELL_SNAPSHOT_WAIT, async move {
+        loop {
+            if shell_snapshot.borrow().is_some() {
+                break;
+            }
+            if shell_snapshot.changed().await.is_err() {
+                break;
+            }
+        }
+    })
+    .await;
 }
 
 fn build_override_exports(explicit_env_overrides: &HashMap<String, String>) -> (String, String) {

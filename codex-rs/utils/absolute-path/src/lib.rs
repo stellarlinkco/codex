@@ -6,6 +6,7 @@ use serde::Deserializer;
 use serde::Serialize;
 use serde::de::Error as SerdeError;
 use std::cell::RefCell;
+use std::path::Component;
 use std::path::Display;
 use std::path::Path;
 use std::path::PathBuf;
@@ -54,6 +55,9 @@ impl AbsolutePathBuf {
 
     pub fn from_absolute_path<P: AsRef<Path>>(path: P) -> std::io::Result<Self> {
         let expanded = Self::maybe_expand_home_directory(path.as_ref());
+        if expanded.is_absolute() {
+            return Ok(Self(normalize_absolute_path(&expanded)));
+        }
         let absolute_path = expanded.absolutize()?;
         Ok(Self(absolute_path.into_owned()))
     }
@@ -96,6 +100,27 @@ impl AbsolutePathBuf {
     pub fn display(&self) -> Display<'_> {
         self.0.display()
     }
+}
+
+fn normalize_absolute_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) {
+                    normalized.pop();
+                }
+            }
+            Component::Normal(part) => normalized.push(part),
+        }
+    }
+    normalized
 }
 
 /// Canonicalize a path when possible, but preserve the logical absolute path
@@ -235,6 +260,8 @@ impl<'de> Deserialize<'de> for AbsolutePathBuf {
 mod tests {
     use super::*;
     use pretty_assertions::assert_eq;
+    #[cfg(unix)]
+    use std::process::Command;
     use tempfile::tempdir;
 
     #[test]
@@ -247,6 +274,41 @@ mod tests {
             AbsolutePathBuf::resolve_path_against_base(absolute_path.clone(), base_path)
                 .expect("failed to create");
         assert_eq!(abs_path_buf.as_path(), absolute_path.as_path());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn from_absolute_path_does_not_read_current_dir_when_path_is_absolute() {
+        let status = Command::new(std::env::current_exe().expect("current test binary"))
+            .arg("from_absolute_path_with_removed_current_dir_child")
+            .arg("--ignored")
+            .env("CODEX_ABSOLUTE_PATH_REMOVED_CWD_CHILD", "1")
+            .status()
+            .expect("run child test");
+
+        assert!(status.success());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore]
+    fn from_absolute_path_with_removed_current_dir_child() {
+        if std::env::var_os("CODEX_ABSOLUTE_PATH_REMOVED_CWD_CHILD").is_none() {
+            return;
+        }
+
+        let original_cwd = std::env::current_dir().expect("original cwd");
+        let temp_dir = tempdir().expect("temp dir");
+        let removed_cwd = temp_dir.path().to_path_buf();
+        std::env::set_current_dir(&removed_cwd).expect("enter temp dir");
+        std::fs::remove_dir(&removed_cwd).expect("remove current dir");
+        std::env::current_dir().expect_err("current dir should be unavailable");
+
+        let path = AbsolutePathBuf::from_absolute_path("/tmp/codex/../codex-home/plugins/cache")
+            .expect("absolute path should not require current dir");
+
+        std::env::set_current_dir(original_cwd).expect("restore cwd");
+        assert_eq!(path.as_path(), Path::new("/tmp/codex-home/plugins/cache"));
     }
 
     #[test]

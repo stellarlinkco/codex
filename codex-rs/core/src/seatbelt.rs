@@ -724,10 +724,20 @@ mod tests {
                 .any(|arg| arg == "-DREADABLE_ROOT_0_RO_0=/tmp/codex-unreadable"),
             "expected read carveout parameter in args: {args:#?}"
         );
+        let write_carveout_param = args
+            .iter()
+            .find_map(|arg| {
+                arg.strip_prefix("-DWRITABLE_ROOT_0_RO_")
+                    .and_then(|rest| rest.split_once('='))
+                    .filter(|(_, value)| *value == "/tmp/codex-unreadable")
+                    .map(|(name, _)| format!("WRITABLE_ROOT_0_RO_{name}"))
+            })
+            .expect("expected write carveout parameter in args");
         assert!(
-            args.iter()
-                .any(|arg| arg == "-DWRITABLE_ROOT_0_RO_0=/tmp/codex-unreadable"),
-            "expected write carveout parameter in args: {args:#?}"
+            policy.contains(&format!(
+                "(require-not (subpath (param \"{write_carveout_param}\")))"
+            )),
+            "expected write carveout in policy for {write_carveout_param}:\n{policy}"
         );
     }
 
@@ -1191,7 +1201,7 @@ sys.exit(0 if allowed else 13)
 ; allow read-only file operations
 (allow file-read*)
 (allow file-write*
-(subpath (param "WRITABLE_ROOT_0")) (require-all (subpath (param "WRITABLE_ROOT_1")) (require-not (subpath (param "WRITABLE_ROOT_1_RO_0"))) (require-not (subpath (param "WRITABLE_ROOT_1_RO_1"))) ) (subpath (param "WRITABLE_ROOT_2"))
+(require-all (subpath (param "WRITABLE_ROOT_0")) (require-not (subpath (param "WRITABLE_ROOT_0_RO_0"))) ) (require-all (subpath (param "WRITABLE_ROOT_1")) (require-not (subpath (param "WRITABLE_ROOT_1_RO_0"))) (require-not (subpath (param "WRITABLE_ROOT_1_RO_1"))) ) (subpath (param "WRITABLE_ROOT_2"))
 )
 
 ; macOS permission profile extensions
@@ -1236,6 +1246,13 @@ sys.exit(0 if allowed else 13)
                 "expected definition arg `{expected_definition}` in {args:#?}"
             );
         }
+        assert!(
+            args.iter().any(|arg| {
+                arg.strip_prefix("-DWRITABLE_ROOT_0_RO_0=")
+                    .is_some_and(|value| value.ends_with("/cwd/.codex"))
+            }),
+            "expected cwd .codex carveout in {args:#?}"
+        );
         for (key, value) in macos_dir_params() {
             let expected_definition = format!("-D{key}={}", value.to_string_lossy());
             assert!(

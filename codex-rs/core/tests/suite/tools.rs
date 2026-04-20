@@ -281,6 +281,87 @@ async fn sandbox_denied_shell_returns_original_output() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn execpolicy_allow_for_first_shell_segment_does_not_bypass_sandbox() -> Result<()> {
+    skip_if_no_network!(Ok(()));
+
+    let server = start_mock_server().await;
+    let mut builder = test_codex()
+        .with_model("gpt-5.1-codex")
+        .with_config(|config| {
+            let policy_path = config.codex_home.join("rules").join("policy.rules");
+            fs::create_dir_all(
+                policy_path
+                    .parent()
+                    .expect("policy directory must have a parent"),
+            )
+            .expect("create policy directory");
+            fs::write(
+                &policy_path,
+                r#"prefix_rule(pattern=["cat"], decision="allow")"#,
+            )
+            .expect("write policy file");
+        });
+    let fixture = builder.build(&server).await?;
+
+    let call_id = "execpolicy-multi-segment-shell";
+    let source_path = fixture.workspace_path("LOG.md");
+    fs::write(&source_path, "policy allows cat only\n")?;
+    let target_path = fixture.workspace_path("should-not-exist.txt");
+    let command = vec![
+        "/bin/sh".to_string(),
+        "-c".to_string(),
+        format!("cat {source_path:?} && touch {target_path:?}"),
+    ];
+    let args = json!({
+        "command": command,
+        "timeout_ms": 1_000,
+    });
+
+    let responses = vec![
+        sse(vec![
+            ev_response_created("resp-1"),
+            ev_function_call(call_id, "shell", &serde_json::to_string(&args)?),
+            ev_completed("resp-1"),
+        ]),
+        sse(vec![
+            ev_assistant_message("msg-1", "done"),
+            ev_completed("resp-2"),
+        ]),
+    ];
+    let mock = mount_sse_sequence(&server, responses).await;
+
+    fixture
+        .submit_turn_with_policy(
+            "run a multi-segment command under read-only sandbox",
+            SandboxPolicy::new_read_only_policy(),
+        )
+        .await?;
+
+    let output_text = mock
+        .function_call_output_text(call_id)
+        .context("shell output present")?;
+    let body_lower = output_text.to_lowercase();
+    let has_denial = body_lower.contains("permission denied")
+        || body_lower.contains("operation not permitted")
+        || body_lower.contains("read-only file system");
+    assert!(
+        has_denial,
+        "expected sandbox denial for later shell segment: {output_text}"
+    );
+    assert!(
+        output_text.contains("policy allows cat only"),
+        "expected first allowed segment output to be preserved: {output_text}"
+    );
+    assert!(
+        !target_path.exists(),
+        "later shell segment should remain sandboxed and not create {}",
+        target_path.display()
+    );
+
+    Ok(())
+}
+
 async fn collect_tools(use_unified_exec: bool) -> Result<Vec<String>> {
     let server = start_mock_server().await;
 

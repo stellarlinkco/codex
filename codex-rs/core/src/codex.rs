@@ -9378,6 +9378,7 @@ mod tests {
             auth_manager.clone(),
             None,
             CollaborationModesConfig::default(),
+            config.model_provider.clone(),
         ));
         let model = ModelsManager::get_model_offline_for_tests(config.model.as_deref());
         let model_info =
@@ -9468,6 +9469,7 @@ mod tests {
             auth_manager.clone(),
             None,
             CollaborationModesConfig::default(),
+            config.model_provider.clone(),
         ));
         let agent_control = AgentControl::default();
         let exec_policy = ExecPolicyManager::default();
@@ -9722,6 +9724,7 @@ mod tests {
             auth_manager.clone(),
             None,
             CollaborationModesConfig::default(),
+            config.model_provider.clone(),
         ));
         let agent_control = AgentControl::default();
         let exec_policy = ExecPolicyManager::default();

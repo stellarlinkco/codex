@@ -27,6 +27,7 @@ use crate::render::renderable::Renderable;
 use crate::render::renderable::RenderableItem;
 use crate::tui::FrameRequester;
 use bottom_pane_view::BottomPaneView;
+use bottom_pane_view::ViewCompletion;
 use codex_core::features::Features;
 use codex_core::plugins::PluginCapabilitySummary;
 use codex_core::skills::model::SkillMetadata;
@@ -372,6 +373,29 @@ impl BottomPane {
         self.request_redraw();
     }
 
+    fn pop_active_view_with_completion(&mut self, completion: Option<ViewCompletion>) {
+        if self.view_stack.pop().is_some() {
+            match completion {
+                Some(ViewCompletion::Accepted) => {
+                    while self
+                        .view_stack
+                        .last()
+                        .is_some_and(|view| view.dismiss_after_child_accept())
+                    {
+                        self.view_stack.pop();
+                    }
+                }
+                Some(ViewCompletion::Cancelled) => {
+                    if let Some(view) = self.view_stack.last_mut() {
+                        view.clear_dismiss_after_child_accept();
+                    }
+                }
+                None => {}
+            }
+            self.on_active_view_complete();
+        }
+    }
+
     /// Forward a key event to the active view or the composer.
     pub fn handle_key_event(&mut self, key_event: KeyEvent) -> InputResult {
         // Do not globally intercept space; only composer handles hold-to-talk.
@@ -394,7 +418,7 @@ impl BottomPane {
             // We need three pieces of information after routing the key:
             // whether Esc completed the view, whether the view finished for any
             // reason, and whether a paste-burst timer should be scheduled.
-            let (ctrl_c_completed, view_complete, view_in_paste_burst) = {
+            let (ctrl_c_completed, view_complete, completion, view_in_paste_burst) = {
                 let last_index = self.view_stack.len() - 1;
                 let view = &mut self.view_stack[last_index];
                 let prefer_esc =
@@ -404,24 +428,27 @@ impl BottomPane {
                     && matches!(view.on_ctrl_c(), CancellationEvent::Handled)
                     && view.is_complete();
                 if ctrl_c_completed {
-                    (true, true, false)
+                    (true, true, view.completion(), false)
                 } else {
                     view.handle_key_event(key_event);
-                    (false, view.is_complete(), view.is_in_paste_burst())
+                    (
+                        false,
+                        view.is_complete(),
+                        view.completion(),
+                        view.is_in_paste_burst(),
+                    )
                 }
             };
 
             if ctrl_c_completed {
-                self.view_stack.pop();
-                self.on_active_view_complete();
+                self.pop_active_view_with_completion(completion);
                 if let Some(next_view) = self.view_stack.last()
                     && next_view.is_in_paste_burst()
                 {
                     self.request_redraw_in(ChatComposer::recommended_paste_flush_delay());
                 }
             } else if view_complete {
-                self.view_stack.clear();
-                self.on_active_view_complete();
+                self.pop_active_view_with_completion(completion);
             } else if view_in_paste_burst {
                 self.request_redraw_in(ChatComposer::recommended_paste_flush_delay());
             }
@@ -473,10 +500,10 @@ impl BottomPane {
     pub(crate) fn on_ctrl_c(&mut self) -> CancellationEvent {
         if let Some(view) = self.view_stack.last_mut() {
             let event = view.on_ctrl_c();
+            let completion = view.completion();
             if matches!(event, CancellationEvent::Handled) {
                 if view.is_complete() {
-                    self.view_stack.pop();
-                    self.on_active_view_complete();
+                    self.pop_active_view_with_completion(completion);
                 }
                 self.show_quit_shortcut_hint(key_hint::ctrl(KeyCode::Char('c')));
                 self.request_redraw();
@@ -500,7 +527,8 @@ impl BottomPane {
         if let Some(view) = self.view_stack.last_mut() {
             let needs_redraw = view.handle_paste(pasted);
             if view.is_complete() {
-                self.on_active_view_complete();
+                let completion = view.completion();
+                self.pop_active_view_with_completion(completion);
             }
             if needs_redraw {
                 self.request_redraw();
@@ -1180,6 +1208,7 @@ impl Renderable for BottomPane {
 mod tests {
     use super::*;
     use crate::app_event::AppEvent;
+    use crate::render::renderable::Renderable;
     use crate::status_indicator_widget::STATUS_DETAILS_DEFAULT_MAX_LINES;
     use crate::status_indicator_widget::StatusDetailsCapitalization;
     use codex_protocol::protocol::Op;
@@ -1228,6 +1257,60 @@ mod tests {
         }
     }
 
+    struct DummyView {
+        dismiss_after_child_accept: Rc<Cell<bool>>,
+        clear_called: Rc<Cell<bool>>,
+        completion: Option<ViewCompletion>,
+    }
+
+    impl DummyView {
+        fn new(dismiss_after_child_accept: Rc<Cell<bool>>, clear_called: Rc<Cell<bool>>) -> Self {
+            Self {
+                dismiss_after_child_accept,
+                clear_called,
+                completion: None,
+            }
+        }
+    }
+
+    impl Renderable for DummyView {
+        fn render(&self, _area: Rect, _buf: &mut Buffer) {}
+
+        fn desired_height(&self, _width: u16) -> u16 {
+            0
+        }
+    }
+
+    impl BottomPaneView for DummyView {
+        fn handle_key_event(&mut self, key_event: KeyEvent) {
+            if key_event.code == KeyCode::Enter {
+                self.completion = Some(ViewCompletion::Accepted);
+            }
+        }
+
+        fn is_complete(&self) -> bool {
+            self.completion.is_some()
+        }
+
+        fn completion(&self) -> Option<ViewCompletion> {
+            self.completion
+        }
+
+        fn dismiss_after_child_accept(&self) -> bool {
+            self.dismiss_after_child_accept.get()
+        }
+
+        fn clear_dismiss_after_child_accept(&mut self) {
+            self.dismiss_after_child_accept.set(false);
+            self.clear_called.set(true);
+        }
+
+        fn on_ctrl_c(&mut self) -> CancellationEvent {
+            self.completion = Some(ViewCompletion::Cancelled);
+            CancellationEvent::Handled
+        }
+    }
+
     #[test]
     fn ctrl_c_on_modal_consumes_without_showing_quit_hint() {
         let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
@@ -1247,6 +1330,92 @@ mod tests {
         assert_eq!(CancellationEvent::Handled, pane.on_ctrl_c());
         assert!(!pane.quit_shortcut_hint_visible());
         assert_eq!(CancellationEvent::NotHandled, pane.on_ctrl_c());
+    }
+
+    #[test]
+    fn accepted_child_view_can_dismiss_parent_view() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut pane = BottomPane::new(BottomPaneParams {
+            app_event_tx: tx,
+            frame_requester: FrameRequester::test_dummy(),
+            has_input_focus: true,
+            enhanced_keys_supported: false,
+            placeholder_text: "Ask Codex to do anything".to_string(),
+            disable_paste_burst: false,
+            animations_enabled: true,
+            skills: Some(Vec::new()),
+        });
+        let parent_dismiss = Rc::new(Cell::new(true));
+        let parent_clear_called = Rc::new(Cell::new(false));
+        pane.show_view(Box::new(DummyView::new(
+            parent_dismiss.clone(),
+            parent_clear_called,
+        )));
+        pane.show_view(Box::new(DummyView::new(
+            Rc::new(Cell::new(false)),
+            Rc::new(Cell::new(false)),
+        )));
+
+        pane.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert!(
+            pane.view_stack.is_empty(),
+            "accepted child should dismiss parent"
+        );
+        assert!(
+            parent_dismiss.get(),
+            "parent marker should not be cleared on accept"
+        );
+    }
+
+    #[test]
+    fn cancelled_child_view_preserves_parent_and_clears_dismiss_marker() {
+        let (tx_raw, _rx) = unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut pane = BottomPane::new(BottomPaneParams {
+            app_event_tx: tx,
+            frame_requester: FrameRequester::test_dummy(),
+            has_input_focus: true,
+            enhanced_keys_supported: false,
+            placeholder_text: "Ask Codex to do anything".to_string(),
+            disable_paste_burst: false,
+            animations_enabled: true,
+            skills: Some(Vec::new()),
+        });
+        let parent_dismiss = Rc::new(Cell::new(true));
+        let parent_clear_called = Rc::new(Cell::new(false));
+        pane.show_view(Box::new(DummyView::new(
+            parent_dismiss.clone(),
+            parent_clear_called.clone(),
+        )));
+        pane.show_view(Box::new(DummyView::new(
+            Rc::new(Cell::new(false)),
+            Rc::new(Cell::new(false)),
+        )));
+
+        assert_eq!(pane.on_ctrl_c(), CancellationEvent::Handled);
+        assert_eq!(pane.view_stack.len(), 1, "cancel should keep parent view");
+        assert!(
+            parent_clear_called.get(),
+            "cancel should clear parent dismiss marker"
+        );
+        assert!(
+            !parent_dismiss.get(),
+            "parent dismiss marker should be reset"
+        );
+
+        pane.show_view(Box::new(DummyView::new(
+            Rc::new(Cell::new(false)),
+            Rc::new(Cell::new(false)),
+        )));
+        pane.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+        assert_eq!(
+            pane.view_stack.len(),
+            1,
+            "accepted child should not dismiss parent after cancel reset",
+        );
     }
 
     #[test]

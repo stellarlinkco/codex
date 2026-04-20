@@ -496,6 +496,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                 .features
                 .enabled(codex_core::features::Feature::DefaultModeRequestUserInput),
         },
+        config.model_provider.clone(),
     ));
     let default_model = thread_manager
         .get_models_manager()

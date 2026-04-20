@@ -26,6 +26,7 @@ use color_eyre::eyre::Result;
 use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
+use crossterm::event::KeyModifiers;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Rect;
@@ -402,16 +403,21 @@ impl PickerState {
 
     async fn handle_key(&mut self, key: KeyEvent) -> Result<Option<SessionSelection>> {
         self.inline_error = None;
-        match key.code {
-            KeyCode::Esc => return Ok(Some(SessionSelection::StartFresh)),
-            KeyCode::Char('c')
-                if key
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL) =>
-            {
+        match key {
+            KeyEvent {
+                code: KeyCode::Esc, ..
+            } => return Ok(Some(SessionSelection::StartFresh)),
+            KeyEvent {
+                code: KeyCode::Char('c'),
+                modifiers,
+                ..
+            } if modifiers.contains(KeyModifiers::CONTROL) => {
                 return Ok(Some(SessionSelection::Exit));
             }
-            KeyCode::Enter => {
+            KeyEvent {
+                code: KeyCode::Enter,
+                ..
+            } => {
                 if let Some(row) = self.filtered_rows.get(self.selected) {
                     let path = row.path.clone();
                     let thread_id = match row.thread_id {
@@ -428,14 +434,39 @@ impl PickerState {
                     self.request_frame();
                 }
             }
-            KeyCode::Up => {
+            KeyEvent {
+                code: KeyCode::Up, ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('p'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('\u{0010}'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
                 if self.selected > 0 {
                     self.selected -= 1;
                     self.ensure_selected_visible();
                 }
                 self.request_frame();
             }
-            KeyCode::Down => {
+            KeyEvent {
+                code: KeyCode::Down,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('n'),
+                modifiers: KeyModifiers::CONTROL,
+                ..
+            }
+            | KeyEvent {
+                code: KeyCode::Char('\u{000e}'),
+                modifiers: KeyModifiers::NONE,
+                ..
+            } => {
                 if self.selected + 1 < self.filtered_rows.len() {
                     self.selected += 1;
                     self.ensure_selected_visible();
@@ -443,7 +474,10 @@ impl PickerState {
                 self.maybe_load_more_for_scroll();
                 self.request_frame();
             }
-            KeyCode::PageUp => {
+            KeyEvent {
+                code: KeyCode::PageUp,
+                ..
+            } => {
                 let step = self.view_rows.unwrap_or(10).max(1);
                 if self.selected > 0 {
                     self.selected = self.selected.saturating_sub(step);
@@ -451,7 +485,10 @@ impl PickerState {
                     self.request_frame();
                 }
             }
-            KeyCode::PageDown => {
+            KeyEvent {
+                code: KeyCode::PageDown,
+                ..
+            } => {
                 if !self.filtered_rows.is_empty() {
                     let step = self.view_rows.unwrap_or(10).max(1);
                     let max_index = self.filtered_rows.len().saturating_sub(1);
@@ -461,21 +498,27 @@ impl PickerState {
                     self.request_frame();
                 }
             }
-            KeyCode::Tab => {
+            KeyEvent {
+                code: KeyCode::Tab, ..
+            } => {
                 self.toggle_sort_key();
                 self.request_frame();
             }
-            KeyCode::Backspace => {
+            KeyEvent {
+                code: KeyCode::Backspace,
+                ..
+            } => {
                 let mut new_query = self.query.clone();
                 new_query.pop();
                 self.set_query(new_query);
             }
-            KeyCode::Char(c) => {
-                // basic text input for search
-                if !key
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL)
-                    && !key.modifiers.contains(crossterm::event::KeyModifiers::ALT)
+            KeyEvent {
+                code: KeyCode::Char(c),
+                modifiers,
+                ..
+            } => {
+                if !modifiers.contains(KeyModifiers::CONTROL)
+                    && !modifiers.contains(KeyModifiers::ALT)
                 {
                     let mut new_query = self.query.clone();
                     new_query.push(c);
@@ -2158,6 +2201,81 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(state.selected, 5);
+    }
+
+    #[tokio::test]
+    async fn ctrl_p_and_ctrl_n_navigate_rows() {
+        let loader: PageLoader = Arc::new(|_| {});
+        let mut state = PickerState::new(
+            PathBuf::from("/tmp"),
+            FrameRequester::test_dummy(),
+            loader,
+            String::from("openai"),
+            true,
+            None,
+            SessionPickerAction::Resume,
+        );
+
+        let mut items = Vec::new();
+        for idx in 0..3 {
+            let ts = format!("2025-01-{:02}T00:00:00Z", idx + 1);
+            let preview = format!("item-{idx}");
+            let path = format!("/tmp/item-{idx}.jsonl");
+            items.push(make_item(&path, &ts, &preview));
+        }
+
+        state.reset_pagination();
+        state.ingest_page(page(items, None, 3, false));
+
+        state
+            .handle_key(KeyEvent::new(KeyCode::Char('n'), KeyModifiers::CONTROL))
+            .await
+            .unwrap();
+        assert_eq!(state.selected, 1);
+
+        state
+            .handle_key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::CONTROL))
+            .await
+            .unwrap();
+        assert_eq!(state.selected, 0);
+    }
+
+    #[tokio::test]
+    async fn raw_ctrl_p_and_ctrl_n_navigate_rows() {
+        let loader: PageLoader = Arc::new(|_| {});
+        let mut state = PickerState::new(
+            PathBuf::from("/tmp"),
+            FrameRequester::test_dummy(),
+            loader,
+            String::from("openai"),
+            true,
+            None,
+            SessionPickerAction::Resume,
+        );
+
+        let mut items = Vec::new();
+        for idx in 0..3 {
+            let ts = format!("2025-01-{:02}T00:00:00Z", idx + 1);
+            let preview = format!("item-{idx}");
+            let path = format!("/tmp/item-{idx}.jsonl");
+            items.push(make_item(&path, &ts, &preview));
+        }
+
+        state.reset_pagination();
+        state.ingest_page(page(items, None, 3, false));
+        state.selected = 1;
+
+        state
+            .handle_key(KeyEvent::new(KeyCode::Char('\u{0010}'), KeyModifiers::NONE))
+            .await
+            .unwrap();
+        assert_eq!(state.selected, 0);
+
+        state
+            .handle_key(KeyEvent::new(KeyCode::Char('\u{000e}'), KeyModifiers::NONE))
+            .await
+            .unwrap();
+        assert_eq!(state.selected, 1);
     }
 
     #[tokio::test]
