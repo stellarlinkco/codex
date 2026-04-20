@@ -1804,12 +1804,13 @@ mod tests {
             &format!("{}/oauth/revoke", server.uri()),
         );
         let codex_home = tempdir().unwrap();
+        let fake_jwt = build_fake_jwt(Some("pro"), Some("org_mine")).expect("fake jwt");
         let initial_auth = AuthDotJson {
             auth_mode: Some(ApiAuthMode::Chatgpt),
             openai_api_key: None,
             tokens: Some(TokenData {
                 id_token: IdTokenInfo {
-                    raw_jwt: "header.payload.sig".to_string(),
+                    raw_jwt: fake_jwt.clone(),
                     ..Default::default()
                 },
                 access_token: "test-access-token".to_string(),
@@ -1835,7 +1836,7 @@ mod tests {
             openai_api_key: None,
             tokens: Some(TokenData {
                 id_token: IdTokenInfo {
-                    raw_jwt: "header.payload.sig".to_string(),
+                    raw_jwt: fake_jwt,
                     ..Default::default()
                 },
                 access_token: "new-access-token".to_string(),
@@ -1881,9 +1882,10 @@ mod tests {
         chatgpt_account_id: Option<String>,
     }
 
-    fn write_auth_file(params: AuthFileParams, codex_home: &Path) -> std::io::Result<String> {
-        let auth_file = get_auth_file(codex_home);
-        // Create a minimal valid JWT for the id_token field.
+    fn build_fake_jwt(
+        chatgpt_plan_type: Option<&str>,
+        chatgpt_account_id: Option<&str>,
+    ) -> std::io::Result<String> {
         #[derive(Serialize)]
         struct Header {
             alg: &'static str,
@@ -1898,12 +1900,13 @@ mod tests {
             "user_id": "user-12345",
         });
 
-        if let Some(chatgpt_plan_type) = params.chatgpt_plan_type {
-            auth_payload["chatgpt_plan_type"] = serde_json::Value::String(chatgpt_plan_type);
+        if let Some(chatgpt_plan_type) = chatgpt_plan_type {
+            auth_payload["chatgpt_plan_type"] =
+                serde_json::Value::String(chatgpt_plan_type.to_string());
         }
 
-        if let Some(chatgpt_account_id) = params.chatgpt_account_id {
-            let org_value = serde_json::Value::String(chatgpt_account_id);
+        if let Some(chatgpt_account_id) = chatgpt_account_id {
+            let org_value = serde_json::Value::String(chatgpt_account_id.to_string());
             auth_payload["chatgpt_account_id"] = org_value;
         }
 
@@ -1916,8 +1919,15 @@ mod tests {
         let header_b64 = b64(&serde_json::to_vec(&header)?);
         let payload_b64 = b64(&serde_json::to_vec(&payload)?);
         let signature_b64 = b64(b"sig");
-        let fake_jwt = format!("{header_b64}.{payload_b64}.{signature_b64}");
+        Ok(format!("{header_b64}.{payload_b64}.{signature_b64}"))
+    }
 
+    fn write_auth_file(params: AuthFileParams, codex_home: &Path) -> std::io::Result<String> {
+        let auth_file = get_auth_file(codex_home);
+        let fake_jwt = build_fake_jwt(
+            params.chatgpt_plan_type.as_deref(),
+            params.chatgpt_account_id.as_deref(),
+        )?;
         let auth_json_data = json!({
             "OPENAI_API_KEY": params.openai_api_key,
             "tokens": {
