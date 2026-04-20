@@ -691,10 +691,7 @@ mod phase2 {
         let turn_context = subagent.codex.session.new_default_turn().await;
         assert_eq!(
             turn_context.file_system_sandbox_policy,
-            FileSystemSandboxPolicy::from_legacy_sandbox_policy(
-                &config_snapshot.sandbox_policy,
-                config_snapshot.cwd.as_path(),
-            ),
+            FileSystemSandboxPolicy::from(&config_snapshot.sandbox_policy),
             "consolidation subagent split filesystem policy should match the memory-root sandbox"
         );
         assert!(
