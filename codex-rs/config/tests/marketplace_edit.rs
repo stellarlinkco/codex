@@ -14,15 +14,17 @@ struct TestDir {
 
 impl TestDir {
     fn new() -> Self {
-        let unique = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap()
-            .as_nanos();
+        let unique = match SystemTime::now().duration_since(UNIX_EPOCH) {
+            Ok(duration) => duration.as_nanos(),
+            Err(err) => panic!("system clock should be after unix epoch: {err}"),
+        };
         let path = std::env::temp_dir().join(format!(
             "codex-config-marketplace-edit-{}-{unique}",
             std::process::id()
         ));
-        std::fs::create_dir_all(&path).unwrap();
+        if let Err(err) = std::fs::create_dir_all(&path) {
+            panic!("failed to create temp dir {}: {err}", path.display());
+        }
         Self { path }
     }
 
