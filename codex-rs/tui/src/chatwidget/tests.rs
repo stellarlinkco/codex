@@ -7991,7 +7991,7 @@ async fn plugins_command_opens_marketplace_popup() {
     .expect("write plugin manifest");
 
     chat.config.codex_home = temp.path().to_path_buf();
-    chat.config.cwd = repo_root.clone();
+    chat.config.cwd = repo_root;
     chat.config
         .features
         .enable(Feature::Plugins)
