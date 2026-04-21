@@ -84,6 +84,7 @@ mod json_result;
 mod list_dir;
 mod live_cli;
 mod live_reload;
+mod marketplace_remove;
 mod memories;
 mod model_info_overrides;
 mod model_overrides;

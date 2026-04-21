@@ -191,7 +191,7 @@ fn plugin_name_for_source(source_path: &Path) -> Result<String, PluginStoreError
         .map(|_| plugin_name)
 }
 
-fn validate_plugin_segment(segment: &str, kind: &str) -> Result<(), String> {
+pub(crate) fn validate_plugin_segment(segment: &str, kind: &str) -> Result<(), String> {
     if segment.is_empty() {
         return Err(format!("invalid {kind}: must not be empty"));
     }
