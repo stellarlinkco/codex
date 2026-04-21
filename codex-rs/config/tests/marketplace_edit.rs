@@ -3,11 +3,43 @@ use codex_config::RemoveMarketplaceConfigOutcome;
 use codex_config::record_user_marketplace;
 use codex_config::remove_user_marketplace_config;
 use pretty_assertions::assert_eq;
-use tempfile::TempDir;
+use std::path::Path;
+use std::path::PathBuf;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+
+struct TestDir {
+    path: PathBuf,
+}
+
+impl TestDir {
+    fn new() -> Self {
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!(
+            "codex-config-marketplace-edit-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&path).unwrap();
+        Self { path }
+    }
+
+    fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.path);
+    }
+}
 
 #[test]
 fn remove_user_marketplace_config_reports_case_mismatch() {
-    let codex_home = TempDir::new().unwrap();
+    let codex_home = TestDir::new();
     let update = MarketplaceConfigUpdate {
         last_updated: "2026-04-13T00:00:00Z",
         last_revision: None,
@@ -30,7 +62,7 @@ fn remove_user_marketplace_config_reports_case_mismatch() {
 
 #[test]
 fn remove_user_marketplace_config_removes_inline_table_entry() {
-    let codex_home = TempDir::new().unwrap();
+    let codex_home = TestDir::new();
     std::fs::write(
         codex_home.path().join(codex_config::CONFIG_TOML_FILE),
         r#"
