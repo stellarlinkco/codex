@@ -274,6 +274,7 @@ use self::agent::spawn_agent_from_existing;
 pub(crate) use self::agent::spawn_op_forwarder;
 mod session_header;
 use self::session_header::SessionHeader;
+mod plugins;
 mod skills;
 use self::skills::collect_tool_mentions;
 use self::skills::find_app_mentions;
@@ -3460,6 +3461,9 @@ impl ChatWidget {
         widget
             .bottom_pane
             .set_connectors_enabled(widget.config.features.enabled(Feature::Apps));
+        widget
+            .bottom_pane
+            .set_plugins_enabled(widget.config.features.enabled(Feature::Plugins));
 
         widget
     }
@@ -3638,6 +3642,9 @@ impl ChatWidget {
         widget
             .bottom_pane
             .set_connectors_enabled(widget.config.features.enabled(Feature::Apps));
+        widget
+            .bottom_pane
+            .set_plugins_enabled(widget.config.features.enabled(Feature::Plugins));
 
         widget
     }
@@ -3827,6 +3834,9 @@ impl ChatWidget {
         widget
             .bottom_pane
             .set_connectors_enabled(widget.config.features.enabled(Feature::Apps));
+        widget
+            .bottom_pane
+            .set_plugins_enabled(widget.config.features.enabled(Feature::Plugins));
 
         widget
     }
@@ -4354,6 +4364,9 @@ impl ChatWidget {
             }
             SlashCommand::Apps => {
                 self.add_connectors_output();
+            }
+            SlashCommand::Plugins => {
+                self.add_plugins_output();
             }
             SlashCommand::Rollout => {
                 if let Some(path) = self.rollout_path() {
@@ -7588,6 +7601,7 @@ impl ChatWidget {
             self.sync_personality_command_enabled();
         }
         if feature == Feature::Plugins {
+            self.bottom_pane.set_plugins_enabled(enabled);
             self.refresh_plugin_mentions();
         }
         if feature == Feature::PreventIdleSleep {
@@ -8004,6 +8018,10 @@ impl ChatWidget {
         self.config.features.enabled(Feature::Apps)
     }
 
+    fn plugins_enabled(&self) -> bool {
+        self.config.features.enabled(Feature::Plugins)
+    }
+
     fn connectors_for_mentions(&self) -> Option<&[connectors::AppInfo]> {
         if !self.connectors_enabled() {
             return None;
@@ -8016,7 +8034,7 @@ impl ChatWidget {
     }
 
     fn plugins_for_mentions(&self) -> Option<&[codex_core::plugins::PluginCapabilitySummary]> {
-        if !self.config.features.enabled(Feature::Plugins) {
+        if !self.plugins_enabled() {
             return None;
         }
 

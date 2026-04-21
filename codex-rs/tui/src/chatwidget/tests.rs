@@ -18,6 +18,7 @@ use crate::test_backend::VT100Backend;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
 use codex_core::CodexAuth;
+use codex_core::config::CONFIG_TOML_FILE;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::Constrained;
@@ -7926,6 +7927,103 @@ async fn user_turn_carries_service_tier_after_fast_toggle() {
         } => {}
         other => panic!("expected Op::UserTurn with fast service tier, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn plugins_command_reports_feature_disabled() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command(SlashCommand::Plugins);
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .flat_map(|lines| {
+            lines_to_single_string(&lines)
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("Plugins are not enabled."),
+        "expected disabled feature message, got:\n{rendered}"
+    );
+}
+
+#[tokio::test]
+async fn plugins_command_opens_marketplace_popup() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let temp = tempdir().expect("tempdir");
+    let repo_root = temp.path().join("repo");
+    let plugin_root = repo_root.join("plugins/sample");
+
+    std::fs::create_dir_all(repo_root.join(".git")).expect("create repo root");
+    std::fs::create_dir_all(repo_root.join(".agents/plugins")).expect("create marketplace dir");
+    std::fs::create_dir_all(plugin_root.join(".codex-plugin")).expect("create plugin dir");
+    std::fs::write(
+        repo_root.join(".agents/plugins/marketplace.json"),
+        r#"{
+  "name": "debug",
+  "plugins": [
+    {
+      "name": "sample",
+      "source": {
+        "source": "local",
+        "path": "./plugins/sample"
+      }
+    }
+  ]
+}"#,
+    )
+    .expect("write marketplace");
+    std::fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        r#"{
+  "name": "sample",
+  "interface": {
+    "displayName": "Sample Plugin",
+    "shortDescription": "Debug helpers",
+    "capabilities": ["skills", "mcp"]
+  }
+}"#,
+    )
+    .expect("write plugin manifest");
+
+    chat.config.codex_home = temp.path().to_path_buf();
+    chat.config.cwd = repo_root.clone();
+    chat.config
+        .features
+        .enable(Feature::Plugins)
+        .expect("test config should allow plugin feature update");
+    let config_toml_path =
+        AbsolutePathBuf::try_from(temp.path().join(CONFIG_TOML_FILE)).expect("absolute config");
+    let user_config = toml::from_str::<TomlValue>(
+        r#"[features]
+plugins = true
+"#,
+    )
+    .expect("parse plugin feature config");
+    chat.config.config_layer_stack = chat
+        .config
+        .config_layer_stack
+        .with_user_config(&config_toml_path, user_config);
+
+    chat.dispatch_command(SlashCommand::Plugins);
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert!(
+        popup.contains("Plugins"),
+        "expected plugins popup title, got:\n{popup}"
+    );
+    assert!(
+        popup.contains("Sample Plugin"),
+        "expected plugin display name, got:\n{popup}"
+    );
+    assert!(
+        popup.contains("debug"),
+        "expected marketplace name, got:\n{popup}"
+    );
 }
 
 #[tokio::test]

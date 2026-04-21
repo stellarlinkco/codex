@@ -12,6 +12,7 @@ use crate::slash_command::built_in_slash_commands;
 pub(crate) struct BuiltinCommandFlags {
     pub(crate) collaboration_modes_enabled: bool,
     pub(crate) connectors_enabled: bool,
+    pub(crate) plugins_enabled: bool,
     pub(crate) fast_command_enabled: bool,
     pub(crate) personality_command_enabled: bool,
     pub(crate) realtime_conversation_enabled: bool,
@@ -31,6 +32,7 @@ pub(crate) fn builtins_for_input(flags: BuiltinCommandFlags) -> Vec<(&'static st
                 || !matches!(*cmd, SlashCommand::Collab | SlashCommand::Plan)
         })
         .filter(|(_, cmd)| flags.connectors_enabled || *cmd != SlashCommand::Apps)
+        .filter(|(_, cmd)| flags.plugins_enabled || *cmd != SlashCommand::Plugins)
         .filter(|(_, cmd)| flags.fast_command_enabled || *cmd != SlashCommand::Fast)
         .filter(|(_, cmd)| flags.personality_command_enabled || *cmd != SlashCommand::Personality)
         .filter(|(_, cmd)| flags.realtime_conversation_enabled || *cmd != SlashCommand::Realtime)
@@ -62,6 +64,7 @@ mod tests {
         BuiltinCommandFlags {
             collaboration_modes_enabled: true,
             connectors_enabled: true,
+            plugins_enabled: true,
             fast_command_enabled: true,
             personality_command_enabled: true,
             realtime_conversation_enabled: true,
@@ -119,5 +122,12 @@ mod tests {
         let mut flags = all_enabled_flags();
         flags.scheduled_tasks_enabled = false;
         assert_eq!(find_builtin_command("loop", flags), None);
+    }
+
+    #[test]
+    fn plugins_command_is_hidden_when_plugins_are_disabled() {
+        let mut flags = all_enabled_flags();
+        flags.plugins_enabled = false;
+        assert_eq!(find_builtin_command("plugins", flags), None);
     }
 }

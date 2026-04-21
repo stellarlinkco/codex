@@ -291,6 +291,10 @@ impl BottomPane {
         self.composer.set_connectors_enabled(enabled);
     }
 
+    pub fn set_plugins_enabled(&mut self, enabled: bool) {
+        self.composer.set_plugins_enabled(enabled);
+    }
+
     #[cfg(target_os = "windows")]
     pub fn set_windows_degraded_sandbox_active(&mut self, enabled: bool) {
         self.composer.set_windows_degraded_sandbox_active(enabled);

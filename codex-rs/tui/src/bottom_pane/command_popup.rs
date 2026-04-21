@@ -38,6 +38,7 @@ pub(crate) struct CommandPopup {
 pub(crate) struct CommandPopupFlags {
     pub(crate) collaboration_modes_enabled: bool,
     pub(crate) connectors_enabled: bool,
+    pub(crate) plugins_enabled: bool,
     pub(crate) fast_command_enabled: bool,
     pub(crate) personality_command_enabled: bool,
     pub(crate) realtime_conversation_enabled: bool,
@@ -51,6 +52,7 @@ impl From<CommandPopupFlags> for slash_commands::BuiltinCommandFlags {
         Self {
             collaboration_modes_enabled: value.collaboration_modes_enabled,
             connectors_enabled: value.connectors_enabled,
+            plugins_enabled: value.plugins_enabled,
             fast_command_enabled: value.fast_command_enabled,
             personality_command_enabled: value.personality_command_enabled,
             realtime_conversation_enabled: value.realtime_conversation_enabled,
@@ -509,6 +511,7 @@ mod tests {
             CommandPopupFlags {
                 collaboration_modes_enabled: true,
                 connectors_enabled: false,
+                plugins_enabled: false,
                 fast_command_enabled: false,
                 personality_command_enabled: true,
                 realtime_conversation_enabled: false,
@@ -532,6 +535,7 @@ mod tests {
             CommandPopupFlags {
                 collaboration_modes_enabled: true,
                 connectors_enabled: false,
+                plugins_enabled: false,
                 fast_command_enabled: false,
                 personality_command_enabled: true,
                 realtime_conversation_enabled: false,
@@ -549,12 +553,56 @@ mod tests {
     }
 
     #[test]
+    fn plugins_command_hidden_when_plugins_disabled() {
+        let mut popup = CommandPopup::new(Vec::new(), CommandPopupFlags::default());
+        popup.on_composer_text_change("/plug".to_string());
+
+        let cmds: Vec<&str> = popup
+            .filtered_items()
+            .into_iter()
+            .filter_map(|item| match item {
+                CommandItem::Builtin(cmd) => Some(cmd.command()),
+                CommandItem::UserPrompt(_) => None,
+            })
+            .collect();
+        assert!(
+            !cmds.contains(&"plugins"),
+            "expected '/plugins' to be hidden when plugins are disabled, got {cmds:?}"
+        );
+    }
+
+    #[test]
+    fn plugins_command_visible_when_plugins_enabled() {
+        let mut popup = CommandPopup::new(
+            Vec::new(),
+            CommandPopupFlags {
+                collaboration_modes_enabled: false,
+                connectors_enabled: false,
+                plugins_enabled: true,
+                fast_command_enabled: false,
+                personality_command_enabled: true,
+                realtime_conversation_enabled: false,
+                audio_device_selection_enabled: false,
+                scheduled_tasks_enabled: true,
+                windows_degraded_sandbox_active: false,
+            },
+        );
+        popup.on_composer_text_change("/plugins".to_string());
+
+        match popup.selected_item() {
+            Some(CommandItem::Builtin(cmd)) => assert_eq!(cmd.command(), "plugins"),
+            other => panic!("expected plugins to be selected for exact match, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn personality_command_hidden_when_disabled() {
         let mut popup = CommandPopup::new(
             Vec::new(),
             CommandPopupFlags {
                 collaboration_modes_enabled: true,
                 connectors_enabled: false,
+                plugins_enabled: false,
                 fast_command_enabled: false,
                 personality_command_enabled: false,
                 realtime_conversation_enabled: false,
@@ -586,6 +634,7 @@ mod tests {
             CommandPopupFlags {
                 collaboration_modes_enabled: true,
                 connectors_enabled: false,
+                plugins_enabled: false,
                 fast_command_enabled: false,
                 personality_command_enabled: true,
                 realtime_conversation_enabled: false,
@@ -609,6 +658,7 @@ mod tests {
             CommandPopupFlags {
                 collaboration_modes_enabled: false,
                 connectors_enabled: false,
+                plugins_enabled: false,
                 fast_command_enabled: false,
                 personality_command_enabled: true,
                 realtime_conversation_enabled: true,
