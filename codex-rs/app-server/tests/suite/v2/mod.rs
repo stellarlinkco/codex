@@ -38,6 +38,7 @@ mod thread_resume;
 mod thread_rollback;
 mod thread_start;
 mod thread_status;
+mod thread_turns_list;
 mod thread_unarchive;
 mod thread_unsubscribe;
 mod turn_interrupt;
