@@ -213,6 +213,15 @@ impl TurnState {
         !self.pending_input.is_empty()
     }
 
+    pub(crate) fn has_pending_mailbox_input(&self) -> bool {
+        self.pending_input.iter().any(|item| {
+            matches!(
+                item,
+                ResponseInputItem::Message { role, .. } if role != "user"
+            )
+        })
+    }
+
     pub(crate) fn record_granted_permissions(&mut self, permissions: PermissionProfile) {
         self.granted_permissions =
             merge_permission_profiles(self.granted_permissions.as_ref(), Some(&permissions));
@@ -228,5 +237,47 @@ impl ActiveTurn {
     pub(crate) async fn clear_pending(&self) {
         let mut ts = self.turn_state.lock().await;
         ts.clear_pending();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::TurnState;
+    use codex_protocol::models::ContentItem;
+    use codex_protocol::models::FunctionCallOutputBody;
+    use codex_protocol::models::FunctionCallOutputPayload;
+    use codex_protocol::models::ResponseInputItem;
+
+    #[test]
+    fn pending_mailbox_input_ignores_user_messages_and_tool_outputs() {
+        let mut state = TurnState::default();
+        state.push_pending_input(ResponseInputItem::Message {
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "hello".to_string(),
+            }],
+        });
+        state.push_pending_input(ResponseInputItem::FunctionCallOutput {
+            call_id: "call-1".to_string(),
+            output: FunctionCallOutputPayload {
+                body: FunctionCallOutputBody::Text("ok".to_string()),
+                success: Some(true),
+            },
+        });
+
+        assert!(!state.has_pending_mailbox_input());
+    }
+
+    #[test]
+    fn pending_mailbox_input_detects_non_user_messages() {
+        let mut state = TurnState::default();
+        state.push_pending_input(ResponseInputItem::Message {
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "queued child update".to_string(),
+            }],
+        });
+
+        assert!(state.has_pending_mailbox_input());
     }
 }

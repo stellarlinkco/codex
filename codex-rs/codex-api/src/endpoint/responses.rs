@@ -70,7 +70,7 @@ impl<T: HttpTransport, A: AuthProvider> ResponsesClient<T, A> {
 
         let mut body = serde_json::to_value(&request)
             .map_err(|e| ApiError::Stream(format!("failed to encode responses request: {e}")))?;
-        if request.store && self.session.provider().is_azure_responses_endpoint() {
+        if request.store && self.session.provider().stores_responses_by_default() {
             attach_item_ids(&mut body, &request.input);
         }
 

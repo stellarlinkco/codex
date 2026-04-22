@@ -108,7 +108,7 @@ pub(super) fn build_stage_one_input_message(
     rollout_contents: &str,
 ) -> anyhow::Result<String> {
     let rollout_token_limit = model_info
-        .context_window
+        .resolved_context_window()
         .and_then(|limit| (limit > 0).then_some(limit))
         .map(|limit| limit.saturating_mul(model_info.effective_context_window_percent) / 100)
         .map(|limit| (limit.saturating_mul(phase_one::CONTEXT_WINDOW_PERCENT) / 100).max(1))
@@ -194,6 +194,33 @@ mod tests {
         let expected_truncated = truncate_text(
             &input,
             TruncationPolicy::Tokens(phase_one::DEFAULT_STAGE_ONE_ROLLOUT_TOKEN_LIMIT),
+        );
+        let message = build_stage_one_input_message(
+            &model_info,
+            Path::new("/tmp/rollout.jsonl"),
+            Path::new("/tmp"),
+            &input,
+        )
+        .unwrap();
+
+        assert!(message.contains(&expected_truncated));
+    }
+
+    #[test]
+    fn build_stage_one_input_message_uses_max_context_window_when_context_window_missing() {
+        let input = format!("{}{}{}", "a".repeat(700_000), "middle", "z".repeat(700_000));
+        let mut model_info = model_info_from_slug("gpt-5.2-codex");
+        model_info.context_window = None;
+        model_info.max_context_window = Some(123_000);
+        let expected_rollout_token_limit = usize::try_from(
+            ((123_000_i64 * model_info.effective_context_window_percent) / 100)
+                * phase_one::CONTEXT_WINDOW_PERCENT
+                / 100,
+        )
+        .unwrap();
+        let expected_truncated = truncate_text(
+            &input,
+            TruncationPolicy::Tokens(expected_rollout_token_limit),
         );
         let message = build_stage_one_input_message(
             &model_info,

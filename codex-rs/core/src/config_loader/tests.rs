@@ -940,6 +940,68 @@ async fn project_layer_is_added_when_dot_codex_exists_without_config_toml() -> s
 }
 
 #[tokio::test]
+async fn project_layer_without_config_toml_is_disabled_when_untrusted_or_unknown()
+-> std::io::Result<()> {
+    let tmp = tempdir()?;
+    let project_root = tmp.path().join("project");
+    let nested = project_root.join("child");
+    tokio::fs::create_dir_all(&nested).await?;
+    tokio::fs::create_dir_all(project_root.join(".codex")).await?;
+    tokio::fs::write(project_root.join(".git"), "gitdir: here").await?;
+
+    let cwd = AbsolutePathBuf::from_absolute_path(&nested)?;
+    let cases = [
+        ("untrusted", Some(TrustLevel::Untrusted)),
+        ("unknown", None),
+    ];
+
+    for (name, trust_level) in cases {
+        let codex_home = tmp.path().join(format!("home_{name}"));
+        tokio::fs::create_dir_all(&codex_home).await?;
+
+        if let Some(trust_level) = trust_level {
+            make_config_for_test(&codex_home, &project_root, trust_level, None).await?;
+        } else {
+            tokio::fs::write(codex_home.join(CONFIG_TOML_FILE), "").await?;
+        }
+
+        let layers = load_config_layers_state(
+            &codex_home,
+            Some(cwd.clone()),
+            &[] as &[(String, TomlValue)],
+            LoaderOverrides::default(),
+            CloudRequirementsLoader::default(),
+        )
+        .await?;
+
+        let project_layers: Vec<_> = layers
+            .get_layers(
+                super::ConfigLayerStackOrdering::HighestPrecedenceFirst,
+                true,
+            )
+            .into_iter()
+            .filter(|layer| matches!(layer.name, super::ConfigLayerSource::Project { .. }))
+            .collect();
+
+        assert_eq!(
+            project_layers.len(),
+            1,
+            "expected one project layer for {name}"
+        );
+        assert!(
+            project_layers[0].disabled_reason.is_some(),
+            "expected {name} project layer without config.toml to be disabled"
+        );
+        assert_eq!(
+            project_layers[0].config,
+            TomlValue::Table(toml::map::Map::new())
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn codex_home_is_not_loaded_as_project_layer_from_home_dir() -> std::io::Result<()> {
     let tmp = tempdir()?;
     let home_dir = tmp.path().join("home");

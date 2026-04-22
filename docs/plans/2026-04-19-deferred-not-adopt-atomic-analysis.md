@@ -11,9 +11,15 @@
 ## 2026-04-20 第一层重校准补记
 - 第一层原清单中，`4cd85b28d2`、`8475d51655`、`ab82568536`、`baaf42b2e4`、`fe7c959e90`、`c3ecb557d3` 已确认在当前分支具备等价实现，不再视为待吸纳项。
 - `76ea694db5` 原先按“推进吸纳”登记，但复核后确认当前 fork 不包含上游 `app-server` remote-control transport 栈，因此该项应改按当前分支结构下的 N/A 处理，而不是继续排进第一层实施列表。
-- 第一层真正剩余的代码差距只剩：
-  - `22f7ef1cb7` ChatGPT logout revoke
-  - `64177aaa22` memory phase2 writable-root 收缩
+
+## 2026-04-21 代码事实复核补记
+- 第一层真正剩余的代码差距已清零：
+  - `22f7ef1cb7` 已在当前分支通过 CLI / app-server 两条 logout revoke 链路等价吸纳。
+  - `64177aaa22` 已在当前分支通过 phase2 memory-root writable-root 收紧与对应测试断言等价吸纳。
+- 下列能力也不应继续按“待补缺口”统计：
+  - `e9c70fff3f` 已由 `db31296a4e feat(plugins): add marketplace remove workflow` 选择性吸纳。
+  - `eaf78e43f2` 中的 `thread/turns/list` 已由 `155e4166aa feat(app-server): add thread turns pagination api` 吸纳；仍未对齐的是 `thread/list` 排序和 `backwardsCursor`。
+  - `/plugins` 已具备只读浏览入口 `3f963e7605 feat(tui): add plugins browser command and CI coverage`；仍未对齐的是 v2 tabbed 菜单与 inline toggle 交互。
 
 ## 暂缓项
 
@@ -35,12 +41,12 @@
 | `a803790a10` | 引入 provider runtime abstraction，可按 provider 切换运行时行为。 | 是 provider 抽象层升级，会影响 `codex-api/login/cli/core` 多域。 | 本仓缺少原版 provider runtime 抽象，未来接更多 provider 时扩展成本更高。 |
 | `71e4c6fa17` | 将 `codex` 主模块整体下沉到 `session` 目录体系。 | 改动范围覆盖 `core` 大片深改区，属于高冲突重构。 | 基本无直接用户功能缺失，主要是内部结构未与原版对齐。 |
 | `fad3d0f1d0` | `thread/read` 持久化改走 `thread-store`。 | 涉及 app-server 持久化事实源切换。 | 原版 `thread/read` 与 thread-store 的统一持久化路径本仓未对齐。 |
-| `eaf78e43f2` | app-server 增加 `thread/list` 排序/`backwardsCursor` 与 `thread/turns/list` API。 | 明确触碰共享协议与 schema；不能在当前分支顺手改写。 | 本仓缺少这些新的 app-server API 能力，客户端不能按原版方式分页列线程与 turns。 |
+| `eaf78e43f2` | app-server 增加 `thread/list` 排序/`backwardsCursor` 与 `thread/turns/list` API。 | 明确触碰共享协议与 schema；不能在当前分支顺手改写。 | 当前分支已具备独立 `thread/turns/list` API；仍缺的是 `thread/list` 排序和 `backwardsCursor` 这部分协议能力。 |
 | `92cf90277d` | 抽象 MCP stdio server launcher。 | 属于后续 executor-backed MCP stdio 铺路提交。 | 本仓没有原版那套独立 launcher 抽象，MCP stdio 管理能力较旧。 |
-| `f017a23835` | `/plugins` 改为 v2 tabbed marketplace 菜单。 | 属于显著 UI/UX 重塑，会和本仓现有插件弹窗体验直接冲突。 | 原版插件菜单有 tabbed marketplace 视图，本仓仍是现有单路径 UI。 |
-| `06f8ec54db` | `/plugins` 菜单支持 inline enable/disable toggle。 | 同样属于插件 UI 交互重塑。 | 原版可在 TUI 菜单内直接启停插件，本仓需要走当前已有配置/命令路径。 |
+| `f017a23835` | `/plugins` 改为 v2 tabbed marketplace 菜单。 | 属于显著 UI/UX 重塑，会和本仓现有插件弹窗体验直接冲突。 | 当前分支已有只读 `/plugins` 浏览入口；与原版相比仍缺 tabbed marketplace 视图。 |
+| `06f8ec54db` | `/plugins` 菜单支持 inline enable/disable toggle。 | 同样属于插件 UI 交互重塑。 | 当前分支已有只读 `/plugins` 浏览入口；与原版相比仍需外部配置或命令路径启停插件，不能 inline toggle。 |
 | `6b39d0c657` | app-server 新增 owner nudge API（发送 add credits nudge email）。 | 明显是新业务 API，且会改 schema 与通知面。 | 本仓没有原版 owner nudge 业务接口。 |
-| `e9c70fff3f` | CLI/core 增加 marketplace remove 命令及共享逻辑。 | 命令面与插件治理策略一起变化，需与现有插件命令体系统一设计。 | 原版可直接移除 marketplace，本仓缺少同等 CLI 管理能力。 |
+| `e9c70fff3f` | CLI/core 增加 marketplace remove 命令及共享逻辑。 | 历史上曾判定暂缓，但当前分支已通过 fork 自研命令树选择性吸纳 remove 能力。 | `marketplace remove` 已不是缺口；剩余差异在更高层的 plugin facade 与 UI 统一，而不是 remove 本身。 |
 | `53b1570367` | 图像输出默认 high detail，并更新协议字段处理。 | 属于默认体验/成本策略变更，不宜直接同步。 | 原版图像输出默认更高细节，本仓保持当前 detail 默认值。 |
 | `996aa23e4c` | 把 MCP stdio 真正接到 executor-backed 路径。 | 这是一串连续架构变更的后半段；单独吸纳会造成执行链断裂。 | 本仓缺少原版 executor-backed MCP stdio 能力，MCP stdio 仍走现有实现。 |
 

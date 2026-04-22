@@ -409,6 +409,14 @@ fn realtime_api_key(
     auth: Option<&CodexAuth>,
     provider: &crate::ModelProviderInfo,
 ) -> CodexResult<String> {
+    realtime_api_key_with_env(auth, provider, read_openai_api_key_from_env())
+}
+
+fn realtime_api_key_with_env(
+    auth: Option<&CodexAuth>,
+    provider: &crate::ModelProviderInfo,
+    env_api_key: Option<String>,
+) -> CodexResult<String> {
     if let Some(api_key) = provider.api_key()? {
         return Ok(api_key);
     }
@@ -423,8 +431,10 @@ fn realtime_api_key(
 
     // TODO(aibrahim): Remove this temporary fallback once realtime auth no longer
     // requires API key auth for ChatGPT/SIWC sessions.
-    if provider.is_openai()
-        && let Some(api_key) = read_openai_api_key_from_env()
+    if codex_api::supports_realtime_env_api_key_fallback(
+        &provider.name,
+        provider.base_url.as_deref(),
+    ) && let Some(api_key) = env_api_key
     {
         return Ok(api_key);
     }
@@ -601,11 +611,34 @@ async fn send_conversation_error(
 mod tests {
     use super::HandoffOutput;
     use super::RealtimeHandoffState;
+    use super::realtime_api_key_with_env;
     use super::realtime_text_from_handoff_request;
+    use crate::CodexAuth;
+    use crate::ModelProviderInfo;
+    use crate::WireApi;
     use async_channel::bounded;
     use codex_protocol::protocol::RealtimeHandoffMessage;
     use codex_protocol::protocol::RealtimeHandoffRequested;
     use pretty_assertions::assert_eq;
+
+    fn test_provider(name: &str, base_url: Option<&str>) -> ModelProviderInfo {
+        ModelProviderInfo {
+            name: name.to_string(),
+            base_url: base_url.map(str::to_string),
+            env_key: None,
+            env_key_instructions: None,
+            experimental_bearer_token: None,
+            wire_api: WireApi::Responses,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        }
+    }
 
     #[test]
     fn extracts_text_from_handoff_request_messages() {
@@ -712,5 +745,36 @@ mod tests {
             .await
             .expect("send");
         assert!(rx.is_empty());
+    }
+
+    #[test]
+    fn realtime_api_key_env_fallback_remains_openai_only() {
+        let openai = test_provider("OpenAI", Some("https://api.openai.com/v1"));
+        let custom = test_provider("gpt-oss", Some("https://api.openai.com/v1"));
+
+        assert_eq!(
+            realtime_api_key_with_env(None, &openai, Some("env-key".to_string()))
+                .expect("openai env fallback should succeed"),
+            "env-key".to_string()
+        );
+        assert_eq!(
+            realtime_api_key_with_env(
+                Some(&CodexAuth::from_api_key("auth-key")),
+                &openai,
+                Some("env-key".to_string()),
+            )
+            .expect("auth api key should win"),
+            "auth-key".to_string()
+        );
+        assert_eq!(
+            realtime_api_key_with_env(
+                Some(&CodexAuth::create_dummy_chatgpt_auth_for_testing()),
+                &custom,
+                Some("env-key".to_string()),
+            )
+            .expect_err("custom provider should not use env fallback")
+            .to_string(),
+            "realtime conversation requires API key auth".to_string()
+        );
     }
 }

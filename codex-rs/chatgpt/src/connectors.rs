@@ -230,15 +230,7 @@ async fn list_directory_connectors(config: &Config) -> anyhow::Result<Vec<Direct
     let mut apps = Vec::new();
     let mut next_token: Option<String> = None;
     loop {
-        let path = match next_token.as_deref() {
-            Some(token) => {
-                let encoded_token = urlencoding::encode(token);
-                format!(
-                    "/connectors/directory/list?tier=categorized&token={encoded_token}&external_logos=true"
-                )
-            }
-            None => "/connectors/directory/list?tier=categorized&external_logos=true".to_string(),
-        };
+        let path = directory_list_path(next_token.as_deref());
         let response: DirectoryListResponse =
             chatgpt_get_request_with_timeout(config, path, Some(DIRECTORY_CONNECTORS_TIMEOUT))
                 .await?;
@@ -257,6 +249,16 @@ async fn list_directory_connectors(config: &Config) -> anyhow::Result<Vec<Direct
         }
     }
     Ok(apps)
+}
+
+fn directory_list_path(next_token: Option<&str>) -> String {
+    match next_token {
+        Some(token) => {
+            let encoded_token = urlencoding::encode(token);
+            format!("/connectors/directory/list?token={encoded_token}&external_logos=true")
+        }
+        None => "/connectors/directory/list?external_logos=true".to_string(),
+    }
 }
 
 async fn list_workspace_connectors(config: &Config) -> anyhow::Result<Vec<DirectoryApp>> {
@@ -566,6 +568,18 @@ mod tests {
         assert_eq!(
             merged,
             vec![merged_app("alpha", true), merged_app("beta", true)]
+        );
+    }
+
+    #[test]
+    fn directory_list_path_omits_tier_for_first_and_paginated_requests() {
+        assert_eq!(
+            directory_list_path(None),
+            "/connectors/directory/list?external_logos=true"
+        );
+        assert_eq!(
+            directory_list_path(Some("page 2")),
+            "/connectors/directory/list?token=page%202&external_logos=true"
         );
     }
 }
