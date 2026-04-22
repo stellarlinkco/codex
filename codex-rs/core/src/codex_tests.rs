@@ -607,7 +607,122 @@ fn apps_mentions_add_codex_apps_tools_to_search_selected_set() {
 }
 
 #[test]
-fn extract_mcp_tool_selection_from_rollout_reads_search_tool_output() {
+fn extract_tool_selection_from_rollout_reads_search_tool_output() {
+    let rollout_items = vec![
+        function_call_rollout_item(SEARCH_TOOL_BM25_TOOL_NAME, "search-1"),
+        function_call_output_rollout_item(
+            "search-1",
+            &json!({
+                "active_selected_mcp_tools": [
+                    "mcp__codex_apps__calendar_create_event",
+                    "mcp__codex_apps__calendar_list_events",
+                ],
+                "active_selected_dynamic_tools": [
+                    "deferred_calendar_summary",
+                ],
+            })
+            .to_string(),
+        ),
+    ];
+
+    let selected = Session::extract_tool_selection_from_rollout(&rollout_items);
+    assert_eq!(
+        selected,
+        Some(SearchToolSelectionState {
+            mcp_tools: vec![
+                "mcp__codex_apps__calendar_create_event".to_string(),
+                "mcp__codex_apps__calendar_list_events".to_string(),
+            ],
+            dynamic_tools: vec!["deferred_calendar_summary".to_string()],
+        })
+    );
+}
+
+#[test]
+fn extract_tool_selection_from_rollout_latest_valid_payload_wins() {
+    let rollout_items = vec![
+        function_call_rollout_item(SEARCH_TOOL_BM25_TOOL_NAME, "search-1"),
+        function_call_output_rollout_item(
+            "search-1",
+            &json!({
+                "active_selected_mcp_tools": ["mcp__codex_apps__calendar_create_event"],
+                "active_selected_dynamic_tools": ["deferred_calendar_summary"],
+            })
+            .to_string(),
+        ),
+        function_call_rollout_item(SEARCH_TOOL_BM25_TOOL_NAME, "search-2"),
+        function_call_output_rollout_item(
+            "search-2",
+            &json!({
+                "active_selected_mcp_tools": ["mcp__codex_apps__calendar_delete_event"],
+                "active_selected_dynamic_tools": ["deferred_calendar_delete"],
+            })
+            .to_string(),
+        ),
+    ];
+
+    let selected = Session::extract_tool_selection_from_rollout(&rollout_items);
+    assert_eq!(
+        selected,
+        Some(SearchToolSelectionState {
+            mcp_tools: vec!["mcp__codex_apps__calendar_delete_event".to_string()],
+            dynamic_tools: vec!["deferred_calendar_delete".to_string()],
+        })
+    );
+}
+
+#[test]
+fn extract_tool_selection_from_rollout_ignores_non_search_and_malformed_payloads() {
+    let rollout_items = vec![
+        function_call_rollout_item("shell", "shell-1"),
+        function_call_output_rollout_item(
+            "shell-1",
+            &json!({
+                "active_selected_mcp_tools": ["mcp__codex_apps__should_be_ignored"],
+            })
+            .to_string(),
+        ),
+        function_call_rollout_item(SEARCH_TOOL_BM25_TOOL_NAME, "search-1"),
+        function_call_output_rollout_item("search-1", "{not-json"),
+        function_call_output_rollout_item(
+            "unknown-search-call",
+            &json!({
+                "active_selected_mcp_tools": ["mcp__codex_apps__also_ignored"],
+            })
+            .to_string(),
+        ),
+        function_call_output_rollout_item(
+            "search-1",
+            &json!({
+                "active_selected_mcp_tools": ["mcp__codex_apps__calendar_list_events"],
+                "active_selected_dynamic_tools": ["deferred_calendar_summary"],
+            })
+            .to_string(),
+        ),
+    ];
+
+    let selected = Session::extract_tool_selection_from_rollout(&rollout_items);
+    assert_eq!(
+        selected,
+        Some(SearchToolSelectionState {
+            mcp_tools: vec!["mcp__codex_apps__calendar_list_events".to_string()],
+            dynamic_tools: vec!["deferred_calendar_summary".to_string()],
+        })
+    );
+}
+
+#[test]
+fn extract_tool_selection_from_rollout_returns_none_without_valid_search_output() {
+    let rollout_items = vec![function_call_rollout_item(
+        SEARCH_TOOL_BM25_TOOL_NAME,
+        "search-1",
+    )];
+    let selected = Session::extract_tool_selection_from_rollout(&rollout_items);
+    assert_eq!(selected, None);
+}
+
+#[test]
+fn extract_tool_selection_from_rollout_supports_legacy_search_payloads() {
     let rollout_items = vec![
         function_call_rollout_item(SEARCH_TOOL_BM25_TOOL_NAME, "search-1"),
         function_call_output_rollout_item(
@@ -622,88 +737,17 @@ fn extract_mcp_tool_selection_from_rollout_reads_search_tool_output() {
         ),
     ];
 
-    let selected = Session::extract_mcp_tool_selection_from_rollout(&rollout_items);
+    let selected = Session::extract_tool_selection_from_rollout(&rollout_items);
     assert_eq!(
         selected,
-        Some(vec![
-            "mcp__codex_apps__calendar_create_event".to_string(),
-            "mcp__codex_apps__calendar_list_events".to_string(),
-        ])
+        Some(SearchToolSelectionState {
+            mcp_tools: vec![
+                "mcp__codex_apps__calendar_create_event".to_string(),
+                "mcp__codex_apps__calendar_list_events".to_string(),
+            ],
+            dynamic_tools: Vec::new(),
+        })
     );
-}
-
-#[test]
-fn extract_mcp_tool_selection_from_rollout_latest_valid_payload_wins() {
-    let rollout_items = vec![
-        function_call_rollout_item(SEARCH_TOOL_BM25_TOOL_NAME, "search-1"),
-        function_call_output_rollout_item(
-            "search-1",
-            &json!({
-                "active_selected_tools": ["mcp__codex_apps__calendar_create_event"],
-            })
-            .to_string(),
-        ),
-        function_call_rollout_item(SEARCH_TOOL_BM25_TOOL_NAME, "search-2"),
-        function_call_output_rollout_item(
-            "search-2",
-            &json!({
-                "active_selected_tools": ["mcp__codex_apps__calendar_delete_event"],
-            })
-            .to_string(),
-        ),
-    ];
-
-    let selected = Session::extract_mcp_tool_selection_from_rollout(&rollout_items);
-    assert_eq!(
-        selected,
-        Some(vec!["mcp__codex_apps__calendar_delete_event".to_string(),])
-    );
-}
-
-#[test]
-fn extract_mcp_tool_selection_from_rollout_ignores_non_search_and_malformed_payloads() {
-    let rollout_items = vec![
-        function_call_rollout_item("shell", "shell-1"),
-        function_call_output_rollout_item(
-            "shell-1",
-            &json!({
-                "active_selected_tools": ["mcp__codex_apps__should_be_ignored"],
-            })
-            .to_string(),
-        ),
-        function_call_rollout_item(SEARCH_TOOL_BM25_TOOL_NAME, "search-1"),
-        function_call_output_rollout_item("search-1", "{not-json"),
-        function_call_output_rollout_item(
-            "unknown-search-call",
-            &json!({
-                "active_selected_tools": ["mcp__codex_apps__also_ignored"],
-            })
-            .to_string(),
-        ),
-        function_call_output_rollout_item(
-            "search-1",
-            &json!({
-                "active_selected_tools": ["mcp__codex_apps__calendar_list_events"],
-            })
-            .to_string(),
-        ),
-    ];
-
-    let selected = Session::extract_mcp_tool_selection_from_rollout(&rollout_items);
-    assert_eq!(
-        selected,
-        Some(vec!["mcp__codex_apps__calendar_list_events".to_string(),])
-    );
-}
-
-#[test]
-fn extract_mcp_tool_selection_from_rollout_returns_none_without_valid_search_output() {
-    let rollout_items = vec![function_call_rollout_item(
-        SEARCH_TOOL_BM25_TOOL_NAME,
-        "search-1",
-    )];
-    let selected = Session::extract_mcp_tool_selection_from_rollout(&rollout_items);
-    assert_eq!(selected, None);
 }
 
 #[tokio::test]

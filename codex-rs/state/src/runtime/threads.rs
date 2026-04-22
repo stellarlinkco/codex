@@ -50,7 +50,7 @@ WHERE id = ?
     ) -> anyhow::Result<Option<Vec<DynamicToolSpec>>> {
         let rows = sqlx::query(
             r#"
-SELECT name, description, input_schema
+SELECT name, description, input_schema, defer_loading
 FROM thread_dynamic_tools
 WHERE thread_id = ?
 ORDER BY position ASC
@@ -70,6 +70,7 @@ ORDER BY position ASC
                 name: row.try_get("name")?,
                 description: row.try_get("description")?,
                 input_schema,
+                defer_loading: row.try_get("defer_loading")?,
             });
         }
         Ok(Some(tools))
@@ -412,8 +413,9 @@ INSERT INTO thread_dynamic_tools (
     position,
     name,
     description,
-    input_schema
-) VALUES (?, ?, ?, ?, ?)
+    input_schema,
+    defer_loading
+) VALUES (?, ?, ?, ?, ?, ?)
 ON CONFLICT(thread_id, position) DO NOTHING
                 "#,
             )
@@ -422,6 +424,7 @@ ON CONFLICT(thread_id, position) DO NOTHING
             .bind(tool.name.as_str())
             .bind(tool.description.as_str())
             .bind(input_schema)
+            .bind(tool.defer_loading)
             .execute(&mut *tx)
             .await?;
         }
@@ -648,6 +651,7 @@ mod tests {
     use codex_protocol::protocol::SessionMetaLine;
     use codex_protocol::protocol::SessionSource;
     use pretty_assertions::assert_eq;
+    use serde_json::json;
     use std::path::PathBuf;
 
     #[tokio::test]
@@ -738,6 +742,58 @@ mod tests {
             .await
             .expect("memory mode should load");
         assert_eq!(memory_mode.as_deref(), Some("polluted"));
+    }
+
+    #[tokio::test]
+    async fn persist_dynamic_tools_round_trips_defer_loading() {
+        let codex_home = unique_temp_dir();
+        let runtime = StateRuntime::init(codex_home.clone(), "test-provider".to_string())
+            .await
+            .expect("state db should initialize");
+        let thread_id =
+            ThreadId::from_string("00000000-0000-0000-0000-000000000458").expect("valid thread id");
+        let metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
+        let tools = vec![
+            DynamicToolSpec {
+                name: "deferred-search".to_string(),
+                description: "search after selection".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" }
+                    },
+                    "required": ["query"]
+                }),
+                defer_loading: true,
+            },
+            DynamicToolSpec {
+                name: "eager-tool".to_string(),
+                description: "always visible".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" }
+                    },
+                    "required": ["path"]
+                }),
+                defer_loading: false,
+            },
+        ];
+
+        runtime
+            .upsert_thread(&metadata)
+            .await
+            .expect("thread insert should succeed");
+        runtime
+            .persist_dynamic_tools(thread_id, Some(&tools))
+            .await
+            .expect("dynamic tools should persist");
+
+        let persisted = runtime
+            .get_dynamic_tools(thread_id)
+            .await
+            .expect("dynamic tools should load");
+        assert_eq!(persisted, Some(tools));
     }
 
     #[tokio::test]

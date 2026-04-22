@@ -39,6 +39,7 @@ use serde_json::Value as JsonValue;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 const SEARCH_TOOL_BM25_DESCRIPTION_TEMPLATE: &str =
     include_str!("../../templates/search_tool/tool_description.md");
@@ -1584,12 +1585,15 @@ fn create_cron_delete_tool() -> ToolSpec {
     })
 }
 
-fn create_search_tool_bm25_tool(app_tools: &HashMap<String, ToolInfo>) -> ToolSpec {
+fn create_search_tool_bm25_tool(
+    app_tools: Option<&HashMap<String, ToolInfo>>,
+    has_deferred_dynamic_tools: bool,
+) -> ToolSpec {
     let properties = BTreeMap::from([
         (
             "query".to_string(),
             JsonSchema::String {
-                description: Some("Search query for apps tools.".to_string()),
+                description: Some("Search query for hidden tools.".to_string()),
             },
         ),
         (
@@ -1601,16 +1605,26 @@ fn create_search_tool_bm25_tool(app_tools: &HashMap<String, ToolInfo>) -> ToolSp
             },
         ),
     ]);
-    let mut app_names = app_tools
-        .values()
-        .filter_map(|tool| tool.connector_name.clone())
-        .collect::<Vec<_>>();
+    let mut app_names = app_tools.map_or_else(Vec::new, |tools| {
+        tools
+            .values()
+            .filter_map(|tool| tool.connector_name.clone())
+            .collect::<Vec<_>>()
+    });
     app_names.sort();
     app_names.dedup();
     let app_names = app_names.join(", ");
 
-    let description =
-        SEARCH_TOOL_BM25_DESCRIPTION_TEMPLATE.replace("{{app_names}}", app_names.as_str());
+    let mut description = if app_names.is_empty() {
+        "# Tool discovery\n\nSearches over hidden tool metadata with BM25 and exposes matching tools for the next model call.".to_string()
+    } else {
+        SEARCH_TOOL_BM25_DESCRIPTION_TEMPLATE.replace("{{app_names}}", app_names.as_str())
+    };
+    if has_deferred_dynamic_tools {
+        description.push_str(
+            "\n\nDeferred dynamic tools are hidden until you search for them with this tool.",
+        );
+    }
 
     ToolSpec::Function(ResponsesApiTool {
         name: SEARCH_TOOL_BM25_TOOL_NAME.to_string(),
@@ -1999,6 +2013,24 @@ fn dynamic_tool_to_openai_tool(
     })
 }
 
+pub(crate) fn visible_dynamic_tools(
+    dynamic_tools: &[DynamicToolSpec],
+    selected_dynamic_tool_names: &[String],
+) -> Vec<DynamicToolSpec> {
+    let selected_dynamic_tool_names: HashSet<&str> = selected_dynamic_tool_names
+        .iter()
+        .map(String::as_str)
+        .collect();
+
+    dynamic_tools
+        .iter()
+        .filter(|tool| {
+            !tool.defer_loading || selected_dynamic_tool_names.contains(tool.name.as_str())
+        })
+        .cloned()
+        .collect()
+}
+
 /// Parse the tool input_schema or return an error for invalid schema
 pub fn parse_tool_input_schema(input_schema: &JsonValue) -> Result<JsonSchema, serde_json::Error> {
     let mut input_schema = input_schema.clone();
@@ -2123,6 +2155,16 @@ pub(crate) fn build_specs(
     mcp_tools: Option<HashMap<String, rmcp::model::Tool>>,
     app_tools: Option<HashMap<String, ToolInfo>>,
     dynamic_tools: &[DynamicToolSpec],
+) -> ToolRegistryBuilder {
+    build_specs_with_selection(config, mcp_tools, app_tools, dynamic_tools, &[])
+}
+
+pub(crate) fn build_specs_with_selection(
+    config: &ToolsConfig,
+    mcp_tools: Option<HashMap<String, rmcp::model::Tool>>,
+    app_tools: Option<HashMap<String, ToolInfo>>,
+    dynamic_tools: &[DynamicToolSpec],
+    selected_dynamic_tool_names: &[String],
 ) -> ToolRegistryBuilder {
     use crate::tools::handlers::ApplyPatchHandler;
     use crate::tools::handlers::CronCreateHandler;
@@ -2256,10 +2298,14 @@ pub(crate) fn build_specs(
         builder.register_handler("request_permissions", request_permissions_handler);
     }
 
-    if config.search_tool
-        && let Some(app_tools) = app_tools
-    {
-        builder.push_spec_with_parallel_support(create_search_tool_bm25_tool(&app_tools), true);
+    let has_deferred_dynamic_tools = dynamic_tools.iter().any(|tool| tool.defer_loading);
+    let has_hidden_tools =
+        app_tools.as_ref().is_some_and(|tools| !tools.is_empty()) || has_deferred_dynamic_tools;
+    if (config.search_tool || has_deferred_dynamic_tools) && has_hidden_tools {
+        builder.push_spec_with_parallel_support(
+            create_search_tool_bm25_tool(app_tools.as_ref(), has_deferred_dynamic_tools),
+            true,
+        );
         builder.register_handler(SEARCH_TOOL_BM25_TOOL_NAME, search_tool_handler);
     }
 
@@ -2410,8 +2456,9 @@ pub(crate) fn build_specs(
         }
     }
 
-    if !dynamic_tools.is_empty() {
-        for tool in dynamic_tools {
+    let visible_dynamic_tools = visible_dynamic_tools(dynamic_tools, selected_dynamic_tool_names);
+    if !visible_dynamic_tools.is_empty() {
+        for tool in &visible_dynamic_tools {
             match dynamic_tool_to_openai_tool(tool) {
                 Ok(converted_tool) => {
                     builder.push_spec(ToolSpec::Function(converted_tool));
@@ -2459,6 +2506,21 @@ mod tests {
             execution: None,
             icons: None,
             meta: None,
+        }
+    }
+
+    fn dynamic_tool(name: &str, defer_loading: bool) -> DynamicToolSpec {
+        DynamicToolSpec {
+            name: name.to_string(),
+            description: format!("Dynamic tool {name}"),
+            input_schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" }
+                },
+                "additionalProperties": false
+            }),
+            defer_loading,
         }
     }
 
@@ -3662,6 +3724,57 @@ mod tests {
             "test_server/something".to_string(),
         ];
         assert_eq!(mcp_names, expected);
+    }
+
+    #[test]
+    fn test_build_specs_hides_deferred_dynamic_tools_by_default() {
+        let config = test_config();
+        let model_info =
+            ModelsManager::construct_model_info_offline_for_tests("gpt-5-codex", &config);
+        let mut features = Features::with_defaults();
+        features.enable(Feature::UnifiedExec);
+        let tools_config = ToolsConfig::new(&ToolsConfigParams {
+            model_info: &model_info,
+            features: &features,
+            web_search_mode: Some(WebSearchMode::Cached),
+            session_source: SessionSource::Cli,
+            scheduled_tasks_enabled: true,
+        });
+
+        let (tools, _) = build_specs(
+            &tools_config,
+            None,
+            None,
+            &[
+                dynamic_tool("visible_dynamic_tool", false),
+                dynamic_tool("deferred_dynamic_tool", true),
+            ],
+        )
+        .build();
+        let tool_names: Vec<_> = tools.iter().map(|tool| tool_name(&tool.spec)).collect();
+
+        assert!(tool_names.contains(&"visible_dynamic_tool"));
+        assert!(!tool_names.contains(&"deferred_dynamic_tool"));
+        assert!(tool_names.contains(&SEARCH_TOOL_BM25_TOOL_NAME));
+    }
+
+    #[test]
+    fn test_visible_dynamic_tools_restores_selected_deferred_tools() {
+        let visible_tools = visible_dynamic_tools(
+            &[
+                dynamic_tool("visible_dynamic_tool", false),
+                dynamic_tool("deferred_dynamic_tool", true),
+            ],
+            &["deferred_dynamic_tool".to_string()],
+        );
+
+        assert_eq!(
+            visible_tools,
+            vec![
+                dynamic_tool("visible_dynamic_tool", false),
+                dynamic_tool("deferred_dynamic_tool", true),
+            ]
+        );
     }
 
     #[test]

@@ -402,6 +402,8 @@ pub struct DynamicToolSpec {
     pub name: String,
     pub description: String,
     pub input_schema: JsonValue,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub defer_loading: bool,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -6404,6 +6406,43 @@ mod tests {
                 "success": true,
             })
         );
+    }
+
+    #[test]
+    fn dynamic_tool_spec_round_trips_defer_loading() {
+        let value = json!({
+            "name": "deferred-tool",
+            "description": "only expose after selection",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": { "type": "string" }
+                },
+                "required": ["query"]
+            },
+            "deferLoading": true
+        });
+
+        let spec: DynamicToolSpec =
+            serde_json::from_value(value.clone()).expect("spec should deserialize");
+        assert_eq!(
+            spec,
+            DynamicToolSpec {
+                name: "deferred-tool".to_string(),
+                description: "only expose after selection".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string" }
+                    },
+                    "required": ["query"]
+                }),
+                defer_loading: true,
+            }
+        );
+
+        let serialized = serde_json::to_value(&spec).expect("spec should serialize");
+        assert_eq!(serialized, value);
     }
 
     #[test]

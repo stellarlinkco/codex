@@ -934,6 +934,8 @@ Within the same turn, granted permissions are sticky: later shell-like tool call
 
 `dynamicTools` on `thread/start` and the corresponding `item/tool/call` request/response flow are experimental APIs. To enable them, set `initialize.params.capabilities.experimentalApi = true`.
 
+Each dynamic tool spec accepts an optional `deferLoading` boolean. When omitted or `false`, the tool is injected into the model-visible `tools` list at thread start. When `true`, the tool stays hidden until the model discovers it through `search_tool_bm25`; once selected, it is added back to the session's active tool set for later turns.
+
 When a dynamic tool is invoked during a turn, the server sends an `item/tool/call` JSON-RPC request to the client:
 
 ```json

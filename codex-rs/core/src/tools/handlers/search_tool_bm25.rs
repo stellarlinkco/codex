@@ -3,6 +3,7 @@ use bm25::Document;
 use bm25::Language;
 use bm25::SearchEngineBuilder;
 use codex_app_server_protocol::AppInfo;
+use codex_protocol::dynamic_tools::DynamicToolSpec;
 use codex_protocol::models::FunctionCallOutputBody;
 use serde::Deserialize;
 use serde_json::json;
@@ -70,6 +71,25 @@ impl ToolEntry {
             search_text,
         }
     }
+
+    fn from_dynamic_tool(tool: &DynamicToolSpec) -> Self {
+        let input_keys = tool
+            .input_schema
+            .get("properties")
+            .and_then(serde_json::Value::as_object)
+            .map(|map| map.keys().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        let search_text = build_dynamic_tool_search_text(tool, &input_keys);
+        Self {
+            name: tool.name.clone(),
+            server_name: "dynamic".to_string(),
+            title: None,
+            description: Some(tool.description.clone()),
+            connector_name: None,
+            input_keys,
+            search_text,
+        }
+    }
 }
 
 #[async_trait]
@@ -130,14 +150,31 @@ impl ToolHandler for SearchToolBm25Handler {
             .into_iter()
             .map(|(name, info)| ToolEntry::new(name, info))
             .collect();
+        entries.extend(
+            turn.dynamic_tools
+                .iter()
+                .filter(|tool| tool.defer_loading)
+                .map(ToolEntry::from_dynamic_tool),
+        );
         entries.sort_by(|a, b| a.name.cmp(&b.name));
 
         if entries.is_empty() {
-            let active_selected_tools = session.get_mcp_tool_selection().await.unwrap_or_default();
+            let active_selected_mcp_tools =
+                session.get_mcp_tool_selection().await.unwrap_or_default();
+            let active_selected_dynamic_tools = session
+                .get_dynamic_tool_selection()
+                .await
+                .unwrap_or_default();
             let content = json!({
                 "query": query,
                 "total_tools": 0,
-                "active_selected_tools": active_selected_tools,
+                "active_selected_tools": active_selected_mcp_tools
+                    .iter()
+                    .chain(active_selected_dynamic_tools.iter())
+                    .cloned()
+                    .collect::<Vec<_>>(),
+                "active_selected_mcp_tools": active_selected_mcp_tools,
+                "active_selected_dynamic_tools": active_selected_dynamic_tools,
                 "tools": [],
             })
             .to_string();
@@ -156,13 +193,18 @@ impl ToolHandler for SearchToolBm25Handler {
             SearchEngineBuilder::<usize>::with_documents(Language::English, documents).build();
         let results = search_engine.search(query, limit);
 
-        let mut selected_tools = Vec::new();
+        let mut selected_mcp_tools = Vec::new();
+        let mut selected_dynamic_tools = Vec::new();
         let mut result_payloads = Vec::new();
         for result in results {
             let Some(entry) = entries.get(result.document.id) else {
                 continue;
             };
-            selected_tools.push(entry.name.clone());
+            if entry.server_name == "dynamic" {
+                selected_dynamic_tools.push(entry.name.clone());
+            } else {
+                selected_mcp_tools.push(entry.name.clone());
+            }
             result_payloads.push(json!({
                 "name": entry.name.clone(),
                 "server": entry.server_name.clone(),
@@ -174,12 +216,21 @@ impl ToolHandler for SearchToolBm25Handler {
             }));
         }
 
-        let active_selected_tools = session.merge_mcp_tool_selection(selected_tools).await;
+        let active_selected_mcp_tools = session.merge_mcp_tool_selection(selected_mcp_tools).await;
+        let active_selected_dynamic_tools = session
+            .merge_dynamic_tool_selection(selected_dynamic_tools)
+            .await;
 
         let content = json!({
             "query": query,
             "total_tools": entries.len(),
-            "active_selected_tools": active_selected_tools,
+            "active_selected_tools": active_selected_mcp_tools
+                .iter()
+                .chain(active_selected_dynamic_tools.iter())
+                .cloned()
+                .collect::<Vec<_>>(),
+            "active_selected_mcp_tools": active_selected_mcp_tools,
+            "active_selected_dynamic_tools": active_selected_dynamic_tools,
             "tools": result_payloads,
         })
         .to_string();
@@ -245,14 +296,35 @@ fn build_search_text(name: &str, info: &ToolInfo, input_keys: &[String]) -> Stri
     parts.join(" ")
 }
 
+fn build_dynamic_tool_search_text(tool: &DynamicToolSpec, input_keys: &[String]) -> String {
+    let mut parts = vec![tool.name.clone()];
+
+    if !tool.description.trim().is_empty() {
+        parts.push(tool.description.clone());
+    }
+
+    if !input_keys.is_empty() {
+        parts.extend(input_keys.iter().cloned());
+    }
+
+    parts.join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codex::make_session_and_context_with_dynamic_tools_and_rx;
+    use crate::tools::context::ToolInvocation;
+    use crate::tools::context::ToolPayload;
+    use crate::tools::registry::ToolHandler;
+    use crate::turn_diff_tracker::TurnDiffTracker;
     use codex_app_server_protocol::AppInfo;
+    use codex_protocol::models::FunctionCallOutputBody;
     use pretty_assertions::assert_eq;
     use rmcp::model::JsonObject;
     use rmcp::model::Tool;
     use std::sync::Arc;
+    use tokio::sync::Mutex;
 
     fn make_connector(id: &str, enabled: bool) -> AppInfo {
         AppInfo {
@@ -299,6 +371,21 @@ mod tests {
                 plugin_display_names: Vec::new(),
             },
         )
+    }
+
+    fn make_dynamic_tool(name: &str, defer_loading: bool) -> DynamicToolSpec {
+        DynamicToolSpec {
+            name: name.to_string(),
+            description: format!("Dynamic tool {name}"),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string" }
+                },
+                "additionalProperties": false,
+            }),
+            defer_loading,
+        }
     }
 
     #[test]
@@ -350,5 +437,56 @@ mod tests {
         filtered.sort();
 
         assert_eq!(filtered, Vec::<String>::new());
+    }
+
+    #[tokio::test]
+    async fn search_tool_returns_deferred_dynamic_tools_and_tracks_selection() {
+        let (session, turn, _rx) = make_session_and_context_with_dynamic_tools_and_rx(vec![
+            make_dynamic_tool("visible_dynamic_tool", false),
+            make_dynamic_tool("deferred_weather_tool", true),
+        ])
+        .await;
+        let handler = SearchToolBm25Handler;
+        let tracker = Arc::new(Mutex::new(TurnDiffTracker::new()));
+
+        let output = handler
+            .handle(ToolInvocation {
+                session: Arc::clone(&session),
+                turn,
+                tracker,
+                call_id: "search-1".to_string(),
+                tool_name: SEARCH_TOOL_BM25_TOOL_NAME.to_string(),
+                payload: ToolPayload::Function {
+                    arguments: json!({
+                        "query": "weather city",
+                        "limit": 2,
+                    })
+                    .to_string(),
+                },
+            })
+            .await
+            .expect("search tool should succeed");
+
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(content),
+            ..
+        } = output
+        else {
+            panic!("expected text function output");
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&content).expect("search payload should be json");
+
+        assert_eq!(payload["active_selected_mcp_tools"], json!([]));
+        assert_eq!(
+            payload["active_selected_dynamic_tools"],
+            json!(["deferred_weather_tool"])
+        );
+        assert_eq!(payload["tools"][0]["name"], json!("deferred_weather_tool"));
+        assert_eq!(payload["tools"][0]["server"], json!("dynamic"));
+        assert_eq!(
+            session.get_dynamic_tool_selection().await,
+            Some(vec!["deferred_weather_tool".to_string()])
+        );
     }
 }

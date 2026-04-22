@@ -15,6 +15,7 @@
 - 未吸纳总数：132（历史遗留 2 + v0.121.0 后 130）
 - 决策分布：推进吸纳 12，选择性吸纳 71，暂缓 23，不吸纳 24
 - 主要冲突面：Core / TUI / AppServer / Protocol / Plugin（均为 fork 深改区）。
+- 注：以上数字是 2026-04-19 首轮盘点快照。2026-04-21 复核后，`22f7ef1cb7`、`64177aaa22`、`e9c70fff3f`、`370bed4bf4`、`ecc8599c56`、`f2a4925f63`、`ea84537369`、`120bbf46c1`、`77fe33bf72`、`ab715021e6`、`ba36415a30`、`4cd85b28d2`、`8475d51655`、`ab82568536`、`baaf42b2e4`、`fe7c959e90`、`c3ecb557d3`、`f948690fc8`、`2ca270d08d` 已从当前活跃缺口集合移出，见下方补记。
 
 ## 2026-04-20 第一层重校准
 - 已在当前分支吸纳或具备等价实现：
@@ -26,9 +27,56 @@
   - `c3ecb557d3`
 - 当前 fork 结构下无同层落点，按 N/A 处理：
   - `76ea694db5`
-- 第一层剩余并已进入本轮实现收口：
-  - `22f7ef1cb7`
-  - `64177aaa22`
+
+## 2026-04-21 代码事实复核
+- 第一层剩余项已清零，不再存在需要继续推进的低冲突收口项。
+- `22f7ef1cb7` 已具备等价实现：
+  - CLI 退出登录路径在 `codex-rs/cli/src/login.rs` 使用 `logout_with_revoke(...)`。
+  - app-server 退出登录路径在 `codex-rs/app-server/src/codex_message_processor.rs` 使用 `self.auth_manager.logout_with_revoke().await`。
+  - `codex-rs/app-server/tests/suite/v2/account.rs` 已覆盖 revoke 成功与失败两条链路。
+- `64177aaa22` 已具备等价实现：
+  - `7787923ac0 feat: finish first-layer upstream intake gaps` 已把 phase2 consolidation 子 agent 的 writable root 收紧到 `memory_root`。
+  - `42fbe69c12 codex: fix memory sandbox test assertions` 已在 split sandbox API 演进后把断言更新到当前实现。
+  - 当前 `codex-rs/core/src/memories/phase2.rs` 与 `codex-rs/core/src/memories/tests.rs` 均明确断言“只能写 memory root，不能继承 codex_home 写权限”。
+- `370bed4bf4` 已选择性吸纳：
+  - `codex-rs/core/src/config_loader/mod.rs` 已将 project `.codex` layer 的 trust gate 收敛为统一判断，不再要求 `config.toml` 存在才标记 disabled。
+  - 新增 `config_loader::tests::project_layer_without_config_toml_is_disabled_when_untrusted_or_unknown`，锁定“无 `config.toml` 时未信任/未知 trust project layer 仍必须 disabled”的行为。
+  - 现有 `exec_policy::tests::ignores_rules_from_untrusted_project_layers` 与 trusted 无 `config.toml` 路径回归已通过，说明 hooks / exec policy 的 disabled layer 语义继续成立。
+- `ecc8599c56` 已选择性吸纳：
+  - 本仓无上游 `codex-rs/connectors/` crate，但同层请求构造实际落在 `codex-rs/chatgpt/src/connectors.rs`。
+  - 当前已移除 connectors directory 请求上的 `tier=categorized` 约束，分页和首屏请求都改为仅保留 `token` 与 `external_logos=true`。
+  - `connectors::tests::directory_list_path_omits_tier_for_first_and_paginated_requests` 已锁定该行为。
+- `f2a4925f63` 已选择性吸纳：
+  - 当前 provider/runtime 收敛改动已在 `codex-rs/codex-api/src/provider.rs` 提供 `supports_remote_compaction(...)`，并在 `codex-rs/core/src/provider_runtime.rs` 映射为统一 runtime 能力。
+  - `codex-rs/core/src/compact.rs` 已改为通过 `ProviderRuntime::from_provider(...).supports_remote_compaction()` 判断是否走 remote compaction。
+  - 现有 provider 单测已覆盖 OpenAI / Azure / 非 Azure 三类 provider 的 remote compaction 能力判断。
+- `ea84537369` 已选择性吸纳：
+  - `codex-rs/core/src/connectors.rs` 已把 app tool policy 中缺失的 `destructive_hint` 与 `open_world_hint` 默认值统一收敛为 `true`。
+  - `app_tool_policy_defaults_missing_destructive_hint_to_true` 与 `app_tool_policy_defaults_missing_open_world_hint_to_true` 已锁定该默认语义。
+- `120bbf46c1` 已选择性吸纳：
+  - `codex-rs/utils/image/src/lib.rs` 已将本地图像缩放上限改为统一的 `MAX_DIMENSION = 2048`，并按 `2048 x 2048` square bounds 缩放。
+  - `downscales_tall_image_to_fit_square_bounds` 与 `user_turn_with_vertical_local_image_resizes_to_square_bounds` 已锁定高图像按 square bounds 缩放的行为。
+- `d0eff70383` 在当前分支按 N/A 处理：
+  - 上游提交的本质是为 `load_requirements_toml(fs, ..., AbsolutePathBuf)` 新签名补测试。
+  - 当前 fork 中 `codex-rs/core/src/config_loader/mod.rs` 仍保留两参 `load_requirements_toml(&mut ..., impl AsRef<Path>)`，不存在同一接口漂移，也就没有同层测试修补缺口。
+- `77fe33bf72` 已具备等价实现：
+  - 当前 `codex-rs/core/src/tools/spec.rs` 中 `include_search_tool = features.enabled(Feature::Apps)`，`search_tool_bm25` 的运行时暴露已经跟随 Apps 默认逻辑，而不是依赖旧的 `Feature::SearchTool` 开关。
+  - `codex-rs/core/tests/suite/search_tool.rs` 现有集成测试已在未显式开启 `Feature::SearchTool` 的情况下断言默认存在 `search_tool_bm25`，说明“默认开启”语义已经在运行时闭环。
+- `ab715021e6` 在当前分支按 N/A 处理：
+  - 上游落点 `scripts/start-codex-exec.sh` 在本仓不存在，没有同层脚本补丁可吸纳。
+- `ba36415a30` 在当前分支按 N/A 处理：
+  - 上游落点 `codex-rs/exec-server/tests/file_system.rs` 在本仓不存在，当前分支没有同层 remote filesystem 测试文件可恢复。
+- `f948690fc8` 已选择性吸纳：
+  - `codex-rs/app-server/tests/suite/v2/command_exec.rs` 已将 command/exec delta 断言改为按 stdout/stderr 累积直到满足条件，不再假设逻辑输出一定落在单个 notification chunk 中。
+  - 同时覆盖了 stdout/stderr 交错场景与 websocket 路径，避免因为 chunk 边界或流交错导致测试脆弱。
+- `9c56e89e4f` 已选择性吸纳：
+  - `codex-rs/tui/src/bottom_pane/custom_prompt_view.rs` 已支持向自定义输入弹层注入 `initial_text`，并在非空时把光标放到文本末尾。
+  - `codex-rs/tui/src/chatwidget.rs` 的 `/rename` 现会在已有线程名时预填当前名称；未命名线程仍保持空输入。
+  - `chatwidget::tests::slash_rename_prefills_existing_thread_name` 与 `chatwidget::tests::slash_rename_without_existing_thread_name_starts_empty` 已锁定两条语义。
+- `2ca270d08d` 在当前分支按“部分已吸纳 + 其余 N/A”处理：
+  - `codex-rs/core/src/unified_exec/process_manager.rs` 已显式传递 `pipe_stdin: false`，调用侧语义与上游该提交保持一致。
+  - 上游其余主要落点 `codex-rs/exec-server/src/*` 与 `codex-rs/exec-server/README.md` 在本仓不存在，没有同层 API/README/测试补丁可继续吸纳。
+- 若按当前分支真相看，原始目标“高/中冲突前的低冲突选择性吸纳收口”已经完成。
 
 ## 历史遗留未吸纳（117~121）
 | Commit | 事项 | 决策 | 冲突 | 判定依据 |
@@ -39,11 +87,11 @@
 ## v0.121.0 之后未吸纳逐项判定
 | Commit | Area | 决策 | 冲突 | 判定依据 |
 | --- | --- | --- | --- | --- |
-| `f2a4925f63` | Auth/Provider | **暂缓** | 低 | 云厂商/合规路由特化能力，需确认本仓部署场景。 重叠 0/4；关键文件 codex-rs/core/src/compact.rs, codex-rs/core/src/compact_tests.rs |
+| `f2a4925f63` | Auth/Provider | **已选择性吸纳（fork 实现）** | 低 | 当前分支已通过 provider/runtime 能力收敛补齐 Azure Responses provider 的 remote compaction 判定，不再局限于 OpenAI-only 分支。 |
 | `0bb438bca6` | TUI | **不吸纳** | 中 | 文档变更，不形成运行时能力增益。 重叠 3/6；关键文件 .github/workflows/bazel.yml, SECURITY.md |
-| `ab715021e6` | Misc | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 0/1；关键文件 scripts/start-codex-exec.sh |
+| `ab715021e6` | Misc | **不吸纳（当前分支 N/A）** | 低 | 上游脚本 `scripts/start-codex-exec.sh` 在本仓不存在，没有同层自动安装依赖补丁落点。 |
 | `50d3128269` | AppServer | **暂缓** | 低 | 涉及核心架构或协议面重排，需单独迁移窗口和兼容设计。 重叠 1/11；关键文件 codex-rs/app-server/src/codex_message_processor.rs, codex-rs/core/src/agent/control_tests.rs |
-| `ba36415a30` | Misc | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 0/1；关键文件 codex-rs/exec-server/tests/file_system.rs |
+| `ba36415a30` | Misc | **不吸纳（当前分支 N/A）** | 低 | 上游 `codex-rs/exec-server/tests/file_system.rs` 在本仓不存在，remote filesystem 测试恢复没有同层文件可落。 |
 | `bc969b6516` | MCP/Tooling | **选择性吸纳** | 中 | 行为修复价值高，但触达 app-server/protocol 深改区，需语义移植。 重叠 6/12；关键文件 codex-rs/app-server/tests/suite/v2/turn_interrupt.rs, codex-rs/tui/src/app.rs |
 | `83dc8da9cc` | TUI | **选择性吸纳** | 高 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 2/3；关键文件 codex-rs/features/src/lib.rs, codex-rs/tui/src/bottom_pane/command_popup.rs |
 | `e70ccdeaf7` | Plugin | **选择性吸纳** | 低 | 能力有价值，但与 fork 自研插件/MCP 路径耦合，需要兼容层。 重叠 0/3；关键文件 codex-rs/core/src/plugins/installed_marketplaces.rs, codex-rs/core/src/plugins/marketplace.rs |
@@ -54,14 +102,14 @@
 | `18d61f6923` | Misc | **不吸纳** | 低 | 文档变更，不形成运行时能力增益。 重叠 0/1；关键文件 SECURITY.md |
 | `c2bdb7812c` | AppServer | **选择性吸纳** | 中 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 5/10；关键文件 codex-rs/app-server/tests/suite/v2/realtime_conversation.rs, codex-rs/codex-api/src/endpoint/realtime_websocket/methods.rs |
 | `e2dbe7dfc3` | Core | **选择性吸纳** | 高 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 5/5；关键文件 codex-rs/core/src/codex.rs, codex-rs/core/src/codex_tests.rs |
-| `f948690fc8` | AppServer | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 0/1；关键文件 codex-rs/app-server/tests/suite/v2/command_exec.rs |
+| `f948690fc8` | AppServer | **已选择性吸纳（fork 实现）** | 低 | 当前分支已把 command/exec delta 测试改为 chunk-tolerant，避免将单次 notification 边界误当成协议保证。 |
 | `d63ba2d5ec` | Misc | **不吸纳** | 低 | 上游内部技能工作流，不是本仓能力缺口。 重叠 0/1；关键文件 .codex/skills/codex-pr-body/SKILL.md |
 | `d97bad1272` | TUI | **选择性吸纳** | 高 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 3/4；关键文件 codex-rs/tui/src/app.rs, codex-rs/tui/src/chatwidget.rs |
 | `bd61737e8a` | TUI | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 6/25；关键文件 codex-rs/app-server-client/src/lib.rs, codex-rs/app-server/src/codex_message_processor.rs |
-| `77fe33bf72` | MCP/Tooling | **选择性吸纳** | 低 | 能力有价值，但与 fork 自研插件/MCP 路径耦合，需要兼容层。 重叠 0/4；关键文件 codex-rs/core/tests/suite/search_tool.rs, codex-rs/features/src/lib.rs |
+| `77fe33bf72` | MCP/Tooling | **已选择性吸纳（fork 实现）** | 低 | 当前分支的运行时工具暴露已通过 `Feature::Apps` 默认注入 `search_tool_bm25`，现有集成测试也已按默认开启路径断言；未看到实际能力缺口。 |
 | `224dad41ac` | MCP/Tooling | **选择性吸纳** | 低 | 能力有价值，但与 fork 自研插件/MCP 路径耦合，需要兼容层。 重叠 8/32；关键文件 codex-rs/app-server-protocol/schema/json/ServerNotification.json, codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json |
 | `48cf3ed7b0` | Plugin | **暂缓** | 中 | 涉及核心架构或协议面重排，需单独迁移窗口和兼容设计。 重叠 9/24；关键文件 codex-rs/Cargo.lock, codex-rs/Cargo.toml |
-| `4cd85b28d2` | MCP/Tooling | **推进吸纳** | 中 | 修复 MCP 启动取消链路，减少启动悬挂。 重叠 2/4；关键文件 codex-rs/app-server/src/codex_message_processor.rs, codex-rs/codex-mcp/src/mcp_connection_manager.rs |
+| `4cd85b28d2` | MCP/Tooling | **已吸纳（2026-04-20 第一层重校准）** | 中 | MCP 启动取消链路修复已在当前分支完成，不再属于活跃缺口。 |
 | `f97be7dfff` | MCP/Tooling | **暂缓** | 低 | 云厂商/合规路由特化能力，需确认本仓部署场景。 重叠 1/11；关键文件 codex-rs/backend-client/src/client.rs, codex-rs/codex-api/src/api_bridge.rs |
 | `b0324f9f05` | Core | **不吸纳** | 低 | CI/抖动治理类提交，当前分支门禁已覆盖。 重叠 0/2；关键文件 codex-rs/core/tests/suite/responses_api_proxy_headers.rs, codex-rs/responses-api-proxy/src/dump.rs |
 | `d4223091d0` | Misc | **不吸纳** | 高 | CI/抖动治理类提交，当前分支门禁已覆盖。 重叠 1/1；关键文件 codex-rs/state/src/log_db.rs |
@@ -74,15 +122,15 @@
 | `76ea694db5` | AppServer | **不吸纳（当前分支 N/A）** | 低 | 当前 fork 不包含上游 `app-server/src/transport/remote_control/*` 远控传输栈，没有同层补丁落点。该项不是“遗漏未修”，而是分支结构差异导致的功能域 N/A。 |
 | `b178d1cf17` | Misc | **不吸纳** | 高 | CI/抖动治理类提交，当前分支门禁已覆盖。 重叠 1/1；关键文件 justfile |
 | `b4be3617f9` | Plugin | **选择性吸纳** | 低 | 能力有价值，但与 fork 自研插件/MCP 路径耦合，需要兼容层。 重叠 3/23；关键文件 codex-rs/cli/src/mcp_cmd.rs, codex-rs/codex-mcp/src/mcp/mod.rs |
-| `8475d51655` | TUI | **推进吸纳** | 低 | 去除重复 context 状态项，TUI 展示修复。 重叠 1/5；关键文件 codex-rs/tui/src/bottom_pane/snapshots/codex_tui__bottom_pane__status_line_setup__tests__setup_view_snapshot_uses_runtime_preview_values.snap, codex-rs/tui/src/bottom_pane/status_line_setup.rs |
+| `8475d51655` | TUI | **已吸纳（2026-04-20 第一层重校准）** | 低 | 去除重复 context 状态项的 TUI 修复已在当前分支完成。 |
 | `9c6d038622` | MCP/Tooling | **选择性吸纳** | 低 | 能力有价值，但与 fork 自研插件/MCP 路径耦合，需要兼容层。 重叠 0/5；关键文件 codex-rs/code-mode/src/description.rs, codex-rs/core/tests/suite/code_mode.rs |
-| `9c56e89e4f` | TUI | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 1/4；关键文件 codex-rs/tui/src/bottom_pane/custom_prompt_view.rs, codex-rs/tui/src/chatwidget.rs |
-| `ab82568536` | TUI | **推进吸纳** | 高 | 修复 TUI resume hint 异常，用户可见稳定性收益直接。 重叠 1/1；关键文件 codex-rs/tui/src/app.rs |
+| `9c56e89e4f` | TUI | **已选择性吸纳（fork 实现）** | 低 | 当前分支已让 `CustomPromptView` 支持初始文本，并让 `/rename` 在已有线程名时预填当前名称；同时补齐“已有名称预填”和“无名称保持空输入”两条 TUI 回归测试。 |
+| `ab82568536` | TUI | **已吸纳（2026-04-20 第一层重校准）** | 高 | TUI resume hint 修复已在当前分支完成。 |
 | `85203d8872` | Core | **暂缓** | 低 | 默认成本/体验策略变更，需产品与成本口径先确认。 重叠 0/4；关键文件 codex-rs/core/src/tools/spec_tests.rs, codex-rs/features/src/lib.rs |
 | `3a4fa77ad7` | Core | **不吸纳** | 高 | 放宽 managed-network 限制与本仓安全收敛方向相反。 重叠 4/4；关键文件 codex-rs/core/src/codex_tests.rs, codex-rs/core/src/tools/js_repl/mod.rs |
-| `baaf42b2e4` | TUI | **推进吸纳** | 中 | model menu 弹出问题修复，交互回归收益明确。 重叠 2/5；关键文件 codex-rs/tui/src/bottom_pane/bottom_pane_view.rs, codex-rs/tui/src/bottom_pane/custom_prompt_view.rs |
+| `baaf42b2e4` | TUI | **已吸纳（2026-04-20 第一层重校准）** | 中 | model menu 弹出问题修复已在当前分支完成。 |
 | `6e72f0dbfd` | CI/Docs | **暂缓** | 低 | 涉及核心架构或协议面重排，需单独迁移窗口和兼容设计。 重叠 3/13；关键文件 MODULE.bazel.lock, codex-rs/Cargo.lock |
-| `2ca270d08d` | Core | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 1/9；关键文件 codex-rs/core/src/unified_exec/process_manager.rs, codex-rs/exec-server/README.md |
+| `2ca270d08d` | Core | **已部分吸纳 / 其余 N/A** | 低 | 当前分支调用侧已传递 `pipe_stdin: false`；上游 exec-server 侧源码与 README 在本仓缺失，剩余部分没有同层落点。 |
 | `ff9744fd66` | TUI | **不吸纳** | 低 | 当前 fork 通过 `ListSkillsResponse.errors` 非致命回传 skills 加载错误，根因已被现有事件模型覆盖。 当前结构不存在上游那条直接 `await skills_list()` 的致命失败链。 |
 | `6862b9c745` | TUI | **选择性吸纳** | 中 | 安全策略增强建议推进，但必须映射到现有策略模型。 重叠 10/23；关键文件 codex-rs/Cargo.lock, codex-rs/core/src/codex.rs |
 | `109b22a8d0` | Plugin | **选择性吸纳** | 中 | 能力有价值，但与 fork 自研插件/MCP 路径耦合，需要兼容层。 重叠 3/7；关键文件 codex-rs/app-server/src/external_agent_config_api.rs, codex-rs/core/src/external_agent_config.rs |
@@ -104,10 +152,10 @@
 | `fa5d14e276` | Plugin | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 1/8；关键文件 codex-rs/tui/src/bottom_pane/bottom_pane_view.rs, codex-rs/tui/src/bottom_pane/list_selection_view.rs |
 | `a1736fcd20` | Core | **暂缓** | 中 | 涉及核心架构或协议面重排，需单独迁移窗口和兼容设计。 重叠 1/2；关键文件 codex-rs/core/src/codex.rs, codex-rs/core/src/codex/turn.rs |
 | `65cc12d72e` | Core | **不吸纳** | 低 | guardian 自动化策略调整，和本仓流程不对齐。 重叠 0/1；关键文件 codex-rs/core/src/guardian/mod.rs |
-| `bf6e7e12aa` | MCP/Tooling | **选择性吸纳** | 低 | 能力有价值，但与 fork 自研插件/MCP 路径耦合，需要兼容层。 重叠 0/1；关键文件 codex-rs/app-server/tests/suite/v2/mcp_resource.rs |
+| `bf6e7e12aa` | MCP/Tooling | **不吸纳（当前分支 N/A）** | 低 | 上游仅将 unknown-thread MCP read 负路径测试从 stdio 子进程切到 in-process app-server，以规避 nextest 子进程回收噪音。当前 fork 不存在同名 `codex-rs/app-server/tests/suite/v2/mcp_resource.rs` 测试文件，也未复现该测试抖动链，因此没有同层补丁落点。 |
 | `5818ed6660` | Plugin | **暂缓** | 低 | 插件交互流程重塑，和现有 fork 插件体验存在冲突风险。 重叠 1/4；关键文件 codex-rs/cli/src/main.rs, codex-rs/cli/tests/marketplace_add.rs |
 | `0d0abe839a` | Sandbox/Policy | **选择性吸纳** | 中 | 安全策略增强建议推进，但必须映射到现有策略模型。 重叠 8/21；关键文件 codex-rs/Cargo.lock, codex-rs/config/src/permissions_toml.rs |
-| `2967900d81` | Sandbox/Policy | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 0/3；关键文件 codex-rs/core/tests/suite/deprecation_notice.rs, codex-rs/features/src/lib.rs |
+| `2967900d81` | Sandbox/Policy | **不吸纳（当前分支 N/A）** | 低 | 上游是把仍然存在的 `features.use_legacy_landlock` 兼容开关改成 deprecated 并发启动告警。当前 fork 中既没有 `Feature::UseLegacyLandlock`，也没有 `use_legacy_landlock` 配置键，说明该兼容入口已不在本仓能力面内；这不是遗漏，而是结构差异导致的 N/A。 |
 | `9effa0509f` | TUI | **暂缓** | 中 | 涉及核心架构或协议面重排，需单独迁移窗口和兼容设计。 重叠 9/30；关键文件 codex-rs/Cargo.lock, codex-rs/app-server-protocol/Cargo.toml |
 | `7995c66032` | MCP/Tooling | **选择性吸纳** | 中 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 8/20；关键文件 codex-rs/apply-patch/src/lib.rs, codex-rs/apply-patch/src/parser.rs |
 | `91e8eebd03` | MCP/Tooling | **暂缓** | 低 | 涉及核心架构或协议面重排，需单独迁移窗口和兼容设计。 重叠 1/5；关键文件 codex-rs/core/src/codex.rs, codex-rs/core/src/codex/mcp.rs |
@@ -115,25 +163,25 @@
 | `37161bc76e` | Plugin | **选择性吸纳** | 低 | 能力有价值，但与 fork 自研插件/MCP 路径耦合，需要兼容层。 重叠 1/13；关键文件 codex-rs/app-server/tests/suite/v2/plugin_list.rs, codex-rs/app-server/tests/suite/v2/plugin_read.rs |
 | `dd00efe781` | Plugin | **选择性吸纳** | 中 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 2/4；关键文件 codex-rs/core/src/plugins/discoverable.rs, codex-rs/core/src/plugins/discoverable_tests.rs |
 | `9d6f4f2e2e` | AppServer | **选择性吸纳** | 高 | 行为修复价值高，但触达 app-server/protocol 深改区，需语义移植。 重叠 1/1；关键文件 codex-rs/app-server/src/codex_message_processor.rs |
-| `fe7c959e90` | Sandbox/Policy | **推进吸纳** | 中 | exec-policy 解析修复，直接影响权限策略正确性。 重叠 1/2；关键文件 codex-rs/core/src/exec_policy.rs, codex-rs/core/src/exec_policy_tests.rs |
-| `22f7ef1cb7` | TUI | **推进吸纳** | 低 | logout 撤销 ChatGPT token，安全收益明确。 重叠 3/13；关键文件 codex-rs/app-server/src/codex_message_processor.rs, codex-rs/cli/src/login.rs |
+| `fe7c959e90` | Sandbox/Policy | **已吸纳（2026-04-20 第一层重校准）** | 中 | exec-policy 解析修复已在当前分支完成。 |
+| `22f7ef1cb7` | TUI | **已吸纳（2026-04-21 复核）** | 低 | 当前分支已在 CLI 与 app-server 两条 logout 链路调用 `logout_with_revoke(...)`，且测试覆盖 revoke 成功/失败场景。 |
 | `2e038e6d38` | Sandbox/Policy | **不吸纳** | 低 | CI/抖动治理类提交，当前分支门禁已覆盖。 重叠 0/1；关键文件 codex-rs/core/src/exec_policy_tests.rs |
-| `64177aaa22` | Core | **推进吸纳** | 中 | 收紧 writable root，安全护栏增强。 重叠 1/2；关键文件 codex-rs/core/src/memories/phase2.rs, codex-rs/core/src/memories/tests.rs |
+| `64177aaa22` | Core | **已吸纳（2026-04-21 复核）** | 中 | 当前分支已把 phase2 consolidation 子 agent 的 writable root 收紧到 `memory_root`，并同步 split sandbox 断言。 |
 | `20b4b80426` | Plugin | **选择性吸纳** | 中 | 能力有价值，但与 fork 自研插件/MCP 路径耦合，需要兼容层。 重叠 11/21；关键文件 codex-rs/app-server-protocol/schema/json/ServerNotification.json, codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json |
 | `d0047de7cb` | MCP/Tooling | **选择性吸纳** | 中 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 2/6；关键文件 codex-rs/core/config.schema.json, codex-rs/core/src/codex_tests.rs |
 | `8494e5bd7b` | TUI | **选择性吸纳** | 中 | 安全策略增强建议推进，但必须映射到现有策略模型。 重叠 18/43；关键文件 codex-rs/analytics/src/events.rs, codex-rs/app-server-protocol/schema/json/ServerNotification.json |
 | `3421a107e0` | Core | **不吸纳** | 中 | CI/抖动治理类提交，当前分支门禁已覆盖。 重叠 1/2；关键文件 codex-rs/core/src/memories/phase2.rs, codex-rs/core/src/memories/tests.rs |
-| `c3ecb557d3` | TUI | **推进吸纳** | 高 | resume picker 快捷键能力补齐，低风险高可用。 重叠 1/1；关键文件 codex-rs/tui/src/resume_picker.rs |
+| `c3ecb557d3` | TUI | **已吸纳（2026-04-20 第一层重校准）** | 高 | resume picker 快捷键补齐已在当前分支完成。 |
 | `2dd6734dd3` | TUI | **不吸纳** | 低 | 当前 fork 缺少 `codex-rs/tui/src/terminal_title.rs` 这一实现落点，不能机械移植。 若未来恢复独立终端标题模块，可再按 BEL 终止思路语义吸纳。 |
 | `dae0608c06` | TUI | **选择性吸纳** | 中 | 安全策略增强建议推进，但必须映射到现有策略模型。 重叠 3/10；关键文件 codex-rs/app-server/src/config_api.rs, codex-rs/cloud-requirements/src/lib.rs |
 | `71e4c6fa17` | MCP/Tooling | **暂缓** | 低 | 涉及核心架构或协议面重排，需单独迁移窗口和兼容设计。 重叠 29/98；关键文件 codex-rs/core/src/agent/agent_resolver.rs, codex-rs/core/src/agent/control.rs |
-| `d0eff70383` | Core | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 0/1；关键文件 codex-rs/core/src/config_loader/tests.rs |
+| `d0eff70383` | Core | **不吸纳（当前分支 N/A）** | 低 | 上游是为 `load_requirements_toml` 新签名补测试；本仓尚未引入该接口演进，当前测试调用与本地实现一致，不存在待修缺口。 |
 | `af7b8d551c` | TUI | **不吸纳** | 低 | 上游自动审查流转策略，不属于本仓目标域。 重叠 6/21；关键文件 codex-rs/app-server-protocol/schema/json/ServerNotification.json, codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json |
 | `cfc23eee3d` | MCP/Tooling | **选择性吸纳** | 中 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 5/14；关键文件 codex-rs/config/src/key_aliases.rs, codex-rs/config/src/lib.rs |
-| `ea84537369` | Core | **选择性吸纳** | 中 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 1/2；关键文件 codex-rs/core/src/connectors.rs, codex-rs/core/src/connectors_tests.rs |
+| `ea84537369` | Core | **已选择性吸纳（fork 实现）** | 中 | 当前分支已在 `codex-rs/core/src/connectors.rs` 对齐原版 app tool policy 默认 hint 语义，并补齐回归测试。 |
 | `d3692b14c9` | TUI | **选择性吸纳** | 中 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 4/9；关键文件 AGENTS.md, codex-rs/tui/src/app.rs |
 | `fad3d0f1d0` | AppServer | **暂缓** | 低 | 涉及核心架构或协议面重排，需单独迁移窗口和兼容设计。 重叠 1/6；关键文件 codex-rs/app-server/src/codex_message_processor.rs, codex-rs/app-server/tests/suite/v2/thread_read.rs |
-| `6991be7ead` | MCP/Tooling | **选择性吸纳** | 低 | 能力有价值，但与 fork 自研插件/MCP 路径耦合，需要兼容层。 重叠 2/11；关键文件 codex-rs/app-server/README.md, codex-rs/core/src/tools/handlers/tool_search.rs |
+| `6991be7ead` | MCP/Tooling | **已选择性吸纳（fork 实现）** | 低 | 当前分支已为 `DynamicToolSpec` 增加 `defer_loading`/`deferLoading`，并把该语义贯通到 state DB 持久化、app-server 线程启动映射、core tool spec 构建与 `search_tool_bm25` 检索路径。deferred dynamic tools 默认不暴露给模型，但可被 `search_tool_bm25` 搜索命中并加入 session 级 active selection，后续 turn 会按 selection 重新暴露；同时补了 core/app-server 两侧回归测试覆盖“默认隐藏”“search 命中后可见”“thread start 不直接注入 deferred tool”。 |
 | `2c2ed51876` | CI/Docs | **不吸纳** | 中 | CI/抖动治理类提交，当前分支门禁已覆盖。 重叠 1/3；关键文件 .github/scripts/run-bazel-ci.sh, .github/workflows/bazel.yml |
 | `481ba014a7` | CI/Docs | **不吸纳** | 低 | CI/抖动治理类提交，当前分支门禁已覆盖。 重叠 0/1；关键文件 .github/CODEOWNERS |
 | `29bc2ad2f4` | CI/Docs | **不吸纳** | 中 | CI/抖动治理类提交，当前分支门禁已覆盖。 重叠 1/2；关键文件 .github/actions/prepare-bazel-ci/action.yml, .github/workflows/bazel.yml |
@@ -147,25 +195,25 @@
 | `f017a23835` | Plugin | **暂缓** | 低 | 插件交互流程重塑，和现有 fork 插件体验存在冲突风险。 重叠 2/8；关键文件 codex-rs/tui/src/bottom_pane/mod.rs, codex-rs/tui/src/chatwidget.rs |
 | `139fa8b8f2` | TUI | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 8/27；关键文件 codex-rs/app-server-protocol/schema/json/ServerNotification.json, codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json |
 | `63e4a900c9` | Sandbox/Policy | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 0/3；关键文件 codex-rs/exec-server/src/fs_sandbox.rs, codex-rs/exec-server/tests/common/exec_server.rs |
-| `ecc8599c56` | Misc | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 0/1；关键文件 codex-rs/connectors/src/lib.rs |
+| `ecc8599c56` | Misc | **已选择性吸纳（fork 实现）** | 低 | 上游落点 `codex-rs/connectors/src/lib.rs` 在本仓不存在，但等价请求路径位于 `codex-rs/chatgpt/src/connectors.rs`，现已移除 directory 请求上的 tier 约束；未发现额外耦合扩散。 |
 | `1265df0ec2` | MCP/Tooling | **选择性吸纳** | 中 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 6/11；关键文件 codex-rs/app-server/src/bespoke_event_handling.rs, codex-rs/app-server/src/codex_message_processor.rs |
 | `0e111e08d0` | Plugin | **选择性吸纳** | 中 | 能力有价值，但与 fork 自研插件/MCP 路径耦合，需要兼容层。 重叠 6/13；关键文件 codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json, codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.v2.schemas.json |
 | `c9c4caafd8` | Misc | **选择性吸纳** | 中 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 2/5；关键文件 codex-rs/Cargo.lock, codex-rs/code-mode/Cargo.toml |
 | `f705f42ba8` | Sandbox/Policy | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 1/5；关键文件 codex-rs/core/src/session/turn_context.rs, codex-rs/core/src/tools/runtimes/apply_patch.rs |
 | `680c4102ae` | CI/Docs | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 1/9；关键文件 MODULE.bazel, MODULE.bazel.lock |
 | `96d35dd640` | TUI | **不吸纳** | 中 | CI/抖动治理类提交，当前分支门禁已覆盖。 重叠 2/4；关键文件 codex-rs/app-server/BUILD.bazel, codex-rs/core/BUILD.bazel |
-| `120bbf46c1` | Core | **选择性吸纳** | 中 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 1/2；关键文件 codex-rs/core/tests/suite/view_image.rs, codex-rs/utils/image/src/lib.rs |
+| `120bbf46c1` | Core | **已选择性吸纳（fork 实现）** | 中 | 当前分支已将本地图像 resize 逻辑对齐为 `2048 x 2048` square bounds，并补齐高图像缩放回归测试。 |
 | `26d9894a27` | Plugin | **选择性吸纳** | 中 | 能力有价值，但与 fork 自研插件/MCP 路径耦合，需要兼容层。 重叠 11/31；关键文件 codex-rs/app-server-protocol/schema/json/ClientRequest.json, codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json |
 | `06f8ec54db` | Plugin | **暂缓** | 中 | 插件交互流程重塑，和现有 fork 插件体验存在冲突风险。 重叠 3/8；关键文件 codex-rs/tui/src/app.rs, codex-rs/tui/src/app_event.rs |
-| `370bed4bf4` | TUI | **选择性吸纳** | 低 | 安全策略增强建议推进，但必须映射到现有策略模型。 重叠 3/12；关键文件 codex-rs/app-server/src/lib.rs, codex-rs/app-server/tests/suite/v2/thread_start.rs |
+| `370bed4bf4` | TUI | **已选择性吸纳（fork 实现）** | 低 | 当前分支已补齐 trust-gate 关键缺口：即使 project `.codex/` 下没有 `config.toml`，未信任/未知 trust layer 也会被标记 disabled，因而不会继续向 hooks / exec policy 暴露本地策略。未对齐部分仍限于 app-server/TUI onboarding 文案，不构成当前能力缺口。 |
 | `93ff798e5b` | TUI | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 4/14；关键文件 codex-rs/config/src/types.rs, codex-rs/core/config.schema.json |
 | `a58a0f083d` | Misc | **选择性吸纳** | 高 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 1/1；关键文件 codex-rs/protocol/src/models.rs |
 | `3f7222ec76` | TUI | **选择性吸纳** | 中 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 13/26；关键文件 codex-rs/Cargo.lock, codex-rs/app-server-protocol/schema/json/ServerNotification.json |
 | `def6467d2b` | Plugin | **选择性吸纳** | 中 | 能力有价值，但与 fork 自研插件/MCP 路径耦合，需要兼容层。 重叠 1/3；关键文件 codex-rs/app-server/tests/suite/v2/plugin_read.rs, codex-rs/core/src/plugins/manager.rs |
 | `6b39d0c657` | MCP/Tooling | **暂缓** | 高 | 涉及核心架构或协议面重排，需单独迁移窗口和兼容设计。 重叠 12/19；关键文件 codex-rs/app-server-protocol/schema/json/ClientRequest.json, codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json |
-| `e9c70fff3f` | Plugin | **暂缓** | 低 | 插件交互流程重塑，和现有 fork 插件体验存在冲突风险。 重叠 2/7；关键文件 codex-rs/cli/src/main.rs, codex-rs/cli/src/marketplace_cmd.rs |
-| `5bb193aa88` | MCP/Tooling | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 5/17；关键文件 codex-rs/app-server/tests/common/models_cache.rs, codex-rs/codex-api/tests/models_integration.rs |
-| `e3c2acb9cd` | Core | **选择性吸纳** | 低 | 功能可评估推进，但与 fork 现状存在耦合，建议分批语义吸纳。 重叠 0/4；关键文件 codex-rs/core/src/session/turn.rs, codex-rs/core/tests/suite/pending_input.rs |
+| `e9c70fff3f` | Plugin | **已选择性吸纳（fork 实现）** | 低 | 当前分支已通过 `db31296a4e feat(plugins): add marketplace remove workflow` 提供 `marketplace remove` 能力；未对齐的部分是后续 plugin facade / UI 重塑，不再是 remove 能力缺口。 |
+| `5bb193aa88` | MCP/Tooling | **已选择性吸纳（fork 实现）** | 中 | 当前分支已在 `protocol::ModelInfo` 增加 `max_context_window`，并让 `models_manager` 的 config override 对该上限做 clamp；`TurnContext`、auto-compact 与 memories stage-one prompt 预算也已统一改为读取 `resolved_context_window()`。同时 bundled `codex-rs/core/models.json` 已补齐该元数据，并补上 protocol/core/offline bundled 回归测试，覆盖“字段解析”“override 被 clamp”“context_window 缺失时回退到 max_context_window”三类关键语义。 |
+| `e3c2acb9cd` | Core | **已选择性吸纳（fork 实现）** | 低 | 当前分支已在 `codex-rs/core/src/codex.rs` 恢复“queued mailbox input 可在 reasoning item 与 commentary message item 完成后触发 follow-up”的边界语义；同时保持 user input 仍只在 request boundary 生效，不误抢占最终回答链路。补充了 state/codex 两层单元测试，分别锁定“仅非 user pending message 视为 mailbox input”与“仅 reasoning/commentary 边界允许抢占”。 |
 | `53b1570367` | MCP/Tooling | **暂缓** | 低 | 默认成本/体验策略变更，需产品与成本口径先确认。 重叠 9/35；关键文件 codex-rs/app-server-protocol/schema/json/ClientRequest.json, codex-rs/app-server-protocol/schema/json/codex_app_server_protocol.schemas.json |
 | `e3f44ca3b3` | Plugin | **选择性吸纳** | 低 | 当前分支已在共享路径层修复“绝对路径仍依赖 cwd”的根因，并补上 `PluginStore::try_new()` 入口；但未整体迁移上游 `core-plugins` 架构与完整 store API。 现阶段已消除主要 panic 根因，剩余属于结构对齐而非紧急缺陷。 |
 | `996aa23e4c` | MCP/Tooling | **暂缓** | 低 | 涉及核心架构或协议面重排，需单独迁移窗口和兼容设计。 重叠 5/31；关键文件 codex-rs/Cargo.lock, codex-rs/app-server/src/codex_message_processor.rs |

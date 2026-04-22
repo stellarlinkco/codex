@@ -110,6 +110,7 @@ async fn backfill_scans_existing_rollouts() -> Result<()> {
                 "required": ["city"],
                 "properties": { "city": { "type": "string" } }
             }),
+            defer_loading: true,
         },
         DynamicToolSpec {
             name: "weather_lookup".to_string(),
@@ -119,6 +120,7 @@ async fn backfill_scans_existing_rollouts() -> Result<()> {
                 "required": ["zip"],
                 "properties": { "zip": { "type": "string" } }
             }),
+            defer_loading: false,
         },
     ];
     let dynamic_tools_for_hook = dynamic_tools.clone();
@@ -192,7 +194,9 @@ async fn backfill_scans_existing_rollouts() -> Result<()> {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 
-    let db = test.codex.state_db().expect("state db enabled");
+    let db =
+        codex_state::StateRuntime::init(test.config.sqlite_home.clone(), default_provider.clone())
+            .await?;
 
     let mut metadata = None;
     for _ in 0..40 {

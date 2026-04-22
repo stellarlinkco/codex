@@ -98,6 +98,7 @@ use codex_protocol::items::TurnItem;
 use codex_protocol::items::UserMessageItem;
 use codex_protocol::mcp::CallToolResult;
 use codex_protocol::models::BaseInstructions;
+use codex_protocol::models::MessagePhase;
 use codex_protocol::models::PermissionProfile;
 use codex_protocol::models::format_allow_prefixes;
 use codex_protocol::openai_models::ModelInfo;
@@ -214,6 +215,50 @@ pub enum SteerInputError {
 pub(crate) struct PreviousTurnSettings {
     pub(crate) model: String,
     pub(crate) realtime_active: Option<bool>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct SearchToolSelectionState {
+    mcp_tools: Vec<String>,
+    dynamic_tools: Vec<String>,
+}
+
+impl SearchToolSelectionState {
+    fn from_payload(payload: &Value) -> Option<Self> {
+        let parse_string_array = |key: &str| {
+            payload
+                .get(key)
+                .and_then(Value::as_array)
+                .and_then(|values| {
+                    values
+                        .iter()
+                        .map(|value| value.as_str().map(str::to_string))
+                        .collect::<Option<Vec<_>>>()
+                })
+        };
+
+        let mcp_tools = parse_string_array("active_selected_mcp_tools");
+        let dynamic_tools = parse_string_array("active_selected_dynamic_tools");
+
+        match (mcp_tools, dynamic_tools) {
+            (Some(mcp_tools), Some(dynamic_tools)) => Some(Self {
+                mcp_tools,
+                dynamic_tools,
+            }),
+            (Some(mcp_tools), None) => Some(Self {
+                mcp_tools,
+                dynamic_tools: Vec::new(),
+            }),
+            (None, Some(dynamic_tools)) => Some(Self {
+                mcp_tools: Vec::new(),
+                dynamic_tools,
+            }),
+            (None, None) => parse_string_array("active_selected_tools").map(|mcp_tools| Self {
+                mcp_tools,
+                dynamic_tools: Vec::new(),
+            }),
+        }
+    }
 }
 
 use crate::exec_policy::ExecPolicyUpdateError;
@@ -739,9 +784,11 @@ pub(crate) struct TurnContext {
 impl TurnContext {
     pub(crate) fn model_context_window(&self) -> Option<i64> {
         let effective_context_window_percent = self.model_info.effective_context_window_percent;
-        self.model_info.context_window.map(|context_window| {
-            context_window.saturating_mul(effective_context_window_percent) / 100
-        })
+        self.model_info
+            .resolved_context_window()
+            .map(|context_window| {
+                context_window.saturating_mul(effective_context_window_percent) / 100
+            })
     }
 
     pub(crate) async fn with_model(&self, model: String, models_manager: &ModelsManager) -> Self {
@@ -2013,6 +2060,29 @@ impl Session {
         state.clear_mcp_tool_selection();
     }
 
+    pub(crate) async fn merge_dynamic_tool_selection(
+        &self,
+        tool_names: Vec<String>,
+    ) -> Vec<String> {
+        let mut state = self.state.lock().await;
+        state.merge_dynamic_tool_selection(tool_names)
+    }
+
+    pub(crate) async fn set_dynamic_tool_selection(&self, tool_names: Vec<String>) {
+        let mut state = self.state.lock().await;
+        state.set_dynamic_tool_selection(tool_names);
+    }
+
+    pub(crate) async fn get_dynamic_tool_selection(&self) -> Option<Vec<String>> {
+        let state = self.state.lock().await;
+        state.get_dynamic_tool_selection()
+    }
+
+    pub(crate) async fn clear_dynamic_tool_selection(&self) {
+        let mut state = self.state.lock().await;
+        state.clear_dynamic_tool_selection();
+    }
+
     // Merges connector IDs into the session-level explicit connector selection.
     pub(crate) async fn merge_connector_selection(
         &self,
@@ -2055,6 +2125,7 @@ impl Session {
     async fn record_initial_history(&self, conversation_history: InitialHistory) {
         let turn_context = self.new_default_turn().await;
         self.clear_mcp_tool_selection().await;
+        self.clear_dynamic_tool_selection().await;
         let is_subagent = {
             let state = self.state.lock().await;
             matches!(
@@ -2083,7 +2154,7 @@ impl Session {
             InitialHistory::Resumed(resumed_history) => {
                 let rollout_items = resumed_history.history;
                 let restored_tool_selection =
-                    Self::extract_mcp_tool_selection_from_rollout(&rollout_items);
+                    Self::extract_tool_selection_from_rollout(&rollout_items);
 
                 let reconstructed_rollout = self
                     .reconstruct_history_from_rollout(&turn_context, &rollout_items)
@@ -2129,8 +2200,13 @@ impl Session {
                     let mut state = self.state.lock().await;
                     state.set_token_info(Some(info));
                 }
-                if let Some(selected_tools) = restored_tool_selection {
-                    self.set_mcp_tool_selection(selected_tools).await;
+                if let Some(restored_tool_selection) = restored_tool_selection {
+                    let SearchToolSelectionState {
+                        mcp_tools,
+                        dynamic_tools,
+                    } = restored_tool_selection;
+                    self.set_mcp_tool_selection(mcp_tools).await;
+                    self.set_dynamic_tool_selection(dynamic_tools).await;
                 }
 
                 // Defer seeding the session's initial context until the first turn starts so
@@ -2141,7 +2217,7 @@ impl Session {
             }
             InitialHistory::Forked(rollout_items) => {
                 let restored_tool_selection =
-                    Self::extract_mcp_tool_selection_from_rollout(&rollout_items);
+                    Self::extract_tool_selection_from_rollout(&rollout_items);
 
                 let reconstructed_rollout = self
                     .reconstruct_history_from_rollout(&turn_context, &rollout_items)
@@ -2170,8 +2246,13 @@ impl Session {
                     let mut state = self.state.lock().await;
                     state.set_token_info(Some(info));
                 }
-                if let Some(selected_tools) = restored_tool_selection {
-                    self.set_mcp_tool_selection(selected_tools).await;
+                if let Some(restored_tool_selection) = restored_tool_selection {
+                    let SearchToolSelectionState {
+                        mcp_tools,
+                        dynamic_tools,
+                    } = restored_tool_selection;
+                    self.set_mcp_tool_selection(mcp_tools).await;
+                    self.set_dynamic_tool_selection(dynamic_tools).await;
                 }
 
                 // If persisting, persist all rollout items as-is (recorder filters)
@@ -2206,11 +2287,11 @@ impl Session {
         })
     }
 
-    fn extract_mcp_tool_selection_from_rollout(
+    fn extract_tool_selection_from_rollout(
         rollout_items: &[RolloutItem],
-    ) -> Option<Vec<String>> {
+    ) -> Option<SearchToolSelectionState> {
         let mut search_call_ids = HashSet::new();
-        let mut active_selected_tools: Option<Vec<String>> = None;
+        let mut active_selected_tools: Option<SearchToolSelectionState> = None;
 
         for item in rollout_items {
             let RolloutItem::ResponseItem(response_item) = item else {
@@ -2232,20 +2313,9 @@ impl Session {
                     let Ok(payload) = serde_json::from_str::<Value>(&content) else {
                         continue;
                     };
-                    let Some(selected_tools) = payload
-                        .get("active_selected_tools")
-                        .and_then(Value::as_array)
-                    else {
-                        continue;
-                    };
-                    let Some(selected_tools) = selected_tools
-                        .iter()
-                        .map(|value| value.as_str().map(str::to_string))
-                        .collect::<Option<Vec<_>>>()
-                    else {
-                        continue;
-                    };
-                    active_selected_tools = Some(selected_tools);
+                    if let Some(selection) = SearchToolSelectionState::from_payload(&payload) {
+                        active_selected_tools = Some(selection);
+                    }
                 }
                 _ => {}
             }
@@ -4126,6 +4196,17 @@ impl Session {
             Some(at) => {
                 let ts = at.turn_state.lock().await;
                 ts.has_pending_input()
+            }
+            None => false,
+        }
+    }
+
+    pub async fn has_pending_mailbox_input(&self) -> bool {
+        let active = self.active_turn.lock().await;
+        match active.as_ref() {
+            Some(at) => {
+                let ts = at.turn_state.lock().await;
+                ts.has_pending_mailbox_input()
             }
             None => false,
         }
@@ -6739,6 +6820,8 @@ async fn built_tools(
 
     let mut effective_explicitly_enabled_connectors = explicitly_enabled_connectors.clone();
     effective_explicitly_enabled_connectors.extend(sess.get_connector_selection().await);
+    let selected_mcp_tool_names = sess.get_mcp_tool_selection().await.unwrap_or_default();
+    let selected_dynamic_tools = sess.get_dynamic_tool_selection().await.unwrap_or_default();
 
     let connectors = if turn_context.features.enabled(Feature::Apps) {
         let plugin_apps = sess
@@ -6777,8 +6860,11 @@ async fn built_tools(
 
         let mut selected_mcp_tools = filter_non_codex_apps_mcp_tools_only(&mcp_tools);
 
-        if let Some(selected_tools) = sess.get_mcp_tool_selection().await {
-            selected_mcp_tools.extend(filter_mcp_tools_by_name(&mcp_tools, &selected_tools));
+        if !selected_mcp_tool_names.is_empty() {
+            selected_mcp_tools.extend(filter_mcp_tools_by_name(
+                &mcp_tools,
+                &selected_mcp_tool_names,
+            ));
         }
 
         selected_mcp_tools.extend(filter_codex_apps_mcp_tools_only(
@@ -6790,7 +6876,7 @@ async fn built_tools(
             connectors::filter_codex_apps_tools_by_policy(selected_mcp_tools, &turn_context.config);
     }
 
-    Ok(Arc::new(ToolRouter::from_config(
+    Ok(Arc::new(ToolRouter::from_config_with_selection(
         &turn_context.tools_config,
         has_mcp_servers.then(|| {
             mcp_tools
@@ -6800,6 +6886,7 @@ async fn built_tools(
         }),
         app_tools,
         turn_context.dynamic_tools.as_slice(),
+        &selected_dynamic_tools,
     )))
 }
 
@@ -6807,6 +6894,25 @@ async fn built_tools(
 struct SamplingRequestResult {
     needs_follow_up: bool,
     last_agent_message: Option<String>,
+}
+
+fn output_item_opens_mailbox_preemption_window(item: &ResponseItem) -> bool {
+    match item {
+        ResponseItem::Reasoning { .. } => true,
+        ResponseItem::Message { role, phase, .. } => {
+            role == "assistant" && matches!(phase, Some(MessagePhase::Commentary))
+        }
+        ResponseItem::LocalShellCall { .. }
+        | ResponseItem::FunctionCall { .. }
+        | ResponseItem::FunctionCallOutput { .. }
+        | ResponseItem::CustomToolCall { .. }
+        | ResponseItem::CustomToolCallOutput { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::ImageGenerationCall { .. }
+        | ResponseItem::GhostSnapshot { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::Other => false,
+    }
 }
 
 /// Ephemeral per-response state for streaming a single proposed plan.
@@ -7438,6 +7544,7 @@ async fn try_run_sampling_request(
         match event {
             ResponseEvent::Created => {}
             ResponseEvent::OutputItemDone(item) => {
+                let preempt_for_mailbox_input = output_item_opens_mailbox_preemption_window(&item);
                 let previously_active_item = active_item.take();
                 if let Some(previous) = previously_active_item.as_ref()
                     && matches!(previous, TurnItem::AgentMessage(_))
@@ -7483,6 +7590,15 @@ async fn try_run_sampling_request(
                     last_agent_message = Some(agent_message);
                 }
                 needs_follow_up |= output_result.needs_follow_up;
+                if !needs_follow_up
+                    && preempt_for_mailbox_input
+                    && sess.has_pending_mailbox_input().await
+                {
+                    break Ok(SamplingRequestResult {
+                        needs_follow_up: true,
+                        last_agent_message,
+                    });
+                }
             }
             ResponseEvent::OutputItemAdded(item) => {
                 if let Some(turn_item) =
@@ -7760,6 +7876,7 @@ mod tests {
     use codex_otel::TelemetryAuthMode;
     use codex_protocol::models::BaseInstructions;
     use codex_protocol::models::ContentItem;
+    use codex_protocol::models::MessagePhase;
     use codex_protocol::models::ResponseInputItem;
     use codex_protocol::models::ResponseItem;
     use codex_protocol::openai_models::ModelsResponse;
@@ -7934,6 +8051,21 @@ mod tests {
             connector_id: connector_id.map(str::to_string),
             connector_name: connector_name.map(str::to_string),
             plugin_display_names: Vec::new(),
+        }
+    }
+
+    fn make_dynamic_tool(name: &str, defer_loading: bool) -> DynamicToolSpec {
+        DynamicToolSpec {
+            name: name.to_string(),
+            description: format!("Dynamic tool {name}"),
+            input_schema: json!({
+                "type": "object",
+                "properties": {
+                    "city": { "type": "string" }
+                },
+                "additionalProperties": false,
+            }),
+            defer_loading,
         }
     }
 
@@ -8301,8 +8433,185 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn built_tools_hides_deferred_dynamic_tools_until_selected() {
+        let (session, turn_context, _rx) =
+            make_session_and_context_with_dynamic_tools_and_rx(vec![
+                make_dynamic_tool("visible_dynamic_tool", false),
+                make_dynamic_tool("deferred_dynamic_tool", true),
+            ])
+            .await;
+
+        let router = built_tools(
+            session.as_ref(),
+            turn_context.as_ref(),
+            &[],
+            &HashSet::new(),
+            None,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("build tools before selection");
+        let tool_names: Vec<_> = router
+            .specs()
+            .into_iter()
+            .map(|tool| tool.name().to_string())
+            .collect();
+        assert!(tool_names.iter().any(|name| name == "visible_dynamic_tool"));
+        assert!(
+            !tool_names
+                .iter()
+                .any(|name| name == "deferred_dynamic_tool")
+        );
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == SEARCH_TOOL_BM25_TOOL_NAME)
+        );
+
+        session
+            .set_dynamic_tool_selection(vec!["deferred_dynamic_tool".to_string()])
+            .await;
+
+        let router = built_tools(
+            session.as_ref(),
+            turn_context.as_ref(),
+            &[],
+            &HashSet::new(),
+            None,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("build tools after selection");
+        let tool_names: Vec<_> = router
+            .specs()
+            .into_iter()
+            .map(|tool| tool.name().to_string())
+            .collect();
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "deferred_dynamic_tool")
+        );
+    }
+
     #[test]
-    fn extract_mcp_tool_selection_from_rollout_reads_search_tool_output() {
+    fn extract_tool_selection_from_rollout_reads_search_tool_output() {
+        let rollout_items = vec![
+            function_call_rollout_item(SEARCH_TOOL_BM25_TOOL_NAME, "search-1"),
+            function_call_output_rollout_item(
+                "search-1",
+                &json!({
+                    "active_selected_mcp_tools": [
+                        "mcp__codex_apps__calendar_create_event",
+                        "mcp__codex_apps__calendar_list_events",
+                    ],
+                    "active_selected_dynamic_tools": [
+                        "deferred_calendar_summary",
+                    ],
+                })
+                .to_string(),
+            ),
+        ];
+
+        let selected = Session::extract_tool_selection_from_rollout(&rollout_items);
+        assert_eq!(
+            selected,
+            Some(SearchToolSelectionState {
+                mcp_tools: vec![
+                    "mcp__codex_apps__calendar_create_event".to_string(),
+                    "mcp__codex_apps__calendar_list_events".to_string(),
+                ],
+                dynamic_tools: vec!["deferred_calendar_summary".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn extract_tool_selection_from_rollout_latest_valid_payload_wins() {
+        let rollout_items = vec![
+            function_call_rollout_item(SEARCH_TOOL_BM25_TOOL_NAME, "search-1"),
+            function_call_output_rollout_item(
+                "search-1",
+                &json!({
+                    "active_selected_mcp_tools": ["mcp__codex_apps__calendar_create_event"],
+                    "active_selected_dynamic_tools": ["deferred_calendar_summary"],
+                })
+                .to_string(),
+            ),
+            function_call_rollout_item(SEARCH_TOOL_BM25_TOOL_NAME, "search-2"),
+            function_call_output_rollout_item(
+                "search-2",
+                &json!({
+                    "active_selected_mcp_tools": ["mcp__codex_apps__calendar_delete_event"],
+                    "active_selected_dynamic_tools": ["deferred_calendar_delete"],
+                })
+                .to_string(),
+            ),
+        ];
+
+        let selected = Session::extract_tool_selection_from_rollout(&rollout_items);
+        assert_eq!(
+            selected,
+            Some(SearchToolSelectionState {
+                mcp_tools: vec!["mcp__codex_apps__calendar_delete_event".to_string()],
+                dynamic_tools: vec!["deferred_calendar_delete".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn extract_tool_selection_from_rollout_ignores_non_search_and_malformed_payloads() {
+        let rollout_items = vec![
+            function_call_rollout_item("shell", "shell-1"),
+            function_call_output_rollout_item(
+                "shell-1",
+                &json!({
+                    "active_selected_mcp_tools": ["mcp__codex_apps__should_be_ignored"],
+                })
+                .to_string(),
+            ),
+            function_call_rollout_item(SEARCH_TOOL_BM25_TOOL_NAME, "search-1"),
+            function_call_output_rollout_item("search-1", "{not-json"),
+            function_call_output_rollout_item(
+                "unknown-search-call",
+                &json!({
+                    "active_selected_mcp_tools": ["mcp__codex_apps__also_ignored"],
+                })
+                .to_string(),
+            ),
+            function_call_output_rollout_item(
+                "search-1",
+                &json!({
+                    "active_selected_mcp_tools": ["mcp__codex_apps__calendar_list_events"],
+                    "active_selected_dynamic_tools": ["deferred_calendar_summary"],
+                })
+                .to_string(),
+            ),
+        ];
+
+        let selected = Session::extract_tool_selection_from_rollout(&rollout_items);
+        assert_eq!(
+            selected,
+            Some(SearchToolSelectionState {
+                mcp_tools: vec!["mcp__codex_apps__calendar_list_events".to_string()],
+                dynamic_tools: vec!["deferred_calendar_summary".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn extract_tool_selection_from_rollout_returns_none_without_valid_search_output() {
+        let rollout_items = vec![function_call_rollout_item(
+            SEARCH_TOOL_BM25_TOOL_NAME,
+            "search-1",
+        )];
+        let selected = Session::extract_tool_selection_from_rollout(&rollout_items);
+        assert_eq!(selected, None);
+    }
+
+    #[test]
+    fn extract_tool_selection_from_rollout_supports_legacy_search_payloads() {
         let rollout_items = vec![
             function_call_rollout_item(SEARCH_TOOL_BM25_TOOL_NAME, "search-1"),
             function_call_output_rollout_item(
@@ -8317,88 +8626,17 @@ mod tests {
             ),
         ];
 
-        let selected = Session::extract_mcp_tool_selection_from_rollout(&rollout_items);
+        let selected = Session::extract_tool_selection_from_rollout(&rollout_items);
         assert_eq!(
             selected,
-            Some(vec![
-                "mcp__codex_apps__calendar_create_event".to_string(),
-                "mcp__codex_apps__calendar_list_events".to_string(),
-            ])
+            Some(SearchToolSelectionState {
+                mcp_tools: vec![
+                    "mcp__codex_apps__calendar_create_event".to_string(),
+                    "mcp__codex_apps__calendar_list_events".to_string(),
+                ],
+                dynamic_tools: Vec::new(),
+            })
         );
-    }
-
-    #[test]
-    fn extract_mcp_tool_selection_from_rollout_latest_valid_payload_wins() {
-        let rollout_items = vec![
-            function_call_rollout_item(SEARCH_TOOL_BM25_TOOL_NAME, "search-1"),
-            function_call_output_rollout_item(
-                "search-1",
-                &json!({
-                    "active_selected_tools": ["mcp__codex_apps__calendar_create_event"],
-                })
-                .to_string(),
-            ),
-            function_call_rollout_item(SEARCH_TOOL_BM25_TOOL_NAME, "search-2"),
-            function_call_output_rollout_item(
-                "search-2",
-                &json!({
-                    "active_selected_tools": ["mcp__codex_apps__calendar_delete_event"],
-                })
-                .to_string(),
-            ),
-        ];
-
-        let selected = Session::extract_mcp_tool_selection_from_rollout(&rollout_items);
-        assert_eq!(
-            selected,
-            Some(vec!["mcp__codex_apps__calendar_delete_event".to_string(),])
-        );
-    }
-
-    #[test]
-    fn extract_mcp_tool_selection_from_rollout_ignores_non_search_and_malformed_payloads() {
-        let rollout_items = vec![
-            function_call_rollout_item("shell", "shell-1"),
-            function_call_output_rollout_item(
-                "shell-1",
-                &json!({
-                    "active_selected_tools": ["mcp__codex_apps__should_be_ignored"],
-                })
-                .to_string(),
-            ),
-            function_call_rollout_item(SEARCH_TOOL_BM25_TOOL_NAME, "search-1"),
-            function_call_output_rollout_item("search-1", "{not-json"),
-            function_call_output_rollout_item(
-                "unknown-search-call",
-                &json!({
-                    "active_selected_tools": ["mcp__codex_apps__also_ignored"],
-                })
-                .to_string(),
-            ),
-            function_call_output_rollout_item(
-                "search-1",
-                &json!({
-                    "active_selected_tools": ["mcp__codex_apps__calendar_list_events"],
-                })
-                .to_string(),
-            ),
-        ];
-
-        let selected = Session::extract_mcp_tool_selection_from_rollout(&rollout_items);
-        assert_eq!(
-            selected,
-            Some(vec!["mcp__codex_apps__calendar_list_events".to_string(),])
-        );
-    }
-
-    #[test]
-    fn extract_mcp_tool_selection_from_rollout_returns_none_without_valid_search_output() {
-        let rollout_items = vec![function_call_rollout_item(
-            SEARCH_TOOL_BM25_TOOL_NAME,
-            "search-1",
-        )];
-        let selected = Session::extract_mcp_tool_selection_from_rollout(&rollout_items);
-        assert_eq!(selected, None);
     }
 
     #[tokio::test]
@@ -8631,6 +8869,29 @@ mod tests {
         }
 
         turn_context.model_info.context_window = Some(128_000);
+        turn_context.model_info.effective_context_window_percent = 100;
+
+        session.recompute_token_usage(&turn_context).await;
+
+        let actual = session.state.lock().await.token_info().expect("token info");
+        assert_eq!(actual.model_context_window, Some(128_000));
+    }
+
+    #[tokio::test]
+    async fn recompute_token_usage_uses_max_context_window_when_context_window_missing() {
+        let (session, mut turn_context) = make_session_and_context().await;
+
+        {
+            let mut state = session.state.lock().await;
+            state.set_token_info(Some(TokenUsageInfo {
+                total_token_usage: TokenUsage::default(),
+                last_token_usage: TokenUsage::default(),
+                model_context_window: Some(258_400),
+            }));
+        }
+
+        turn_context.model_info.context_window = None;
+        turn_context.model_info.max_context_window = Some(128_000);
         turn_context.model_info.effective_context_window_percent = 100;
 
         session.recompute_token_usage(&turn_context).await;
@@ -10711,6 +10972,79 @@ mod tests {
                 turn_id,
                 last_agent_message: None,
             }) if turn_id == tc.sub_id
+        ));
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn pending_mailbox_input_tracks_only_non_user_messages() {
+        let (sess, _tc, _rx) = make_session_and_context_with_rx().await;
+        sess.active_turn.lock().await.replace(ActiveTurn::default());
+
+        assert!(!sess.has_pending_mailbox_input().await);
+
+        sess.inject_response_items(vec![ResponseInputItem::Message {
+            role: "user".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "late user input".to_string(),
+            }],
+        }])
+        .await
+        .expect("inject user pending input into active turn");
+        assert!(!sess.has_pending_mailbox_input().await);
+
+        sess.inject_response_items(vec![ResponseInputItem::Message {
+            role: "developer".to_string(),
+            content: vec![ContentItem::InputText {
+                text: "queued child update".to_string(),
+            }],
+        }])
+        .await
+        .expect("inject mailbox input into active turn");
+        assert!(sess.has_pending_mailbox_input().await);
+    }
+
+    #[test]
+    fn mailbox_follow_up_preempts_only_after_reasoning_or_commentary_boundaries() {
+        assert!(output_item_opens_mailbox_preemption_window(
+            &ResponseItem::Reasoning {
+                id: "reason-1".to_string(),
+                summary: Vec::new(),
+                content: None,
+                encrypted_content: None,
+            }
+        ));
+        assert!(output_item_opens_mailbox_preemption_window(
+            &ResponseItem::Message {
+                id: Some("msg-1".to_string()),
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "commentary".to_string(),
+                }],
+                end_turn: None,
+                phase: Some(MessagePhase::Commentary),
+            }
+        ));
+        assert!(!output_item_opens_mailbox_preemption_window(
+            &ResponseItem::Message {
+                id: Some("msg-2".to_string()),
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "final answer".to_string(),
+                }],
+                end_turn: None,
+                phase: Some(MessagePhase::FinalAnswer),
+            }
+        ));
+        assert!(!output_item_opens_mailbox_preemption_window(
+            &ResponseItem::Message {
+                id: Some("msg-3".to_string()),
+                role: "assistant".to_string(),
+                content: vec![ContentItem::OutputText {
+                    text: "legacy message".to_string(),
+                }],
+                end_turn: None,
+                phase: None,
+            }
         ));
     }
 

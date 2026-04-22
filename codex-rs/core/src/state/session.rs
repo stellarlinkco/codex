@@ -40,6 +40,7 @@ pub(crate) struct SessionState {
     /// Startup regular task pre-created during session initialization.
     pub(crate) startup_regular_task: Option<JoinHandle<CodexResult<RegularTask>>>,
     pub(crate) active_mcp_tool_selection: Option<Vec<String>>,
+    pub(crate) active_dynamic_tool_selection: Option<Vec<String>>,
     pub(crate) active_connector_selection: HashSet<String>,
     pub(crate) artifacts: SessionArtifacts,
     granted_permissions: Option<PermissionProfile>,
@@ -59,6 +60,7 @@ impl SessionState {
             previous_turn_settings: None,
             startup_regular_task: None,
             active_mcp_tool_selection: None,
+            active_dynamic_tool_selection: None,
             active_connector_selection: HashSet::new(),
             artifacts: SessionArtifacts::default(),
             granted_permissions: None,
@@ -231,6 +233,59 @@ impl SessionState {
         self.active_mcp_tool_selection = None;
     }
 
+    pub(crate) fn merge_dynamic_tool_selection(&mut self, tool_names: Vec<String>) -> Vec<String> {
+        if tool_names.is_empty() {
+            return self
+                .active_dynamic_tool_selection
+                .clone()
+                .unwrap_or_default();
+        }
+
+        let mut merged = self
+            .active_dynamic_tool_selection
+            .take()
+            .unwrap_or_default();
+        let mut seen: HashSet<String> = merged.iter().cloned().collect();
+
+        for tool_name in tool_names {
+            if seen.insert(tool_name.clone()) {
+                merged.push(tool_name);
+            }
+        }
+
+        self.active_dynamic_tool_selection = Some(merged.clone());
+        merged
+    }
+
+    pub(crate) fn set_dynamic_tool_selection(&mut self, tool_names: Vec<String>) {
+        if tool_names.is_empty() {
+            self.active_dynamic_tool_selection = None;
+            return;
+        }
+
+        let mut selected = Vec::new();
+        let mut seen = HashSet::new();
+        for tool_name in tool_names {
+            if seen.insert(tool_name.clone()) {
+                selected.push(tool_name);
+            }
+        }
+
+        self.active_dynamic_tool_selection = if selected.is_empty() {
+            None
+        } else {
+            Some(selected)
+        };
+    }
+
+    pub(crate) fn get_dynamic_tool_selection(&self) -> Option<Vec<String>> {
+        self.active_dynamic_tool_selection.clone()
+    }
+
+    pub(crate) fn clear_dynamic_tool_selection(&mut self) {
+        self.active_dynamic_tool_selection = None;
+    }
+
     pub(crate) fn record_granted_permissions(&mut self, permissions: PermissionProfile) {
         self.granted_permissions = crate::sandboxing::merge_permission_profiles(
             self.granted_permissions.as_ref(),
@@ -355,6 +410,64 @@ mod tests {
         state.clear_mcp_tool_selection();
 
         assert_eq!(state.get_mcp_tool_selection(), None);
+    }
+
+    #[tokio::test]
+    async fn merge_dynamic_tool_selection_deduplicates_and_preserves_order() {
+        let session_configuration = make_session_configuration_for_tests().await;
+        let mut state = SessionState::new(session_configuration);
+
+        let merged = state.merge_dynamic_tool_selection(vec![
+            "weather".to_string(),
+            "maps".to_string(),
+            "weather".to_string(),
+        ]);
+        assert_eq!(merged, vec!["weather".to_string(), "maps".to_string(),]);
+
+        let merged =
+            state.merge_dynamic_tool_selection(vec!["maps".to_string(), "stocks".to_string()]);
+        assert_eq!(
+            merged,
+            vec![
+                "weather".to_string(),
+                "maps".to_string(),
+                "stocks".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn set_dynamic_tool_selection_deduplicates_and_preserves_order() {
+        let session_configuration = make_session_configuration_for_tests().await;
+        let mut state = SessionState::new(session_configuration);
+        state.merge_dynamic_tool_selection(vec!["old".to_string()]);
+
+        state.set_dynamic_tool_selection(vec![
+            "weather".to_string(),
+            "maps".to_string(),
+            "weather".to_string(),
+            "stocks".to_string(),
+        ]);
+
+        assert_eq!(
+            state.get_dynamic_tool_selection(),
+            Some(vec![
+                "weather".to_string(),
+                "maps".to_string(),
+                "stocks".to_string(),
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_dynamic_tool_selection_removes_selection() {
+        let session_configuration = make_session_configuration_for_tests().await;
+        let mut state = SessionState::new(session_configuration);
+        state.merge_dynamic_tool_selection(vec!["weather".to_string()]);
+
+        state.clear_dynamic_tool_selection();
+
+        assert_eq!(state.get_dynamic_tool_selection(), None);
     }
 
     #[tokio::test]

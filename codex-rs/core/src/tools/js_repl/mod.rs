@@ -1471,9 +1471,11 @@ fn emitted_image_content_item(
 }
 
 fn default_output_image_detail_for_turn(turn: &TurnContext) -> Option<ImageDetail> {
-    (turn.config.features.enabled(Feature::ImageDetailOriginal)
-        && turn.model_info.supports_image_detail_original)
-        .then_some(ImageDetail::Original)
+    crate::provider_runtime::default_output_image_detail(
+        &turn.provider,
+        turn.config.features.enabled(Feature::ImageDetailOriginal),
+        turn.model_info.supports_image_detail_original,
+    )
 }
 
 fn build_exec_result_content_items(
@@ -2973,6 +2975,7 @@ await codex.emitImage({ bytes: png, mimeType: "image/png", detail: "ultra" });
                     "properties": {},
                     "additionalProperties": false
                 }),
+                defer_loading: false,
             }])
             .await;
         if !turn
