@@ -1910,7 +1910,7 @@ pub struct DynamicToolCallResponseEvent {
     /// Turn ID that this dynamic tool call belongs to.
     pub turn_id: String,
     /// Optional dynamic tool namespace.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(type = "string | null")]
     pub namespace: Option<String>,
     /// Dynamic tool name.
     pub tool: String,

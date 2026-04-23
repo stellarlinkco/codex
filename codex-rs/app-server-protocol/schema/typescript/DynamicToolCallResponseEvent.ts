@@ -16,7 +16,7 @@ turn_id: string,
 /**
  * Optional dynamic tool namespace.
  */
-namespace?: string | null, 
+namespace: string | null, 
 /**
  * Dynamic tool name.
  */
