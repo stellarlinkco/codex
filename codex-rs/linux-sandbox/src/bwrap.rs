@@ -234,7 +234,7 @@ fn create_filesystem_args(
         cwd,
         file_system_sandbox_policy.glob_scan_max_depth,
     )?);
-    unreadable_roots.sort();
+    unreadable_roots.sort_by(|left, right| left.as_path().cmp(right.as_path()));
     unreadable_roots.dedup();
 
     let mut args = if file_system_sandbox_policy.has_full_disk_read_access() {
@@ -439,10 +439,10 @@ fn expand_unreadable_globs_with_ripgrep(
         return Ok(Vec::new());
     }
 
-    let mut patterns_by_search_root: BTreeMap<AbsolutePathBuf, Vec<String>> = BTreeMap::new();
+    let mut patterns_by_search_root: BTreeMap<PathBuf, Vec<String>> = BTreeMap::new();
     for pattern in patterns {
         if let Some((search_root, glob)) = split_pattern_for_ripgrep(pattern, cwd)
-            && search_root.as_path().is_dir()
+            && search_root.is_dir()
         {
             patterns_by_search_root
                 .entry(search_root)
@@ -451,13 +451,13 @@ fn expand_unreadable_globs_with_ripgrep(
         }
     }
 
-    let mut expanded_paths = BTreeSet::new();
+    let mut expanded_paths: BTreeSet<PathBuf> = BTreeSet::new();
     for (search_root, globs) in patterns_by_search_root {
-        for path in ripgrep_files(search_root.as_path(), &globs, max_depth)? {
+        for path in ripgrep_files(&search_root, &globs, max_depth)? {
             if let Some(target) = canonical_target_if_symlinked_path(path.as_path()) {
-                expanded_paths.insert(AbsolutePathBuf::from_absolute_path_checked(target)?);
+                expanded_paths.insert(target);
             }
-            expanded_paths.insert(path);
+            expanded_paths.insert(path.into_path_buf());
             if expanded_paths.len() > MAX_UNREADABLE_GLOB_MATCHES {
                 return Err(CodexErr::Fatal(format!(
                     "unreadable glob expansion for {} matched more than {MAX_UNREADABLE_GLOB_MATCHES} paths",
@@ -467,10 +467,14 @@ fn expand_unreadable_globs_with_ripgrep(
         }
     }
 
-    Ok(expanded_paths.into_iter().collect())
+    expanded_paths
+        .into_iter()
+        .map(AbsolutePathBuf::from_absolute_path)
+        .collect::<io::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
-fn split_pattern_for_ripgrep(pattern: &str, cwd: &Path) -> Option<(AbsolutePathBuf, String)> {
+fn split_pattern_for_ripgrep(pattern: &str, cwd: &Path) -> Option<(PathBuf, String)> {
     let absolute_pattern = AbsolutePathBuf::resolve_path_against_base(pattern, cwd).ok()?;
     let pattern = absolute_pattern.to_string_lossy();
     let first_glob_index = pattern
@@ -490,7 +494,9 @@ fn split_pattern_for_ripgrep(pattern: &str, cwd: &Path) -> Option<(AbsolutePathB
     } else {
         PathBuf::from(&pattern[..search_root_end])
     };
-    let search_root = AbsolutePathBuf::from_absolute_path_checked(search_root).ok()?;
+    let search_root = AbsolutePathBuf::from_absolute_path(search_root)
+        .ok()?
+        .into_path_buf();
     let glob = escape_unclosed_glob_classes(&pattern[search_root_end + 1..]);
     (!glob.is_empty()).then_some((search_root, glob))
 }
@@ -580,7 +586,7 @@ fn ripgrep_files(
                 search_root.join(path)
             }
         })
-        .map(AbsolutePathBuf::from_absolute_path_checked)
+        .map(AbsolutePathBuf::from_absolute_path)
         .collect::<io::Result<Vec<_>>>()
         .map_err(Into::into)
 }
