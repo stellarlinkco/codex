@@ -80,9 +80,15 @@ async fn request_dynamic_tool(
     session: &Session,
     turn_context: &TurnContext,
     call_id: String,
-    tool: String,
+    tool_name: String,
     arguments: Value,
 ) -> Option<DynamicToolResponse> {
+    let (namespace, tool) = turn_context
+        .dynamic_tools
+        .iter()
+        .find(|candidate| candidate.qualified_name() == tool_name)
+        .map(|candidate| (candidate.namespace.clone(), candidate.name.clone()))
+        .unwrap_or_else(|| (None, tool_name.clone()));
     let turn_id = turn_context.sub_id.clone();
     let (tx_response, rx_response) = oneshot::channel();
     let event_id = call_id.clone();
@@ -104,6 +110,7 @@ async fn request_dynamic_tool(
     let event = EventMsg::DynamicToolCallRequest(DynamicToolCallRequest {
         call_id: call_id.clone(),
         turn_id: turn_id.clone(),
+        namespace: namespace.clone(),
         tool: tool.clone(),
         arguments: arguments.clone(),
     });
@@ -114,6 +121,7 @@ async fn request_dynamic_tool(
         Some(response) => EventMsg::DynamicToolCallResponse(DynamicToolCallResponseEvent {
             call_id,
             turn_id,
+            namespace: namespace.clone(),
             tool,
             arguments,
             content_items: response.content_items.clone(),
@@ -124,6 +132,7 @@ async fn request_dynamic_tool(
         None => EventMsg::DynamicToolCallResponse(DynamicToolCallResponseEvent {
             call_id,
             turn_id,
+            namespace,
             tool,
             arguments,
             content_items: Vec::new(),

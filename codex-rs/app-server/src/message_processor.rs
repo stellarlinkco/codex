@@ -197,6 +197,7 @@ impl MessageProcessor {
                     .features
                     .enabled(codex_core::features::Feature::DefaultModeRequestUserInput),
             },
+            config.model_provider.clone(),
         ));
         // TODO(xl): Move into PluginManager once this no longer depends on config feature gating.
         thread_manager

@@ -38,6 +38,7 @@ pub struct PermissionProfileToml {
 
 #[derive(Serialize, Deserialize, Debug, Clone, Default, PartialEq, Eq, JsonSchema)]
 pub struct FilesystemPermissionsToml {
+    pub glob_scan_max_depth: Option<usize>,
     #[serde(flatten)]
     pub entries: BTreeMap<String, FilesystemPermissionToml>,
 }
@@ -158,7 +159,8 @@ pub(crate) fn resolve_permission_profile<'a>(
 pub(crate) fn compile_permission_profile(
     permissions: &PermissionsToml,
     profile_name: &str,
-) -> io::Result<(FileSystemSandboxPolicy, NetworkSandboxPolicy)> {
+    policy_cwd: &Path,
+) -> io::Result<(FileSystemSandboxPolicy, NetworkSandboxPolicy, Vec<String>)> {
     let profile = resolve_permission_profile(permissions, profile_name)?;
 
     let filesystem = profile.filesystem.as_ref().ok_or_else(|| {
@@ -180,15 +182,24 @@ pub(crate) fn compile_permission_profile(
     }
 
     let mut entries = Vec::new();
+    let mut startup_warnings = Vec::new();
     for (path, permission) in &filesystem.entries {
-        compile_filesystem_permission(path, permission, &mut entries)?;
+        compile_filesystem_permission(path, permission, policy_cwd, &mut entries)?;
     }
 
     let network_sandbox_policy = compile_network_sandbox_policy(profile.network.as_ref());
+    let mut file_system_sandbox_policy = FileSystemSandboxPolicy::restricted(entries);
+    file_system_sandbox_policy.glob_scan_max_depth =
+        validate_glob_scan_max_depth(filesystem.glob_scan_max_depth)?;
+    maybe_push_unbounded_unreadable_glob_warning(
+        &file_system_sandbox_policy,
+        &mut startup_warnings,
+    );
 
     Ok((
-        FileSystemSandboxPolicy::restricted(entries),
+        file_system_sandbox_policy,
         network_sandbox_policy,
+        startup_warnings,
     ))
 }
 
@@ -206,23 +217,40 @@ fn compile_network_sandbox_policy(network: Option<&NetworkToml>) -> NetworkSandb
 fn compile_filesystem_permission(
     path: &str,
     permission: &FilesystemPermissionToml,
+    policy_cwd: &Path,
     entries: &mut Vec<FileSystemSandboxEntry>,
 ) -> io::Result<()> {
     match permission {
         FilesystemPermissionToml::Access(access) => entries.push(FileSystemSandboxEntry {
-            path: compile_filesystem_path(path)?,
+            path: compile_filesystem_access_path(path, *access)?,
             access: *access,
         }),
         FilesystemPermissionToml::Scoped(scoped_entries) => {
             for (subpath, access) in scoped_entries {
                 entries.push(FileSystemSandboxEntry {
-                    path: compile_scoped_filesystem_path(path, subpath)?,
+                    path: compile_scoped_filesystem_access_path(
+                        path, subpath, *access, policy_cwd,
+                    )?,
                     access: *access,
                 });
             }
         }
     }
     Ok(())
+}
+
+fn compile_filesystem_access_path(
+    path: &str,
+    access: FileSystemAccessMode,
+) -> io::Result<FileSystemPath> {
+    if access == FileSystemAccessMode::None && contains_glob_chars(path) {
+        let path = parse_absolute_path(path)?;
+        return Ok(FileSystemPath::GlobPattern {
+            pattern: path.to_string_lossy().to_string(),
+        });
+    }
+
+    compile_filesystem_path(path)
 }
 
 fn compile_filesystem_path(path: &str) -> io::Result<FileSystemPath> {
@@ -232,6 +260,21 @@ fn compile_filesystem_path(path: &str) -> io::Result<FileSystemPath> {
 
     let path = parse_absolute_path(path)?;
     Ok(FileSystemPath::Path { path })
+}
+
+fn compile_scoped_filesystem_access_path(
+    path: &str,
+    subpath: &str,
+    access: FileSystemAccessMode,
+    policy_cwd: &Path,
+) -> io::Result<FileSystemPath> {
+    if access == FileSystemAccessMode::None && contains_glob_chars(subpath) {
+        return Ok(FileSystemPath::GlobPattern {
+            pattern: compile_scoped_filesystem_pattern(path, subpath, policy_cwd)?,
+        });
+    }
+
+    compile_scoped_filesystem_path(path, subpath)
 }
 
 fn compile_scoped_filesystem_path(path: &str, subpath: &str) -> io::Result<FileSystemPath> {
@@ -255,6 +298,29 @@ fn compile_scoped_filesystem_path(path: &str, subpath: &str) -> io::Result<FileS
     let base = parse_absolute_path(path)?;
     let path = AbsolutePathBuf::resolve_path_against_base(&subpath, base.as_path())?;
     Ok(FileSystemPath::Path { path })
+}
+
+fn compile_scoped_filesystem_pattern(
+    path: &str,
+    subpath: &str,
+    policy_cwd: &Path,
+) -> io::Result<String> {
+    let subpath = parse_relative_subpath(subpath)?;
+
+    if let Some(special) = parse_special_path(path)? {
+        if !matches!(special, FileSystemSpecialPath::ProjectRoots { .. }) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!("filesystem path `{path}` does not support nested entries"),
+            ));
+        }
+        let path = AbsolutePathBuf::resolve_path_against_base(&subpath, policy_cwd)?;
+        return Ok(path.to_string_lossy().to_string());
+    }
+
+    let base = parse_absolute_path(path)?;
+    let path = AbsolutePathBuf::resolve_path_against_base(&subpath, base.as_path())?;
+    Ok(path.to_string_lossy().to_string())
 }
 
 fn parse_special_path(path: &str) -> io::Result<Option<FileSystemSpecialPath>> {
@@ -303,4 +369,40 @@ fn parse_relative_subpath(subpath: &str) -> io::Result<PathBuf> {
             path.display()
         ),
     ))
+}
+
+fn validate_glob_scan_max_depth(max_depth: Option<usize>) -> io::Result<Option<usize>> {
+    match max_depth {
+        Some(0) => Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "glob_scan_max_depth must be at least 1",
+        )),
+        _ => Ok(max_depth),
+    }
+}
+
+fn contains_glob_chars(path: &str) -> bool {
+    path.chars().any(|ch| matches!(ch, '*' | '?' | '[' | ']'))
+}
+
+fn maybe_push_unbounded_unreadable_glob_warning(
+    file_system_sandbox_policy: &FileSystemSandboxPolicy,
+    startup_warnings: &mut Vec<String>,
+) {
+    if file_system_sandbox_policy.glob_scan_max_depth.is_some() {
+        return;
+    }
+
+    for entry in &file_system_sandbox_policy.entries {
+        if entry.access != FileSystemAccessMode::None {
+            continue;
+        }
+        if let FileSystemPath::GlobPattern { pattern } = &entry.path
+            && pattern.contains("**")
+        {
+            startup_warnings.push(format!(
+                "Filesystem deny-read glob `{pattern}` uses `**`. Set `glob_scan_max_depth` in this filesystem profile to cap glob expansion before enabling runtime enforcement."
+            ));
+        }
+    }
 }

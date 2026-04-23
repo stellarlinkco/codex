@@ -1,0 +1,127 @@
+name: cross-platform-binary-validation
+
+on:
+  pull_request:
+    paths:
+      - "codex-rs/**"
+      - ".github/workflows/cross-platform-binary-validation.yml"
+  workflow_dispatch:
+
+jobs:
+  validate:
+    name: Validate - ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04
+          - macos-latest
+          - windows-latest
+    defaults:
+      run:
+        working-directory: codex-rs
+    env:
+      RUST_BACKTRACE: 1
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Set up Node.js for js_repl tests
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: codex-rs/node-version.txt
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends pkg-config libcap-dev
+
+      - name: Install DotSlash
+        uses: facebook/install-dotslash@v2
+
+      - uses: dtolnay/rust-toolchain@1.93.0
+
+      - name: Build modified binaries smoke targets
+        shell: bash
+        run: |
+          set -euo pipefail
+          cargo build --profile ci-test --bin codex --bin codex-responses-api-proxy
+
+      - name: Run binary smoke checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${RUNNER_OS}" == "Windows" ]]; then
+            CODEX_BIN="./target/ci-test/codex.exe"
+            PROXY_BIN="./target/ci-test/codex-responses-api-proxy.exe"
+          else
+            CODEX_BIN="./target/ci-test/codex"
+            PROXY_BIN="./target/ci-test/codex-responses-api-proxy"
+          fi
+
+          # 用户视角 CLI 场景：基础启动、参数解析、子命令入口
+          "${CODEX_BIN}" --version
+          "${CODEX_BIN}" --help > /dev/null
+          "${CODEX_BIN}" exec --help > /dev/null
+          "${CODEX_BIN}" mcp --help > /dev/null
+          "${CODEX_BIN}" app-server --help > /dev/null
+          "${CODEX_BIN}" completion bash > /dev/null
+
+          # 代理二进制参数入口
+          "${PROXY_BIN}" --help > /dev/null
+
+      - name: Validate modified feature tests
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          commands=(
+            "cargo test -p codex-exec --test all prompt_stdin -- --nocapture"
+            "cargo test -p codex-protocol workspace_write_proactively_protects_missing_dot_codex -- --nocapture"
+            "cargo test -p codex-protocol restricted_policy_skips_default_dot_codex_when_explicit_write_rule_exists -- --nocapture"
+            "cargo test -p codex-core windows_restricted_token_ -- --nocapture"
+            "cargo test -p codex-core normalize_additional_permissions_preserves_symlinked_write_paths -- --nocapture"
+            "cargo test -p codex-core matches_windows_verbatim_paths -- --nocapture"
+            "cargo test -p codex-app-server-protocol -- --nocapture"
+            "cargo test -p codex-app-server thread_list -- --nocapture"
+            "cargo test -p codex-app-server thread_read -- --nocapture"
+            "cargo test -p codex-app-server thread_turns_list -- --nocapture"
+            "cargo test -p codex-app-server websocket_disconnect_unloads_last_subscribed_thread -- --nocapture"
+            "cargo test -p codex-app-server thread_unsubscribe_unloads_thread_and_emits_thread_closed_notification -- --nocapture"
+            "cargo test -p codex-tui history_search_ -- --nocapture"
+            "cargo test -p codex-tui bare_slash_command_can_be_recalled_after_recording_pending_history -- --nocapture"
+            "cargo test -p codex-tui slash_command_is_recallable_via_up_history_after_dispatch -- --nocapture"
+            "cargo test -p codex-tui slash_command_with_args_is_recallable_via_up_history_after_dispatch -- --nocapture"
+            "cargo test -p codex-tui plugins_command_ -- --nocapture"
+            "cargo test -p codex-tui status_output_refresh_notice_clears_after_rate_limit_refresh -- --nocapture"
+            "cargo test -p codex-tui slash_clear_requests_ui_clear_when_idle -- --nocapture"
+            "cargo test -p codex-tui ui_snapshots_small_heights_idle -- --nocapture"
+            "cargo test -p codex-tui ui_snapshots_small_heights_task_running -- --nocapture"
+            "cargo test -p codex-tui status_widget_and_approval_modal_snapshot -- --nocapture"
+            "cargo test -p codex-tui status_widget_active_snapshot -- --nocapture"
+            "cargo test -p codex-tui chatwidget_exec_and_status_layout_vt100_snapshot -- --nocapture"
+            "cargo test -p codex-tui chatwidget_markdown_code_blocks_vt100_snapshot -- --nocapture"
+            "cargo test -p codex-tui ui_snapshot_diff_gallery_80x24 -- --nocapture"
+            "cargo test -p codex-tui transcript_overlay_snapshot_basic -- --nocapture"
+            "cargo test -p codex-tui static_overlay_snapshot_basic -- --nocapture"
+            "cargo test -p codex-tui cwd_prompt_snapshot -- --nocapture"
+            "cargo test -p codex-tui prompt_snapshot_gpt5_codex -- --nocapture"
+            "cargo test -p codex-tui markdown_render_complex_snapshot -- --nocapture"
+            "cargo test -p codex-cli --test features -- --nocapture"
+            "cargo test -p codex-cli --test marketplace_remove -- --nocapture"
+            "cargo test -p codex-cli --test mcp_list -- --nocapture"
+            "cargo test -p codex-cli --test mcp_add_remove -- --nocapture"
+            "cargo test -p codex-cli --test execpolicy -- --nocapture"
+            "cargo test -p codex-cli --test debug_clear_memories -- --nocapture"
+            "cargo test -p codex-windows-sandbox -- --nocapture"
+          )
+
+          for cmd in "${commands[@]}"; do
+            echo ">>> ${cmd}"
+            eval "${cmd}"
+          done

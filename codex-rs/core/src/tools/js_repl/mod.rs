@@ -1471,9 +1471,11 @@ fn emitted_image_content_item(
 }
 
 fn default_output_image_detail_for_turn(turn: &TurnContext) -> Option<ImageDetail> {
-    (turn.config.features.enabled(Feature::ImageDetailOriginal)
-        && turn.model_info.supports_image_detail_original)
-        .then_some(ImageDetail::Original)
+    crate::provider_runtime::default_output_image_detail(
+        &turn.provider,
+        turn.config.features.enabled(Feature::ImageDetailOriginal),
+        turn.model_info.supports_image_detail_original,
+    )
 }
 
 fn build_exec_result_content_items(
@@ -2966,6 +2968,7 @@ await codex.emitImage({ bytes: png, mimeType: "image/png", detail: "ultra" });
 
         let (session, turn, rx_event) =
             make_session_and_context_with_dynamic_tools_and_rx(vec![DynamicToolSpec {
+                namespace: None,
                 name: "inline_image".to_string(),
                 description: "Returns inline text and image content.".to_string(),
                 input_schema: serde_json::json!({
@@ -2973,6 +2976,7 @@ await codex.emitImage({ bytes: png, mimeType: "image/png", detail: "ultra" });
                     "properties": {},
                     "additionalProperties": false
                 }),
+                defer_loading: false,
             }])
             .await;
         if !turn

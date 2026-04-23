@@ -89,6 +89,18 @@ impl Provider {
         is_azure_responses_wire_base_url(&self.name, Some(&self.base_url))
     }
 
+    pub fn stores_responses_by_default(&self) -> bool {
+        stores_responses_by_default(&self.name, Some(&self.base_url))
+    }
+
+    pub fn supports_chatgpt_request_compression(&self) -> bool {
+        supports_chatgpt_request_compression(&self.name, Some(&self.base_url))
+    }
+
+    pub fn supports_realtime_env_api_key_fallback(&self) -> bool {
+        supports_realtime_env_api_key_fallback(&self.name, Some(&self.base_url))
+    }
+
     pub fn websocket_url_for_path(&self, path: &str) -> Result<Url, url::ParseError> {
         let mut url = Url::parse(&self.url_for_path(path))?;
 
@@ -101,6 +113,22 @@ impl Provider {
         let _ = url.set_scheme(scheme);
         Ok(url)
     }
+}
+
+pub fn supports_remote_compaction(name: &str, base_url: Option<&str>) -> bool {
+    name.eq_ignore_ascii_case("openai") || is_azure_responses_wire_base_url(name, base_url)
+}
+
+pub fn supports_chatgpt_request_compression(name: &str, _base_url: Option<&str>) -> bool {
+    name.eq_ignore_ascii_case("openai")
+}
+
+pub fn supports_realtime_env_api_key_fallback(name: &str, _base_url: Option<&str>) -> bool {
+    name.eq_ignore_ascii_case("openai")
+}
+
+pub fn stores_responses_by_default(name: &str, base_url: Option<&str>) -> bool {
+    is_azure_responses_wire_base_url(name, base_url)
 }
 
 pub fn is_azure_responses_wire_base_url(name: &str, base_url: Option<&str>) -> bool {
@@ -130,6 +158,66 @@ fn matches_azure_responses_base_url(base_url: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn detects_providers_that_support_chatgpt_request_compression() {
+        assert!(supports_chatgpt_request_compression(
+            "OpenAI",
+            Some("https://api.openai.com/v1")
+        ));
+        assert!(!supports_chatgpt_request_compression(
+            "Azure",
+            Some("https://example.com/openai/deployments/test")
+        ));
+        assert!(!supports_chatgpt_request_compression(
+            "gpt-oss",
+            Some("https://api.openai.com/v1")
+        ));
+    }
+
+    #[test]
+    fn detects_providers_that_support_realtime_env_api_key_fallback() {
+        assert!(supports_realtime_env_api_key_fallback(
+            "OpenAI",
+            Some("https://api.openai.com/v1")
+        ));
+        assert!(!supports_realtime_env_api_key_fallback(
+            "Azure",
+            Some("https://example.com/openai/deployments/test")
+        ));
+        assert!(!supports_realtime_env_api_key_fallback(
+            "gpt-oss",
+            Some("https://api.openai.com/v1")
+        ));
+    }
+
+    #[test]
+    fn detects_remote_compaction_providers() {
+        assert!(supports_remote_compaction(
+            "OpenAI",
+            Some("https://api.openai.com/v1")
+        ));
+        assert!(supports_remote_compaction(
+            "test",
+            Some("https://foo.openai.azure.com/openai")
+        ));
+        assert!(!supports_remote_compaction(
+            "test",
+            Some("https://example.com/openai")
+        ));
+    }
+
+    #[test]
+    fn detects_providers_that_store_responses_by_default() {
+        assert!(stores_responses_by_default(
+            "Azure",
+            Some("https://example.com/openai/deployments/test")
+        ));
+        assert!(!stores_responses_by_default(
+            "OpenAI",
+            Some("https://api.openai.com/v1")
+        ));
+    }
 
     #[test]
     fn detects_azure_responses_base_urls() {

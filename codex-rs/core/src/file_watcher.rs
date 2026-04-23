@@ -155,9 +155,7 @@ impl FileWatcher {
             .collect();
         let mut registered_roots: Vec<PathBuf> = deduped_roots.into_iter().collect();
         registered_roots.sort_unstable_by(|a, b| a.as_os_str().cmp(b.as_os_str()));
-        for root in &registered_roots {
-            self.register_skills_root(root.clone());
-        }
+        self.register_skills_roots(&registered_roots);
 
         WatchRegistration {
             file_watcher: Arc::downgrade(self),
@@ -226,18 +224,31 @@ impl FileWatcher {
         }
     }
 
+    #[cfg(test)]
     fn register_skills_root(&self, root: PathBuf) {
+        self.register_skills_roots(std::slice::from_ref(&root));
+    }
+
+    fn register_skills_roots(&self, roots: &[PathBuf]) {
         let mut state = self
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let count = state
-            .skills_root_ref_counts
-            .entry(root.clone())
-            .or_insert(0);
-        *count += 1;
-        if *count == 1 {
-            self.watch_path(root, RecursiveMode::Recursive);
+        let mut roots_to_watch = Vec::new();
+
+        for root in roots {
+            let count = state
+                .skills_root_ref_counts
+                .entry(root.clone())
+                .or_insert(0);
+            *count += 1;
+            if *count == 1 {
+                roots_to_watch.push((root.clone(), RecursiveMode::Recursive));
+            }
+        }
+
+        if !roots_to_watch.is_empty() {
+            self.update_watched_paths(&roots_to_watch, &[]);
         }
     }
 
@@ -246,68 +257,94 @@ impl FileWatcher {
             .state
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let mut inner_guard: Option<std::sync::MutexGuard<'_, FileWatcherInner>> = None;
+        let mut roots_to_unwatch = Vec::new();
 
         for root in roots {
-            let mut should_unwatch = false;
             if let Some(count) = state.skills_root_ref_counts.get_mut(root) {
                 if *count > 1 {
                     *count -= 1;
                 } else {
                     state.skills_root_ref_counts.remove(root);
-                    should_unwatch = true;
+                    roots_to_unwatch.push(root.clone());
                 }
             }
+        }
 
-            if !should_unwatch {
-                continue;
-            }
-            let Some(inner) = &self.inner else {
-                continue;
-            };
-            if inner_guard.is_none() {
-                let guard = inner
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                inner_guard = Some(guard);
-            }
-
-            let Some(guard) = inner_guard.as_mut() else {
-                continue;
-            };
-            if guard.watched_paths.remove(root).is_none() {
-                continue;
-            }
-            if let Err(err) = guard.watcher.unwatch(root) {
-                warn!("failed to unwatch {}: {err}", root.display());
-            }
+        if !roots_to_unwatch.is_empty() {
+            self.update_watched_paths(&[], &roots_to_unwatch);
         }
     }
 
-    fn watch_path(&self, path: PathBuf, mode: RecursiveMode) {
+    fn update_watched_paths(
+        &self,
+        paths_to_watch: &[(PathBuf, RecursiveMode)],
+        paths_to_unwatch: &[PathBuf],
+    ) {
         let Some(inner) = &self.inner else {
             return;
         };
-        if !path.exists() {
-            return;
-        }
-        let watch_path = path;
         let mut guard = inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if let Some(existing) = guard.watched_paths.get(&watch_path) {
-            if *existing == RecursiveMode::Recursive || *existing == mode {
-                return;
+
+        let mut planned_removals = Vec::new();
+        let mut planned_additions = Vec::new();
+
+        for path in paths_to_unwatch {
+            if !guard.watched_paths.contains_key(path) {
+                continue;
             }
-            if let Err(err) = guard.watcher.unwatch(&watch_path) {
-                warn!("failed to unwatch {}: {err}", watch_path.display());
-            }
+            planned_removals.push(path.clone());
         }
-        if let Err(err) = guard.watcher.watch(&watch_path, mode) {
-            warn!("failed to watch {}: {err}", watch_path.display());
+
+        for (path, mode) in paths_to_watch {
+            if !path.exists() {
+                continue;
+            }
+            if let Some(existing) = guard.watched_paths.get(path) {
+                if *existing == RecursiveMode::Recursive || *existing == *mode {
+                    continue;
+                }
+                planned_removals.push(path.clone());
+            }
+            planned_additions.push((path.clone(), *mode));
+        }
+
+        if planned_removals.is_empty() && planned_additions.is_empty() {
             return;
         }
-        guard.watched_paths.insert(watch_path, mode);
+
+        let mut watcher_paths = guard.watcher.paths_mut();
+        let mut removed_paths = Vec::new();
+        let mut added_paths = Vec::new();
+
+        for path in planned_removals {
+            if let Err(err) = watcher_paths.remove(&path) {
+                warn!("failed to unwatch {}: {err}", path.display());
+                continue;
+            }
+            removed_paths.push(path);
+        }
+
+        for (path, mode) in planned_additions {
+            if let Err(err) = watcher_paths.add(&path, mode) {
+                warn!("failed to watch {}: {err}", path.display());
+                continue;
+            }
+            added_paths.push((path, mode));
+        }
+
+        if let Err(err) = watcher_paths.commit() {
+            warn!("failed to commit watched paths update: {err}");
+            return;
+        }
+
+        for path in removed_paths {
+            guard.watched_paths.remove(&path);
+        }
+        for (path, mode) in added_paths {
+            guard.watched_paths.insert(path, mode);
+        }
     }
 }
 

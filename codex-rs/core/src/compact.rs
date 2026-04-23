@@ -15,6 +15,7 @@ use crate::protocol::CompactedItem;
 use crate::protocol::EventMsg;
 use crate::protocol::TurnStartedEvent;
 use crate::protocol::WarningEvent;
+use crate::provider_runtime::ProviderRuntime;
 use crate::truncate::TruncationPolicy;
 use crate::truncate::approx_token_count;
 use crate::truncate::truncate_text;
@@ -48,7 +49,7 @@ pub(crate) enum InitialContextInjection {
 }
 
 pub(crate) fn should_use_remote_compact_task(provider: &ModelProviderInfo) -> bool {
-    provider.is_openai()
+    ProviderRuntime::from_provider(provider).supports_remote_compaction()
 }
 
 pub(crate) async fn run_inline_auto_compact_task(
@@ -441,6 +442,7 @@ async fn drain_to_completed(
 mod tests {
 
     use super::*;
+    use crate::WireApi;
     use pretty_assertions::assert_eq;
 
     async fn process_compacted_history_with_test_session(
@@ -490,6 +492,32 @@ mod tests {
         let joined = content_items_to_text(&items);
 
         assert_eq!(None, joined);
+    }
+
+    fn test_provider(name: &str, base_url: Option<&str>) -> ModelProviderInfo {
+        ModelProviderInfo {
+            name: name.to_string(),
+            base_url: base_url.map(str::to_string),
+            env_key: None,
+            env_key_instructions: None,
+            experimental_bearer_token: None,
+            wire_api: WireApi::Responses,
+            query_params: None,
+            http_headers: None,
+            env_http_headers: None,
+            request_max_retries: None,
+            stream_max_retries: None,
+            stream_idle_timeout_ms: None,
+            requires_openai_auth: false,
+            supports_websockets: false,
+        }
+    }
+
+    #[test]
+    fn should_use_remote_compact_task_for_azure_responses_provider() {
+        let provider = test_provider("Azure", Some("https://example.com/openai/deployments/test"));
+
+        assert!(should_use_remote_compact_task(&provider));
     }
 
     #[test]

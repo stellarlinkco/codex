@@ -71,10 +71,15 @@ pub struct PluginStore {
 
 impl PluginStore {
     pub fn new(codex_home: PathBuf) -> Self {
-        Self {
-            root: AbsolutePathBuf::try_from(codex_home.join(PLUGINS_CACHE_DIR))
-                .unwrap_or_else(|err| panic!("plugin cache root should be absolute: {err}")),
-        }
+        Self::try_new(codex_home)
+            .unwrap_or_else(|err| panic!("plugin cache root should be absolute: {err}"))
+    }
+
+    pub fn try_new(codex_home: PathBuf) -> Result<Self, PluginStoreError> {
+        let root = AbsolutePathBuf::from_absolute_path(codex_home.join(PLUGINS_CACHE_DIR))
+            .map_err(|err| PluginStoreError::io("failed to resolve plugin cache root", err))?;
+
+        Ok(Self { root })
     }
 
     pub fn root(&self) -> &AbsolutePathBuf {
@@ -82,14 +87,13 @@ impl PluginStore {
     }
 
     pub fn plugin_root(&self, plugin_id: &PluginId, plugin_version: &str) -> AbsolutePathBuf {
-        AbsolutePathBuf::try_from(
-            self.root
-                .as_path()
-                .join(&plugin_id.marketplace_name)
-                .join(&plugin_id.plugin_name)
-                .join(plugin_version),
-        )
-        .unwrap_or_else(|err| panic!("plugin cache path should resolve to an absolute path: {err}"))
+        self.root
+            .join(&plugin_id.marketplace_name)
+            .and_then(|path| path.join(&plugin_id.plugin_name))
+            .and_then(|path| path.join(plugin_version))
+            .unwrap_or_else(|err| {
+                panic!("plugin cache path should resolve to an absolute path: {err}")
+            })
     }
 
     pub fn is_installed(&self, plugin_id: &PluginId) -> bool {
@@ -187,7 +191,7 @@ fn plugin_name_for_source(source_path: &Path) -> Result<String, PluginStoreError
         .map(|_| plugin_name)
 }
 
-fn validate_plugin_segment(segment: &str, kind: &str) -> Result<(), String> {
+pub(crate) fn validate_plugin_segment(segment: &str, kind: &str) -> Result<(), String> {
     if segment.is_empty() {
         return Err(format!("invalid {kind}: must not be empty"));
     }

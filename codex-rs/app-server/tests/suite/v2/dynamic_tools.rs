@@ -58,9 +58,11 @@ async fn thread_start_injects_dynamic_tools_into_model_requests() -> Result<()> 
         "additionalProperties": false,
     });
     let dynamic_tool = DynamicToolSpec {
+        namespace: None,
         name: "demo_tool".to_string(),
         description: "Demo dynamic tool".to_string(),
         input_schema: input_schema.clone(),
+        defer_loading: false,
     };
 
     // Thread start injects dynamic tools into the thread's tool registry.
@@ -118,6 +120,160 @@ async fn thread_start_injects_dynamic_tools_into_model_requests() -> Result<()> 
     Ok(())
 }
 
+#[tokio::test]
+async fn thread_start_omits_deferred_dynamic_tools_from_model_requests() -> Result<()> {
+    let responses = vec![create_final_assistant_message_sse_response("Done")?];
+    let server = create_mock_responses_server_sequence_unchecked(responses).await;
+
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let dynamic_tool = DynamicToolSpec {
+        namespace: None,
+        name: "deferred_tool".to_string(),
+        description: "Deferred dynamic tool".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "city": { "type": "string" }
+            },
+            "required": ["city"],
+            "additionalProperties": false,
+        }),
+        defer_loading: true,
+    };
+
+    let thread_req = mcp
+        .send_thread_start_request(ThreadStartParams {
+            dynamic_tools: Some(vec![dynamic_tool.clone()]),
+            ..Default::default()
+        })
+        .await?;
+    let thread_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
+
+    let turn_req = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![V2UserInput::Text {
+                text: "Hello".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let turn_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
+    )
+    .await??;
+    let _turn: TurnStartResponse = to_response::<TurnStartResponse>(turn_resp)?;
+
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let bodies = responses_bodies(&server).await?;
+    let body = bodies
+        .first()
+        .context("expected at least one responses request")?;
+
+    assert!(
+        find_tool(body, &dynamic_tool.name).is_none(),
+        "deferred dynamic tool should stay hidden before search"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn thread_start_injects_namespaced_dynamic_tools_with_qualified_names() -> Result<()> {
+    let responses = vec![create_final_assistant_message_sse_response("Done")?];
+    let server = create_mock_responses_server_sequence_unchecked(responses).await;
+
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let input_schema = json!({
+        "type": "object",
+        "properties": {
+            "city": { "type": "string" }
+        },
+        "required": ["city"],
+        "additionalProperties": false,
+    });
+    let dynamic_tool = DynamicToolSpec {
+        namespace: Some("calendar".to_string()),
+        name: "demo_tool".to_string(),
+        description: "Demo dynamic tool".to_string(),
+        input_schema: input_schema.clone(),
+        defer_loading: false,
+    };
+
+    let thread_req = mcp
+        .send_thread_start_request(ThreadStartParams {
+            dynamic_tools: Some(vec![dynamic_tool.clone()]),
+            ..Default::default()
+        })
+        .await?;
+    let thread_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
+
+    let turn_req = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread.id.clone(),
+            input: vec![V2UserInput::Text {
+                text: "Hello".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let turn_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
+    )
+    .await??;
+    let _turn: TurnStartResponse = to_response::<TurnStartResponse>(turn_resp)?;
+
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let bodies = responses_bodies(&server).await?;
+    let body = bodies
+        .first()
+        .context("expected at least one responses request")?;
+    let tool = find_tool(body, "calendar__demo_tool")
+        .context("expected namespaced dynamic tool to be injected into request")?;
+
+    assert_eq!(
+        tool.get("description"),
+        Some(&Value::String(dynamic_tool.description.clone()))
+    );
+    assert_eq!(tool.get("parameters"), Some(&input_schema));
+
+    Ok(())
+}
+
 /// Exercises the full dynamic tool call path (server request, client response, model output).
 #[tokio::test]
 async fn dynamic_tool_call_round_trip_sends_text_content_items_to_model() -> Result<()> {
@@ -144,6 +300,7 @@ async fn dynamic_tool_call_round_trip_sends_text_content_items_to_model() -> Res
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let dynamic_tool = DynamicToolSpec {
+        namespace: None,
         name: tool_name.to_string(),
         description: "Demo dynamic tool".to_string(),
         input_schema: json!({
@@ -154,6 +311,7 @@ async fn dynamic_tool_call_round_trip_sends_text_content_items_to_model() -> Res
             "required": ["city"],
             "additionalProperties": false,
         }),
+        defer_loading: false,
     };
 
     let thread_req = mcp
@@ -227,6 +385,7 @@ async fn dynamic_tool_call_round_trip_sends_text_content_items_to_model() -> Res
         thread_id: thread_id.clone(),
         turn_id: turn_id.clone(),
         call_id: call_id.to_string(),
+        namespace: None,
         tool: tool_name.to_string(),
         arguments: tool_args.clone(),
     };
@@ -291,6 +450,129 @@ async fn dynamic_tool_call_round_trip_sends_text_content_items_to_model() -> Res
     Ok(())
 }
 
+#[tokio::test]
+async fn dynamic_tool_call_round_trip_preserves_namespace_in_app_request() -> Result<()> {
+    let call_id = "dyn-call-namespaced-1";
+    let tool_name = "lookup_ticket";
+    let qualified_tool_name = "calendar__lookup_ticket";
+    let tool_args = json!({ "id": "ABC-123" });
+    let tool_call_arguments = serde_json::to_string(&tool_args)?;
+
+    let responses = vec![
+        responses::sse(vec![
+            responses::ev_response_created("resp-1"),
+            responses::ev_function_call(call_id, qualified_tool_name, &tool_call_arguments),
+            responses::ev_completed("resp-1"),
+        ]),
+        create_final_assistant_message_sse_response("Done")?,
+    ];
+    let server = create_mock_responses_server_sequence_unchecked(responses).await;
+
+    let codex_home = TempDir::new()?;
+    create_config_toml(codex_home.path(), &server.uri())?;
+
+    let mut mcp = McpProcess::new(codex_home.path()).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let dynamic_tool = DynamicToolSpec {
+        namespace: Some("calendar".to_string()),
+        name: tool_name.to_string(),
+        description: "Demo dynamic tool".to_string(),
+        input_schema: json!({
+            "type": "object",
+            "properties": {
+                "id": { "type": "string" }
+            },
+            "required": ["id"],
+            "additionalProperties": false,
+        }),
+        defer_loading: false,
+    };
+
+    let thread_req = mcp
+        .send_thread_start_request(ThreadStartParams {
+            dynamic_tools: Some(vec![dynamic_tool]),
+            ..Default::default()
+        })
+        .await?;
+    let thread_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(thread_req)),
+    )
+    .await??;
+    let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
+    let thread_id = thread.id.clone();
+
+    let turn_req = mcp
+        .send_turn_start_request(TurnStartParams {
+            thread_id: thread_id.clone(),
+            input: vec![V2UserInput::Text {
+                text: "Run the tool".to_string(),
+                text_elements: Vec::new(),
+            }],
+            ..Default::default()
+        })
+        .await?;
+    let turn_resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(turn_req)),
+    )
+    .await??;
+    let TurnStartResponse { turn } = to_response::<TurnStartResponse>(turn_resp)?;
+    let turn_id = turn.id.clone();
+
+    let request = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_request_message(),
+    )
+    .await??;
+    let (request_id, params) = match request {
+        ServerRequest::DynamicToolCall { request_id, params } => (request_id, params),
+        other => panic!("expected DynamicToolCall request, got {other:?}"),
+    };
+
+    assert_eq!(
+        params,
+        DynamicToolCallParams {
+            thread_id,
+            turn_id,
+            call_id: call_id.to_string(),
+            namespace: Some("calendar".to_string()),
+            tool: tool_name.to_string(),
+            arguments: tool_args.clone(),
+        }
+    );
+
+    let response = DynamicToolCallResponse {
+        content_items: vec![DynamicToolCallOutputContentItem::InputText {
+            text: "dynamic-ok".to_string(),
+        }],
+        success: true,
+    };
+    mcp.send_response(request_id, serde_json::to_value(response)?)
+        .await?;
+
+    timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_notification_message("turn/completed"),
+    )
+    .await??;
+
+    let bodies = responses_bodies(&server).await?;
+    let payload = bodies
+        .iter()
+        .find_map(|body| function_call_output_payload(body, call_id))
+        .context("expected function_call_output in follow-up request")?;
+    let expected_payload = FunctionCallOutputPayload::from_content_items(vec![
+        FunctionCallOutputContentItem::InputText {
+            text: "dynamic-ok".to_string(),
+        },
+    ]);
+    assert_eq!(payload, expected_payload);
+
+    Ok(())
+}
+
 /// Ensures dynamic tool call responses can include structured content items.
 #[tokio::test]
 async fn dynamic_tool_call_round_trip_sends_content_items_to_model() -> Result<()> {
@@ -316,6 +598,7 @@ async fn dynamic_tool_call_round_trip_sends_content_items_to_model() -> Result<(
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
 
     let dynamic_tool = DynamicToolSpec {
+        namespace: None,
         name: tool_name.to_string(),
         description: "Demo dynamic tool".to_string(),
         input_schema: json!({
@@ -326,6 +609,7 @@ async fn dynamic_tool_call_round_trip_sends_content_items_to_model() -> Result<(
             "required": ["city"],
             "additionalProperties": false,
         }),
+        defer_loading: false,
     };
 
     let thread_req = mcp
@@ -378,6 +662,7 @@ async fn dynamic_tool_call_round_trip_sends_content_items_to_model() -> Result<(
         thread_id,
         turn_id: turn_id.clone(),
         call_id: call_id.to_string(),
+        namespace: None,
         tool: tool_name.to_string(),
         arguments: tool_args,
     };

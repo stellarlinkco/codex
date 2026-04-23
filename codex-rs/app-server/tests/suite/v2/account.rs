@@ -1,3 +1,4 @@
+use anyhow::Context;
 use anyhow::Result;
 use anyhow::bail;
 use app_test_support::McpProcess;
@@ -29,6 +30,7 @@ use codex_app_server_protocol::ServerRequest;
 use codex_app_server_protocol::TurnCompletedNotification;
 use codex_app_server_protocol::TurnStatus;
 use codex_core::auth::AuthCredentialsStoreMode;
+use codex_core::auth::REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR;
 use codex_login::login_with_api_key;
 use codex_protocol::account::PlanType as AccountPlanType;
 use core_test_support::responses;
@@ -43,6 +45,34 @@ use wiremock::MockServer;
 use wiremock::ResponseTemplate;
 
 const DEFAULT_READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+struct EnvVarGuard {
+    key: &'static str,
+    original: Option<std::ffi::OsString>,
+}
+
+impl EnvVarGuard {
+    fn set(key: &'static str, value: &str) -> Self {
+        let original = std::env::var_os(key);
+        // SAFETY: tests that mutate process environment use serial isolation.
+        unsafe {
+            std::env::set_var(key, value);
+        }
+        Self { key, original }
+    }
+}
+
+impl Drop for EnvVarGuard {
+    fn drop(&mut self) {
+        // SAFETY: the guard restores the original environment before another serial test runs.
+        unsafe {
+            match &self.original {
+                Some(value) => std::env::set_var(self.key, value),
+                None => std::env::remove_var(self.key),
+            }
+        }
+    }
+}
 
 // Helper to create a minimal config.toml for the app server
 #[derive(Default)]
@@ -153,6 +183,116 @@ async fn logout_account_removes_auth_and_notifies() -> Result<()> {
     .await??;
     let account: GetAccountResponse = to_response(get_resp)?;
     assert_eq!(account.account, None);
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn logout_account_revokes_managed_chatgpt_auth_before_clearing_local_state() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let revoke_server = MockServer::start().await;
+    create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
+    write_chatgpt_auth(
+        codex_home.path(),
+        ChatGptAuthFixture::new("access-chatgpt")
+            .refresh_token("refresh-chatgpt")
+            .email("user@example.com")
+            .plan_type("pro")
+            .chatgpt_account_id("org-test"),
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let revoke_url = format!("{}/oauth/revoke", revoke_server.uri());
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/oauth/revoke"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "message": "success"
+        })))
+        .expect(1)
+        .mount(&revoke_server)
+        .await;
+
+    let _guard = EnvVarGuard::set(REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR, &revoke_url);
+
+    let mut mcp = McpProcess::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let id = mcp.send_logout_account_request().await?;
+    let resp: JSONRPCResponse = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_response_message(RequestId::Integer(id)),
+    )
+    .await??;
+    let _ok: LogoutAccountResponse = to_response(resp)?;
+
+    let requests = revoke_server
+        .received_requests()
+        .await
+        .context("failed to inspect revoke requests")?;
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        requests[0].body_json::<serde_json::Value>()?,
+        json!({
+            "token": "refresh-chatgpt",
+            "token_type_hint": "refresh_token",
+            "client_id": codex_core::auth::CLIENT_ID,
+        })
+    );
+    assert!(
+        !codex_home.path().join("auth.json").exists(),
+        "auth.json should be deleted after successful revoke-backed logout"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[serial]
+async fn logout_account_preserves_local_auth_when_revoke_fails() -> Result<()> {
+    let codex_home = TempDir::new()?;
+    let revoke_server = MockServer::start().await;
+    create_config_toml(codex_home.path(), CreateConfigTomlParams::default())?;
+    write_chatgpt_auth(
+        codex_home.path(),
+        ChatGptAuthFixture::new("access-chatgpt")
+            .refresh_token("refresh-chatgpt")
+            .email("user@example.com")
+            .plan_type("pro")
+            .chatgpt_account_id("org-test"),
+        AuthCredentialsStoreMode::File,
+    )?;
+
+    let revoke_url = format!("{}/oauth/revoke", revoke_server.uri());
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/oauth/revoke"))
+        .respond_with(ResponseTemplate::new(500).set_body_json(json!({
+            "error": { "message": "revoke failed" }
+        })))
+        .expect(1)
+        .mount(&revoke_server)
+        .await;
+
+    let _guard = EnvVarGuard::set(REVOKE_TOKEN_URL_OVERRIDE_ENV_VAR, &revoke_url);
+
+    let mut mcp = McpProcess::new_with_env(codex_home.path(), &[("OPENAI_API_KEY", None)]).await?;
+    timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
+
+    let id = mcp.send_logout_account_request().await?;
+    let err: JSONRPCError = timeout(
+        DEFAULT_READ_TIMEOUT,
+        mcp.read_stream_until_error_message(RequestId::Integer(id)),
+    )
+    .await??;
+    assert!(
+        err.error
+            .message
+            .contains("logout failed: failed to revoke refresh_token"),
+        "unexpected error message: {err:?}"
+    );
+
+    assert!(
+        codex_home.path().join("auth.json").exists(),
+        "auth.json should remain when revoke fails"
+    );
     Ok(())
 }
 

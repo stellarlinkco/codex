@@ -17,6 +17,8 @@ use crate::chatwidget::ThreadInputState;
 use crate::cwd_prompt::CwdPromptAction;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
+use crate::external_agent_config_migration_startup::ExternalAgentConfigMigrationStartupOutcome;
+use crate::external_agent_config_migration_startup::handle_external_agent_config_migration_prompt_if_needed;
 use crate::external_editor;
 use crate::file_search::FileSearchManager;
 use crate::history_cell;
@@ -72,6 +74,7 @@ use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::Event;
 use codex_protocol::protocol::EventMsg;
 use codex_protocol::protocol::FinalOutput;
+use codex_protocol::protocol::InitialHistory;
 use codex_protocol::protocol::ListSkillsResponseEvent;
 use codex_protocol::protocol::Op;
 use codex_protocol::protocol::SandboxPolicy;
@@ -165,17 +168,47 @@ fn session_summary(
     token_usage: TokenUsage,
     thread_id: Option<ThreadId>,
     thread_name: Option<String>,
+    rollout_path: Option<&Path>,
 ) -> Option<SessionSummary> {
     if token_usage.is_zero() {
         return None;
     }
 
     let usage_line = FinalOutput::from(token_usage).to_string();
-    let resume_command = codex_core::util::resume_command(thread_name.as_deref(), thread_id);
+    let resumable_thread = resumable_thread(thread_id, thread_name, rollout_path);
+    let resume_command = codex_core::util::resume_command(
+        resumable_thread
+            .as_ref()
+            .and_then(|thread| thread.thread_name.as_deref()),
+        resumable_thread.as_ref().map(|thread| thread.thread_id),
+    );
     Some(SessionSummary {
         usage_line,
         resume_command,
     })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ResumableThread {
+    thread_id: ThreadId,
+    thread_name: Option<String>,
+}
+
+fn resumable_thread(
+    thread_id: Option<ThreadId>,
+    thread_name: Option<String>,
+    rollout_path: Option<&Path>,
+) -> Option<ResumableThread> {
+    let thread_id = thread_id?;
+    let rollout_path = rollout_path?;
+    rollout_path_is_resumable(rollout_path).then_some(ResumableThread {
+        thread_id,
+        thread_name,
+    })
+}
+
+fn rollout_path_is_resumable(rollout_path: &Path) -> bool {
+    std::fs::metadata(rollout_path).is_ok_and(|metadata| metadata.is_file() && metadata.len() > 0)
 }
 
 fn errors_for_cwd(cwd: &Path, response: &ListSkillsResponseEvent) -> Vec<SkillErrorInfo> {
@@ -1523,7 +1556,11 @@ impl App {
         self.chat_widget.set_pending_thread_approvals(Vec::new());
     }
 
-    async fn start_fresh_session_with_summary_hint(&mut self, tui: &mut tui::Tui) {
+    async fn start_fresh_session_with_summary_hint(
+        &mut self,
+        tui: &mut tui::Tui,
+        initial_history: InitialHistory,
+    ) {
         // Start a fresh in-memory session while preserving resumability via persisted rollout
         // history.
         self.refresh_in_memory_config_from_disk_best_effort("starting a new thread")
@@ -1534,6 +1571,7 @@ impl App {
             self.chat_widget.token_usage(),
             self.chat_widget.thread_id(),
             self.chat_widget.thread_name(),
+            self.chat_widget.rollout_path().as_deref(),
         );
         self.shutdown_current_thread().await;
         if let Err(err) = self.server.remove_and_close_all_threads().await {
@@ -1556,7 +1594,8 @@ impl App {
             status_line_invalid_items_warned: self.status_line_invalid_items_warned.clone(),
             session_telemetry: self.session_telemetry.clone(),
         };
-        self.chat_widget = ChatWidget::new(init, self.server.clone());
+        self.chat_widget =
+            ChatWidget::new_with_initial_history(init, self.server.clone(), initial_history);
         self.reset_thread_event_state();
         if let Some(summary) = summary {
             let mut lines: Vec<Line<'static>> = vec![summary.usage_line.clone().into()];
@@ -1702,6 +1741,7 @@ impl App {
                     .features
                     .enabled(codex_core::features::Feature::DefaultModeRequestUserInput),
             },
+            config.model_provider.clone(),
         ));
         // TODO(xl): Move into PluginManager once this no longer depends on config feature gating.
         thread_manager
@@ -1729,6 +1769,29 @@ impl App {
         if let Some(updated_model) = config.model.clone() {
             model = updated_model;
         }
+        let external_config_migration_success =
+            match handle_external_agent_config_migration_prompt_if_needed(
+                tui,
+                &mut config,
+                &cli_kv_overrides,
+                &harness_overrides,
+                &session_selection,
+            )
+            .await?
+            {
+                ExternalAgentConfigMigrationStartupOutcome::Continue { success_message } => {
+                    success_message
+                }
+                ExternalAgentConfigMigrationStartupOutcome::ExitRequested => {
+                    return Ok(AppExitInfo {
+                        token_usage: TokenUsage::default(),
+                        thread_id: None,
+                        thread_name: None,
+                        update_action: None,
+                        exit_reason: ExitReason::UserRequested,
+                    });
+                }
+            };
         let auth = auth_manager.auth().await;
         let auth_ref = auth.as_ref();
         // Determine who should see internal Slack routing. We treat
@@ -1916,6 +1979,25 @@ impl App {
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
         };
+        if let Some(message) = external_config_migration_success {
+            let control = app
+                .handle_event(
+                    tui,
+                    AppEvent::InsertHistoryCell(Box::new(crate::history_cell::new_info_event(
+                        message, None,
+                    ))),
+                )
+                .await?;
+            if let AppRunControl::Exit(exit_reason) = control {
+                return Ok(AppExitInfo {
+                    token_usage: TokenUsage::default(),
+                    thread_id: None,
+                    thread_name: None,
+                    update_action: None,
+                    exit_reason,
+                });
+            }
+        }
 
         // On startup, if Agent mode (workspace-write) or ReadOnly is active, warn about world-writable dirs on Windows.
         #[cfg(target_os = "windows")]
@@ -1954,10 +2036,15 @@ impl App {
                 )
                 .await?;
             if let AppRunControl::Exit(exit_reason) = control {
+                let resumable_thread = resumable_thread(
+                    app.chat_widget.thread_id(),
+                    app.chat_widget.thread_name(),
+                    app.chat_widget.rollout_path().as_deref(),
+                );
                 return Ok(AppExitInfo {
                     token_usage: app.token_usage(),
-                    thread_id: app.chat_widget.thread_id(),
-                    thread_name: app.chat_widget.thread_name(),
+                    thread_id: resumable_thread.as_ref().map(|thread| thread.thread_id),
+                    thread_name: resumable_thread.and_then(|thread| thread.thread_name),
                     update_action: app.pending_update_action,
                     exit_reason,
                 });
@@ -2026,10 +2113,15 @@ impl App {
             }
         };
         tui.terminal.clear()?;
+        let resumable_thread = resumable_thread(
+            app.chat_widget.thread_id(),
+            app.chat_widget.thread_name(),
+            app.chat_widget.rollout_path().as_deref(),
+        );
         Ok(AppExitInfo {
             token_usage: app.token_usage(),
-            thread_id: app.chat_widget.thread_id(),
-            thread_name: app.chat_widget.thread_name(),
+            thread_id: resumable_thread.as_ref().map(|thread| thread.thread_id),
+            thread_name: resumable_thread.and_then(|thread| thread.thread_name),
             update_action: app.pending_update_action,
             exit_reason,
         })
@@ -2099,13 +2191,14 @@ impl App {
     async fn handle_event(&mut self, tui: &mut tui::Tui, event: AppEvent) -> Result<AppRunControl> {
         match event {
             AppEvent::NewSession => {
-                self.start_fresh_session_with_summary_hint(tui).await;
+                self.start_fresh_session_with_summary_hint(tui, InitialHistory::New)
+                    .await;
             }
             AppEvent::ClearUi => {
                 self.clear_terminal_ui(tui, false)?;
                 self.reset_app_ui_state_after_clear();
-
-                self.start_fresh_session_with_summary_hint(tui).await;
+                self.start_fresh_session_with_summary_hint(tui, InitialHistory::Cleared)
+                    .await;
             }
             AppEvent::OpenResumePicker => {
                 match crate::resume_picker::run_resume_picker(tui, &self.config, false).await? {
@@ -2145,6 +2238,7 @@ impl App {
                             self.chat_widget.token_usage(),
                             self.chat_widget.thread_id(),
                             self.chat_widget.thread_name(),
+                            self.chat_widget.rollout_path().as_deref(),
                         );
                         match self
                             .server
@@ -2209,6 +2303,7 @@ impl App {
                     self.chat_widget.token_usage(),
                     self.chat_widget.thread_id(),
                     self.chat_widget.thread_name(),
+                    self.chat_widget.rollout_path().as_deref(),
                 );
                 self.chat_widget
                     .add_plain_history_lines(vec!["/fork".magenta().into()]);
@@ -2332,6 +2427,16 @@ impl App {
             AppEvent::Exit(mode) => {
                 return Ok(self.handle_exit_mode(mode));
             }
+            AppEvent::Logout => match self.auth_manager.logout_with_revoke().await {
+                Ok(_) => {
+                    return Ok(self.handle_exit_mode(ExitMode::ShutdownFirst));
+                }
+                Err(err) => {
+                    tracing::error!("failed to logout: {err}");
+                    self.chat_widget
+                        .add_error_message(format!("Logout failed: {err}"));
+                }
+            },
             AppEvent::FatalExitRequest(message) => {
                 return Ok(AppRunControl::Exit(ExitReason::Fatal(message)));
             }
@@ -2397,6 +2502,20 @@ impl App {
             }
             AppEvent::RateLimitSnapshotFetched(snapshot) => {
                 self.chat_widget.on_rate_limit_snapshot(Some(snapshot));
+            }
+            AppEvent::RateLimitsLoaded { request_id, result } => {
+                match result {
+                    Ok(snapshots) => {
+                        for snapshot in snapshots {
+                            self.chat_widget.on_rate_limit_snapshot(Some(snapshot));
+                        }
+                    }
+                    Err(err) => {
+                        tracing::warn!("failed to refresh rate limits for /status: {err}");
+                    }
+                }
+                self.chat_widget
+                    .finish_status_rate_limit_refresh(request_id);
             }
             AppEvent::ConnectorsLoaded { result, is_final } => {
                 self.chat_widget.on_connectors_loaded(result, is_final);
@@ -6578,7 +6697,28 @@ mod tests {
 
     #[tokio::test]
     async fn session_summary_skip_zero_usage() {
-        assert!(session_summary(TokenUsage::default(), None, None).is_none());
+        assert!(session_summary(TokenUsage::default(), None, None, None).is_none());
+    }
+
+    #[tokio::test]
+    async fn session_summary_skips_resume_hint_until_rollout_exists() {
+        let usage = TokenUsage {
+            input_tokens: 10,
+            output_tokens: 2,
+            total_tokens: 12,
+            ..Default::default()
+        };
+        let conversation = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let temp_dir = tempdir().expect("temp dir");
+        let rollout_path = temp_dir.path().join("rollout.jsonl");
+
+        let summary =
+            session_summary(usage, Some(conversation), None, Some(&rollout_path)).expect("summary");
+        assert_eq!(
+            summary.usage_line,
+            "Token usage: total=12 input=10 output=2"
+        );
+        assert_eq!(summary.resume_command, None);
     }
 
     #[tokio::test]
@@ -6590,8 +6730,12 @@ mod tests {
             ..Default::default()
         };
         let conversation = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let temp_dir = tempdir().expect("temp dir");
+        let rollout_path = temp_dir.path().join("rollout.jsonl");
+        std::fs::write(&rollout_path, "{}\n").expect("write rollout");
 
-        let summary = session_summary(usage, Some(conversation), None).expect("summary");
+        let summary =
+            session_summary(usage, Some(conversation), None, Some(&rollout_path)).expect("summary");
         assert_eq!(
             summary.usage_line,
             "Token usage: total=12 input=10 output=2"
@@ -6611,9 +6755,17 @@ mod tests {
             ..Default::default()
         };
         let conversation = ThreadId::from_string("123e4567-e89b-12d3-a456-426614174000").unwrap();
+        let temp_dir = tempdir().expect("temp dir");
+        let rollout_path = temp_dir.path().join("rollout.jsonl");
+        std::fs::write(&rollout_path, "{}\n").expect("write rollout");
 
-        let summary = session_summary(usage, Some(conversation), Some("my-session".to_string()))
-            .expect("summary");
+        let summary = session_summary(
+            usage,
+            Some(conversation),
+            Some("my-session".to_string()),
+            Some(&rollout_path),
+        )
+        .expect("summary");
         assert_eq!(
             summary.resume_command,
             Some("codex resume my-session".to_string())

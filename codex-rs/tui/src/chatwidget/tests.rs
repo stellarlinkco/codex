@@ -18,6 +18,7 @@ use crate::test_backend::VT100Backend;
 use crate::tui::FrameRequester;
 use assert_matches::assert_matches;
 use codex_core::CodexAuth;
+use codex_core::config::CONFIG_TOML_FILE;
 use codex_core::config::Config;
 use codex_core::config::ConfigBuilder;
 use codex_core::config::Constrained;
@@ -1684,7 +1685,7 @@ async fn turn_started_uses_runtime_context_window_before_first_token_count() {
     );
     assert_eq!(chat.bottom_pane.context_window_percent(), Some(100));
 
-    chat.add_status_output();
+    chat.add_status_output(false, None);
 
     let cells = drain_insert_history(&mut rx);
     let context_line = cells
@@ -1707,6 +1708,48 @@ async fn turn_started_uses_runtime_context_window_before_first_token_count() {
     assert!(
         !context_line.contains("1M"),
         "expected /status to avoid raw config context window, got: {context_line}"
+    );
+}
+
+#[tokio::test]
+async fn status_output_refresh_notice_clears_after_rate_limit_refresh() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+
+    chat.add_status_output(true, Some(42));
+    let cell = match rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => cell,
+        other => panic!("expected status output cell, got {other:?}"),
+    };
+    let initial = lines_to_single_string(&cell.display_lines(80));
+    assert!(
+        initial.contains("refreshing limits"),
+        "expected status output to show refresh notice, got: {initial}"
+    );
+
+    chat.on_rate_limit_snapshot(Some(snapshot(92.0)));
+    chat.finish_status_rate_limit_refresh(42);
+
+    let updated = lines_to_single_string(&cell.display_lines(80));
+    assert!(
+        !updated.contains("refreshing limits"),
+        "expected refresh notice to clear after refresh, got: {updated}"
+    );
+}
+
+#[tokio::test]
+async fn slash_status_shows_refresh_notice_for_chatgpt_auth() {
+    let (mut chat, mut rx, _ops) = make_chatwidget_manual(None).await;
+    set_chatgpt_auth(&mut chat);
+
+    chat.dispatch_command(SlashCommand::Status);
+
+    let rendered = match rx.try_recv() {
+        Ok(AppEvent::InsertHistoryCell(cell)) => lines_to_single_string(&cell.display_lines(80)),
+        other => panic!("expected status output before refresh result, got {other:?}"),
+    };
+    assert!(
+        rendered.contains("refreshing limits"),
+        "expected status output to show refresh notice, got: {rendered}"
     );
 }
 
@@ -1805,6 +1848,7 @@ async fn make_chatwidget_manual(
         auth_manager.clone(),
         None,
         CollaborationModesConfig::default(),
+        codex_core::ModelProviderInfo::create_openai_provider(),
     ));
     let reasoning_effort = None;
     let base_mode = CollaborationMode {
@@ -1833,6 +1877,8 @@ async fn make_chatwidget_manual(
         initial_user_message: None,
         token_info: None,
         rate_limit_snapshots_by_limit_id: BTreeMap::new(),
+        refreshing_status_outputs: Vec::new(),
+        next_status_refresh_request_id: 0,
         plan_type: None,
         rate_limit_warnings: RateLimitWarningState::default(),
         rate_limit_switch_prompt: RateLimitSwitchPromptState::default(),
@@ -1947,6 +1993,7 @@ fn set_chatgpt_auth(chat: &mut ChatWidget) {
         chat.auth_manager.clone(),
         None,
         CollaborationModesConfig::default(),
+        codex_core::ModelProviderInfo::create_openai_provider(),
     ));
 }
 
@@ -5252,6 +5299,34 @@ async fn slash_init_skips_when_project_doc_exists() {
 }
 
 #[tokio::test]
+async fn slash_command_is_recallable_via_up_history_after_dispatch() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.bottom_pane
+        .set_composer_text("/diff".to_string(), Vec::new(), Vec::new());
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Up));
+
+    assert_eq!(chat.composer_text_with_pending(), "/diff");
+}
+
+#[tokio::test]
+async fn slash_command_with_args_is_recallable_via_up_history_after_dispatch() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.set_feature_enabled(Feature::CollaborationModes, true);
+
+    chat.bottom_pane.set_composer_text(
+        "/plan investigate this".to_string(),
+        Vec::new(),
+        Vec::new(),
+    );
+    chat.handle_key_event(KeyEvent::from(KeyCode::Enter));
+    chat.handle_key_event(KeyEvent::from(KeyCode::Up));
+
+    assert_eq!(chat.composer_text_with_pending(), "/plan investigate this");
+}
+
+#[tokio::test]
 async fn collab_mode_shift_tab_cycles_only_when_idle() {
     let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
 
@@ -5385,6 +5460,49 @@ async fn collab_slash_command_opens_picker_and_updates_mode() {
             panic!("expected Op::UserTurn with code collab mode, got {other:?}")
         }
     }
+}
+
+#[tokio::test]
+async fn slash_rename_prefills_existing_thread_name() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+    chat.thread_name = Some("Current project title".to_string());
+
+    chat.dispatch_command(SlashCommand::Rename);
+
+    let popup = render_bottom_popup(&chat, 80);
+    assert!(
+        popup.contains("Current project title"),
+        "expected rename popup to prefill current thread name, got:\n{popup}"
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::InsertHistoryCell(_)));
+    assert_matches!(
+        rx.try_recv(),
+        Ok(AppEvent::CodexOp(Op::SetThreadName { name })) if name == "Current project title"
+    );
+}
+
+#[tokio::test]
+async fn slash_rename_without_existing_thread_name_starts_empty() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command(SlashCommand::Rename);
+
+    let popup = render_bottom_popup(&chat, 80);
+    assert!(
+        popup.contains("Name thread"),
+        "expected name-thread header: {popup}"
+    );
+    assert!(
+        !popup.contains("Current project title"),
+        "did not expect any prefilled thread name: {popup}"
+    );
+
+    chat.handle_key_event(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+
+    assert_matches!(rx.try_recv(), Err(TryRecvError::Empty));
 }
 
 #[tokio::test]
@@ -5838,6 +5956,15 @@ async fn slash_quit_requests_exit() {
     chat.dispatch_command(SlashCommand::Quit);
 
     assert_matches!(rx.try_recv(), Ok(AppEvent::Exit(ExitMode::ShutdownFirst)));
+}
+
+#[tokio::test]
+async fn slash_logout_requests_logout_event() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command(SlashCommand::Logout);
+
+    assert_matches!(rx.try_recv(), Ok(AppEvent::Logout));
 }
 
 #[tokio::test]
@@ -7843,6 +7970,103 @@ async fn user_turn_carries_service_tier_after_fast_toggle() {
         } => {}
         other => panic!("expected Op::UserTurn with fast service tier, got {other:?}"),
     }
+}
+
+#[tokio::test]
+async fn plugins_command_reports_feature_disabled() {
+    let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(None).await;
+
+    chat.dispatch_command(SlashCommand::Plugins);
+
+    let rendered = drain_insert_history(&mut rx)
+        .into_iter()
+        .flat_map(|lines| {
+            lines_to_single_string(&lines)
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        rendered.contains("Plugins are not enabled."),
+        "expected disabled feature message, got:\n{rendered}"
+    );
+}
+
+#[tokio::test]
+async fn plugins_command_opens_marketplace_popup() {
+    let (mut chat, _rx, _op_rx) = make_chatwidget_manual(None).await;
+    let temp = tempdir().expect("tempdir");
+    let repo_root = temp.path().join("repo");
+    let plugin_root = repo_root.join("plugins/sample");
+
+    std::fs::create_dir_all(repo_root.join(".git")).expect("create repo root");
+    std::fs::create_dir_all(repo_root.join(".agents/plugins")).expect("create marketplace dir");
+    std::fs::create_dir_all(plugin_root.join(".codex-plugin")).expect("create plugin dir");
+    std::fs::write(
+        repo_root.join(".agents/plugins/marketplace.json"),
+        r#"{
+  "name": "debug",
+  "plugins": [
+    {
+      "name": "sample",
+      "source": {
+        "source": "local",
+        "path": "./plugins/sample"
+      }
+    }
+  ]
+}"#,
+    )
+    .expect("write marketplace");
+    std::fs::write(
+        plugin_root.join(".codex-plugin/plugin.json"),
+        r#"{
+  "name": "sample",
+  "interface": {
+    "displayName": "Sample Plugin",
+    "shortDescription": "Debug helpers",
+    "capabilities": ["skills", "mcp"]
+  }
+}"#,
+    )
+    .expect("write plugin manifest");
+
+    chat.config.codex_home = temp.path().to_path_buf();
+    chat.config.cwd = repo_root;
+    chat.config
+        .features
+        .enable(Feature::Plugins)
+        .expect("test config should allow plugin feature update");
+    let config_toml_path =
+        AbsolutePathBuf::try_from(temp.path().join(CONFIG_TOML_FILE)).expect("absolute config");
+    let user_config = toml::from_str::<TomlValue>(
+        r#"[features]
+plugins = true
+"#,
+    )
+    .expect("parse plugin feature config");
+    chat.config.config_layer_stack = chat
+        .config
+        .config_layer_stack
+        .with_user_config(&config_toml_path, user_config);
+
+    chat.dispatch_command(SlashCommand::Plugins);
+
+    let popup = render_bottom_popup(&chat, 100);
+    assert!(
+        popup.contains("Plugins"),
+        "expected plugins popup title, got:\n{popup}"
+    );
+    assert!(
+        popup.contains("Sample Plugin"),
+        "expected plugin display name, got:\n{popup}"
+    );
+    assert!(
+        popup.contains("debug"),
+        "expected marketplace name, got:\n{popup}"
+    );
 }
 
 #[tokio::test]

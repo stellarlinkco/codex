@@ -107,6 +107,9 @@ pub(crate) enum AppEvent {
     /// background tasks, rollout flush, or child process cleanup).
     Exit(ExitMode),
 
+    /// Request logout, then exit after the logout path completes.
+    Logout,
+
     /// Request to exit the application due to a fatal error.
     FatalExitRequest(String),
 
@@ -129,6 +132,12 @@ pub(crate) enum AppEvent {
 
     /// Result of refreshing rate limits
     RateLimitSnapshotFetched(RateLimitSnapshot),
+
+    /// Result of an on-demand `/status` rate-limit refresh.
+    RateLimitsLoaded {
+        request_id: u64,
+        result: Result<Vec<RateLimitSnapshot>, String>,
+    },
 
     /// Result of prefetching connectors.
     ConnectorsLoaded {

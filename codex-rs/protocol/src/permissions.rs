@@ -96,6 +96,9 @@ pub enum FileSystemSandboxKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct FileSystemSandboxPolicy {
     pub kind: FileSystemSandboxKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub glob_scan_max_depth: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<FileSystemSandboxEntry>,
 }
@@ -105,6 +108,7 @@ pub struct FileSystemSandboxPolicy {
 #[ts(tag = "type")]
 pub enum FileSystemPath {
     Path { path: AbsolutePathBuf },
+    GlobPattern { pattern: String },
     Special { value: FileSystemSpecialPath },
 }
 
@@ -112,6 +116,7 @@ impl Default for FileSystemSandboxPolicy {
     fn default() -> Self {
         Self {
             kind: FileSystemSandboxKind::Restricted,
+            glob_scan_max_depth: None,
             entries: vec![FileSystemSandboxEntry {
                 path: FileSystemPath::Special {
                     value: FileSystemSpecialPath::Root,
@@ -145,6 +150,7 @@ impl FileSystemSandboxPolicy {
     pub fn unrestricted() -> Self {
         Self {
             kind: FileSystemSandboxKind::Unrestricted,
+            glob_scan_max_depth: None,
             entries: Vec::new(),
         }
     }
@@ -152,6 +158,7 @@ impl FileSystemSandboxPolicy {
     pub fn external_sandbox() -> Self {
         Self {
             kind: FileSystemSandboxKind::ExternalSandbox,
+            glob_scan_max_depth: None,
             entries: Vec::new(),
         }
     }
@@ -159,6 +166,7 @@ impl FileSystemSandboxPolicy {
     pub fn restricted(entries: Vec<FileSystemSandboxEntry>) -> Self {
         Self {
             kind: FileSystemSandboxKind::Restricted,
+            glob_scan_max_depth: None,
             entries,
         }
     }
@@ -237,6 +245,12 @@ impl FileSystemSandboxPolicy {
 
         let cwd_absolute = AbsolutePathBuf::from_absolute_path(cwd).ok();
         let unreadable_roots = self.get_unreadable_roots_with_cwd(cwd);
+        let has_explicit_path_entry = |candidate: &AbsolutePathBuf| {
+            self.entries.iter().any(|entry| {
+                resolve_file_system_path(&entry.path, cwd_absolute.as_ref()).as_ref()
+                    == Some(candidate)
+            })
+        };
         let mut writable_roots = Vec::new();
         if self.has_root_access(FileSystemAccessMode::can_write)
             && let Some(cwd_absolute) = cwd_absolute.as_ref()
@@ -259,7 +273,12 @@ impl FileSystemSandboxPolicy {
         )
         .into_iter()
         .map(|root| {
-            let mut read_only_subpaths = default_read_only_subpaths_for_writable_root(&root);
+            let protect_missing_dot_codex = cwd_absolute.as_ref().is_some_and(|cwd| cwd == &root);
+            let mut read_only_subpaths: Vec<AbsolutePathBuf> =
+                default_read_only_subpaths_for_writable_root(&root, protect_missing_dot_codex)
+                    .into_iter()
+                    .filter(|path| !has_explicit_path_entry(path))
+                    .collect();
             read_only_subpaths.extend(
                 unreadable_roots
                     .iter()
@@ -288,6 +307,23 @@ impl FileSystemSandboxPolicy {
                 .filter_map(|entry| resolve_file_system_path(&entry.path, cwd_absolute.as_ref()))
                 .collect(),
         )
+    }
+
+    /// Returns explicit unreadable glob patterns for runtime-specific
+    /// enforcement that must expand them into concrete paths.
+    pub fn get_unreadable_globs_with_cwd(&self, _cwd: &Path) -> Vec<String> {
+        if !matches!(self.kind, FileSystemSandboxKind::Restricted) {
+            return Vec::new();
+        }
+
+        self.entries
+            .iter()
+            .filter(|entry| entry.access == FileSystemAccessMode::None)
+            .filter_map(|entry| match &entry.path {
+                FileSystemPath::GlobPattern { pattern } => Some(pattern.clone()),
+                FileSystemPath::Path { .. } | FileSystemPath::Special { .. } => None,
+            })
+            .collect()
     }
 
     pub fn to_legacy_sandbox_policy(
@@ -336,6 +372,7 @@ impl FileSystemSandboxPolicy {
                                 readable_roots.push(path.clone());
                             }
                         }
+                        FileSystemPath::GlobPattern { .. } => {}
                         FileSystemPath::Special { value } => match value {
                             FileSystemSpecialPath::Root => match entry.access {
                                 FileSystemAccessMode::None => {}
@@ -577,6 +614,7 @@ fn resolve_file_system_path(
 ) -> Option<AbsolutePathBuf> {
     match path {
         FileSystemPath::Path { path } => Some(path.clone()),
+        FileSystemPath::GlobPattern { .. } => None,
         FileSystemPath::Special { value } => resolve_file_system_special_path(value, cwd),
     }
 }
@@ -643,6 +681,7 @@ fn dedup_absolute_paths(paths: Vec<AbsolutePathBuf>) -> Vec<AbsolutePathBuf> {
 
 fn default_read_only_subpaths_for_writable_root(
     writable_root: &AbsolutePathBuf,
+    protect_missing_dot_codex: bool,
 ) -> Vec<AbsolutePathBuf> {
     let mut subpaths: Vec<AbsolutePathBuf> = Vec::new();
     #[allow(clippy::expect_used)]
@@ -669,7 +708,8 @@ fn default_read_only_subpaths_for_writable_root(
     for subdir in &[".agents", ".codex"] {
         #[allow(clippy::expect_used)]
         let top_level_codex = writable_root.join(subdir).expect("valid relative path");
-        if top_level_codex.as_path().is_dir() {
+        if top_level_codex.as_path().is_dir() || (protect_missing_dot_codex && *subdir == ".codex")
+        {
             subpaths.push(top_level_codex);
         }
     }

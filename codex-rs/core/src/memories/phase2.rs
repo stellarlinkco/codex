@@ -12,6 +12,8 @@ use crate::memories::storage::rollout_summary_file_stem;
 use crate::memories::storage::sync_rollout_summaries_from_memories;
 use codex_config::Constrained;
 use codex_protocol::ThreadId;
+use codex_protocol::permissions::FileSystemSandboxPolicy;
+use codex_protocol::permissions::NetworkSandboxPolicy;
 use codex_protocol::protocol::AskForApproval;
 use codex_protocol::protocol::SandboxPolicy;
 use codex_protocol::protocol::SessionSource;
@@ -266,7 +268,7 @@ mod agent {
         let root = memory_root(&config.codex_home);
         let mut agent_config = config.as_ref().clone();
 
-        agent_config.cwd = root;
+        agent_config.cwd = root.clone();
         // Approval policy
         agent_config.permissions.approval_policy = Constrained::allow_only(AskForApproval::Never);
         // Consolidation runs as an internal sub-agent and must not recursively delegate.
@@ -274,26 +276,33 @@ mod agent {
 
         // Sandbox policy
         let mut writable_roots = Vec::new();
-        match AbsolutePathBuf::from_absolute_path(agent_config.codex_home.clone()) {
-            Ok(codex_home) => writable_roots.push(codex_home),
+        match AbsolutePathBuf::from_absolute_path(root) {
+            Ok(memory_root) => writable_roots.push(memory_root),
             Err(err) => warn!(
-                "memory phase-2 consolidation could not add codex_home writable root {}: {err}",
-                agent_config.codex_home.display()
+                "memory phase-2 consolidation could not add memory_root writable root {}: {err}",
+                agent_config.cwd.display()
             ),
         }
-        // The consolidation agent only needs local codex_home write access and no network.
+        // The consolidation agent only needs local memory-root write access and no network.
         let consolidation_sandbox_policy = SandboxPolicy::WorkspaceWrite {
             writable_roots,
             read_only_access: Default::default(),
             network_access: false,
-            exclude_tmpdir_env_var: false,
-            exclude_slash_tmp: false,
+            exclude_tmpdir_env_var: true,
+            exclude_slash_tmp: true,
         };
+        let consolidation_file_system_sandbox_policy =
+            FileSystemSandboxPolicy::from(&consolidation_sandbox_policy);
+        let consolidation_network_sandbox_policy =
+            NetworkSandboxPolicy::from(&consolidation_sandbox_policy);
         agent_config
             .permissions
             .sandbox_policy
             .set(consolidation_sandbox_policy)
             .ok()?;
+        agent_config.permissions.file_system_sandbox_policy =
+            consolidation_file_system_sandbox_policy;
+        agent_config.permissions.network_sandbox_policy = consolidation_network_sandbox_policy;
 
         agent_config.model = Some(
             config

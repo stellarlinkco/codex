@@ -39,10 +39,12 @@ use supports_color::Stream;
 mod app_cmd;
 #[cfg(target_os = "macos")]
 mod desktop_app;
+mod marketplace_cmd;
 mod mcp_cmd;
 #[cfg(not(windows))]
 mod wsl_paths;
 
+use crate::marketplace_cmd::MarketplaceCli;
 use crate::mcp_cmd::McpCli;
 
 use codex_core::config::Config;
@@ -103,6 +105,9 @@ enum Subcommand {
 
     /// Manage external MCP servers for Codex.
     Mcp(McpCli),
+
+    /// Manage plugins and plugin marketplaces.
+    Plugin(PluginCli),
 
     /// Start Codex as an MCP server (stdio).
     McpServer,
@@ -236,6 +241,20 @@ struct ForkCommand {
 struct SandboxArgs {
     #[command(subcommand)]
     cmd: SandboxCommand,
+}
+
+#[derive(Debug, Parser)]
+struct PluginCli {
+    #[clap(flatten)]
+    config_overrides: CliConfigOverrides,
+
+    #[command(subcommand)]
+    subcommand: PluginSubcommand,
+}
+
+#[derive(Debug, clap::Subcommand)]
+enum PluginSubcommand {
+    Marketplace(MarketplaceCli),
 }
 
 #[derive(Debug, clap::Subcommand)]
@@ -613,6 +632,17 @@ async fn cli_main(arg0_paths: Arg0DispatchPaths) -> anyhow::Result<()> {
             // Propagate any root-level config overrides (e.g. `-c key=value`).
             prepend_config_flags(&mut mcp_cli.config_overrides, root_config_overrides.clone());
             mcp_cli.run().await?;
+        }
+        Some(Subcommand::Plugin(mut plugin_cli)) => {
+            prepend_config_flags(
+                &mut plugin_cli.config_overrides,
+                root_config_overrides.clone(),
+            );
+            match plugin_cli.subcommand {
+                PluginSubcommand::Marketplace(marketplace_cli) => {
+                    marketplace_cli.run(&plugin_cli.config_overrides).await?;
+                }
+            }
         }
         Some(Subcommand::AppServer(app_server_cli)) => match app_server_cli.subcommand {
             None => {

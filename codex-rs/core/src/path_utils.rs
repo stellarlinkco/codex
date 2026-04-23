@@ -12,6 +12,19 @@ pub fn normalize_for_path_comparison(path: impl AsRef<Path>) -> std::io::Result<
     Ok(normalize_for_wsl(canonical))
 }
 
+/// Compare paths after applying Codex's filesystem normalization.
+///
+/// If either path cannot be normalized, this falls back to direct path equality.
+pub fn paths_match_after_normalization(left: impl AsRef<Path>, right: impl AsRef<Path>) -> bool {
+    if let (Ok(left), Ok(right)) = (
+        normalize_for_path_comparison(left.as_ref()),
+        normalize_for_path_comparison(right.as_ref()),
+    ) {
+        return left == right;
+    }
+    left.as_ref() == right.as_ref()
+}
+
 pub fn normalize_for_native_workdir(path: impl AsRef<Path>) -> PathBuf {
     normalize_for_native_workdir_with_flag(path.as_ref().to_path_buf(), cfg!(windows))
 }
@@ -276,6 +289,41 @@ mod tests {
             let normalized = normalize_for_native_workdir_with_flag(path.clone(), false);
 
             assert_eq!(normalized, path);
+        }
+    }
+
+    mod path_comparison {
+        use super::super::paths_match_after_normalization;
+        use std::path::PathBuf;
+
+        #[test]
+        fn matches_identical_existing_paths() -> std::io::Result<()> {
+            let dir = tempfile::tempdir()?;
+
+            assert!(paths_match_after_normalization(dir.path(), dir.path()));
+            Ok(())
+        }
+
+        #[test]
+        fn falls_back_to_raw_equality_when_paths_cannot_be_normalized() {
+            assert!(paths_match_after_normalization(
+                PathBuf::from("missing"),
+                PathBuf::from("missing"),
+            ));
+            assert!(!paths_match_after_normalization(
+                PathBuf::from("missing-a"),
+                PathBuf::from("missing-b"),
+            ));
+        }
+
+        #[cfg(target_os = "windows")]
+        #[test]
+        fn matches_windows_verbatim_paths() -> std::io::Result<()> {
+            let dir = tempfile::tempdir()?;
+            let verbatim_dir = PathBuf::from(format!(r"\\?\{}", dir.path().display()));
+
+            assert!(paths_match_after_normalization(verbatim_dir, dir.path()));
+            Ok(())
         }
     }
 }

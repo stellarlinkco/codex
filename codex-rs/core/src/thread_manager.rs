@@ -150,6 +150,7 @@ impl ThreadManager {
         session_source: SessionSource,
         model_catalog: Option<ModelsResponse>,
         collaboration_modes_config: CollaborationModesConfig,
+        model_provider: ModelProviderInfo,
     ) -> Self {
         let (thread_created_tx, _) = broadcast::channel(THREAD_CREATED_CHANNEL_CAPACITY);
         let plugins_manager = Arc::new(PluginsManager::new(codex_home.clone()));
@@ -168,6 +169,7 @@ impl ThreadManager {
                     auth_manager.clone(),
                     model_catalog,
                     collaboration_modes_config,
+                    model_provider,
                 )),
                 skills_manager,
                 plugins_manager,
@@ -325,6 +327,7 @@ impl ThreadManager {
     ) -> CodexResult<NewThread> {
         Box::pin(self.start_thread_with_tools_and_service_name(
             config,
+            InitialHistory::New,
             dynamic_tools,
             persist_extended_history,
             None,
@@ -335,13 +338,14 @@ impl ThreadManager {
     pub async fn start_thread_with_tools_and_service_name(
         &self,
         config: Config,
+        initial_history: InitialHistory,
         dynamic_tools: Vec<codex_protocol::dynamic_tools::DynamicToolSpec>,
         persist_extended_history: bool,
         metrics_service_name: Option<String>,
     ) -> CodexResult<NewThread> {
         Box::pin(self.state.spawn_thread(
             config,
-            InitialHistory::New,
+            initial_history,
             Arc::clone(&self.state.auth_manager),
             self.agent_control(),
             dynamic_tools,

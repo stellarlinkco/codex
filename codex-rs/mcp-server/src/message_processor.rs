@@ -68,6 +68,7 @@ impl MessageProcessor {
                     .features
                     .enabled(codex_core::features::Feature::DefaultModeRequestUserInput),
             },
+            config.model_provider.clone(),
         ));
         Self {
             outgoing,

@@ -428,6 +428,8 @@ mod phase2 {
     use chrono::Utc;
     use codex_config::Constrained;
     use codex_protocol::ThreadId;
+    use codex_protocol::permissions::FileSystemSandboxPolicy;
+    use codex_protocol::permissions::NetworkSandboxPolicy;
     use codex_protocol::protocol::AskForApproval;
     use codex_protocol::protocol::Op;
     use codex_protocol::protocol::SandboxPolicy;
@@ -435,6 +437,7 @@ mod phase2 {
     use codex_state::Phase2JobClaimOutcome;
     use codex_state::Stage1Output;
     use codex_state::ThreadMetadataBuilder;
+    use codex_utils_absolute_path::AbsolutePathBuf;
     use std::path::PathBuf;
     use std::sync::Arc;
     use tempfile::TempDir;
@@ -469,6 +472,8 @@ mod phase2 {
             let mut config = test_config();
             config.codex_home = codex_home.path().to_path_buf();
             config.cwd = config.codex_home.clone();
+            config.permissions.file_system_sandbox_policy = FileSystemSandboxPolicy::unrestricted();
+            config.permissions.network_sandbox_policy = NetworkSandboxPolicy::Enabled;
             let config = Arc::new(config);
 
             let state_db = codex_state::StateRuntime::init(
@@ -669,17 +674,58 @@ mod phase2 {
         let config_snapshot = subagent.config_snapshot().await;
         pretty_assertions::assert_eq!(config_snapshot.approval_policy, AskForApproval::Never);
         pretty_assertions::assert_eq!(config_snapshot.cwd, memory_root(&harness.config.codex_home));
-        match config_snapshot.sandbox_policy {
-            SandboxPolicy::WorkspaceWrite { writable_roots, .. } => {
-                assert!(
-                    writable_roots
-                        .iter()
-                        .any(|root| root.as_path() == harness.config.codex_home.as_path()),
-                    "consolidation subagent should have codex_home as writable root"
+        match &config_snapshot.sandbox_policy {
+            SandboxPolicy::WorkspaceWrite {
+                writable_roots,
+                network_access,
+                ..
+            } => {
+                assert!(!*network_access);
+                assert_eq!(
+                    writable_roots.as_slice(),
+                    [
+                        AbsolutePathBuf::from_absolute_path(memory_root(
+                            &harness.config.codex_home
+                        ))
+                        .expect("memory root should be absolute")
+                    ],
+                    "consolidation subagent should only be able to write the memory root"
                 );
             }
             other => panic!("unexpected sandbox policy: {other:?}"),
         }
+        let turn_context = subagent.codex.session.new_default_turn().await;
+        assert_eq!(
+            turn_context.file_system_sandbox_policy,
+            FileSystemSandboxPolicy::from(&config_snapshot.sandbox_policy),
+            "consolidation subagent split filesystem policy should match the memory-root sandbox"
+        );
+        let writable_roots = turn_context
+            .file_system_sandbox_policy
+            .get_writable_roots_with_cwd(config_snapshot.cwd.as_path());
+        let config_snapshot_cwd = AbsolutePathBuf::from_absolute_path(&config_snapshot.cwd)
+            .expect("config snapshot cwd should be absolute");
+        assert!(
+            writable_roots
+                .iter()
+                .any(|root| root.root == config_snapshot_cwd),
+            "consolidation subagent should be able to write the memory root"
+        );
+        assert!(
+            !writable_roots.iter().any(|root| {
+                harness
+                    .config
+                    .codex_home
+                    .join("config.toml")
+                    .starts_with(root.root.as_path())
+            }),
+            "consolidation subagent should not inherit codex_home write access"
+        );
+        assert_eq!(
+            turn_context.network_sandbox_policy,
+            NetworkSandboxPolicy::Restricted,
+            "consolidation subagent split network policy should preserve no-network sandboxing"
+        );
 
         harness.shutdown_threads().await;
     }

@@ -18,6 +18,7 @@ async fn offline_model_info_without_tool_output_override() {
         auth_manager,
         None,
         CollaborationModesConfig::default(),
+        codex_core::ModelProviderInfo::create_openai_provider(),
     );
 
     let model_info = manager.get_model_info("gpt-5.1", &config).await;
@@ -41,6 +42,7 @@ async fn offline_model_info_with_tool_output_override() {
         auth_manager,
         None,
         CollaborationModesConfig::default(),
+        codex_core::ModelProviderInfo::create_openai_provider(),
     );
 
     let model_info = manager.get_model_info("gpt-5.1-codex", &config).await;
@@ -49,4 +51,26 @@ async fn offline_model_info_with_tool_output_override() {
         model_info.truncation_policy,
         TruncationPolicyConfig::tokens(123)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn offline_model_info_clamps_context_window_override_to_max_context_window() {
+    let codex_home = TempDir::new().expect("create temp dir");
+    let mut config = load_default_config_for_test(&codex_home).await;
+    config.model_context_window = Some(400_000);
+    let auth_manager = codex_core::test_support::auth_manager_from_auth(
+        CodexAuth::create_dummy_chatgpt_auth_for_testing(),
+    );
+    let manager = ModelsManager::new(
+        config.codex_home.clone(),
+        auth_manager,
+        None,
+        CollaborationModesConfig::default(),
+        codex_core::ModelProviderInfo::create_openai_provider(),
+    );
+
+    let model_info = manager.get_model_info("gpt-5.1", &config).await;
+
+    assert_eq!(model_info.max_context_window, Some(272_000));
+    assert_eq!(model_info.context_window, Some(272_000));
 }

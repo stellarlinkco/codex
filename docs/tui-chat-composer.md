@@ -65,6 +65,14 @@ Up/Down recall is handled by `ChatComposerHistory` and merges two sources:
 This distinction keeps the on-disk history backward compatible and avoids persisting attachments,
 while still providing a richer recall experience for in-session edits.
 
+### Reverse history search (Ctrl+R)
+
+Ctrl+R enters an incremental reverse search mode without immediately previewing the latest history entry. While search is active, the footer line becomes the editable query field and the composer body is only a preview of the currently matched entry. `Enter` accepts the preview as a normal editable draft, and `Esc` or Ctrl+C restores the exact draft that existed before search started.
+
+The composer owns the search session because it controls draft snapshots, footer rendering, cursor placement, and preview highlighting. `ChatComposerHistory` owns traversal: it scans persistent and local entries in one offset space, skips duplicate prompt text within a search session, keeps boundary hits on the current match, and resumes scans after asynchronous persistent history responses.
+
+The search query and composer text intentionally remain separate. A no-match result restores the original draft while leaving the footer query open for more typing, and accepting a match clears the search session so highlight styling disappears from the now-editable composer text.
+
 ## Config gating for reuse
 
 `ChatComposer` now supports feature gating via `ChatComposerConfig`
@@ -189,6 +197,18 @@ large-paste placeholders are expanded into their full text before being recorded
 - Recalled entries place the cursor at end-of-line to match typical shell history editing.
 - Large-paste placeholders are not expected in recalled submitted history; the text is the
   expanded paste content.
+
+### Slash command recall
+
+Recognized slash commands now stage a pending local-history entry before clearing the composer.
+`ChatWidget` commits that staged entry after command dispatch, so command-heavy workflows can use
+Up-arrow recall just like normal submitted prompts.
+
+- Bare commands (`/diff`) are recallable after dispatch.
+- Popup-selected commands use canonical command text (for example selecting `/diff` from `/di`
+  recalls `/diff`).
+- Inline-arg commands (`/plan investigate`) recall the original invocation text.
+- Unrecognized slash commands are restored as draft text and are not added to local recall.
 
 ### Backtrack prefill
 

@@ -13,6 +13,7 @@ use crate::features::Feature;
 use crate::function_tool::FunctionCallError;
 use crate::protocol::EventMsg;
 use crate::protocol::ViewImageToolCallEvent;
+use crate::provider_runtime::default_output_image_detail;
 use crate::tools::context::ToolInvocation;
 use crate::tools::context::ToolOutput;
 use crate::tools::context::ToolPayload;
@@ -84,14 +85,17 @@ impl ToolHandler for ViewImageHandler {
         }
         let event_path = abs_path.clone();
 
-        let use_original_detail = turn.config.features.enabled(Feature::ImageDetailOriginal)
-            && turn.model_info.supports_image_detail_original;
+        let image_detail = default_output_image_detail(
+            &turn.provider,
+            turn.config.features.enabled(Feature::ImageDetailOriginal),
+            turn.model_info.supports_image_detail_original,
+        );
+        let use_original_detail = image_detail == Some(ImageDetail::Original);
         let image_mode = if use_original_detail {
             PromptImageMode::Original
         } else {
             PromptImageMode::ResizeToFit
         };
-        let image_detail = use_original_detail.then_some(ImageDetail::Original);
 
         let content = local_image_content_items_with_label_number(&abs_path, None, image_mode)
             .into_iter()

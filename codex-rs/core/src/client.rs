@@ -541,7 +541,7 @@ impl ModelClientSession {
             tool_choice: "auto".to_string(),
             parallel_tool_calls: prompt.parallel_tool_calls,
             reasoning,
-            store: provider.is_azure_responses_endpoint(),
+            store: provider.stores_responses_by_default(),
             stream: true,
             include,
             service_tier: match service_tier {
@@ -734,7 +734,10 @@ impl ModelClientSession {
     fn responses_request_compression(&self, auth: Option<&crate::auth::CodexAuth>) -> Compression {
         if self.client.state.enable_request_compression
             && auth.is_some_and(CodexAuth::is_chatgpt_auth)
-            && self.client.state.provider.is_openai()
+            && codex_api::supports_chatgpt_request_compression(
+                &self.client.state.provider.name,
+                self.client.state.provider.base_url.as_deref(),
+            )
         {
             Compression::Zstd
         } else {
@@ -1268,7 +1271,9 @@ impl WebsocketTelemetry for ApiTelemetry {
 
 #[cfg(test)]
 mod tests {
+    use super::Compression;
     use super::ModelClient;
+    use crate::auth::CodexAuth;
     use codex_otel::SessionTelemetry;
     use codex_protocol::ThreadId;
     use codex_protocol::openai_models::ModelInfo;
@@ -1278,10 +1283,21 @@ mod tests {
     use serde_json::json;
 
     fn test_model_client(session_source: SessionSource) -> ModelClient {
-        let provider = crate::model_provider_info::create_oss_provider_with_base_url(
-            "https://example.com/v1",
-            crate::model_provider_info::WireApi::Responses,
-        );
+        test_model_client_with_provider(
+            session_source,
+            crate::model_provider_info::create_oss_provider_with_base_url(
+                "https://example.com/v1",
+                crate::model_provider_info::WireApi::Responses,
+            ),
+            false,
+        )
+    }
+
+    fn test_model_client_with_provider(
+        session_source: SessionSource,
+        provider: crate::model_provider_info::ModelProviderInfo,
+        enable_request_compression: bool,
+    ) -> ModelClient {
         ModelClient::new(
             None,
             ThreadId::new(),
@@ -1289,7 +1305,7 @@ mod tests {
             session_source,
             None,
             false,
-            false,
+            enable_request_compression,
             false,
             None,
         )
@@ -1363,5 +1379,49 @@ mod tests {
             .await
             .expect("empty summarize request should succeed");
         assert_eq!(output.len(), 0);
+    }
+
+    #[test]
+    fn responses_request_compression_requires_openai_chatgpt_and_feature_flag() {
+        let openai_client = test_model_client_with_provider(
+            SessionSource::Cli,
+            crate::model_provider_info::ModelProviderInfo::create_openai_provider(),
+            true,
+        );
+        let openai_session = openai_client.new_session();
+        let chatgpt_auth = CodexAuth::create_dummy_chatgpt_auth_for_testing();
+        assert_eq!(
+            openai_session.responses_request_compression(Some(&chatgpt_auth)),
+            Compression::Zstd
+        );
+        assert_eq!(
+            openai_session.responses_request_compression(Some(&CodexAuth::from_api_key("test"))),
+            Compression::None
+        );
+
+        let openai_without_feature = test_model_client_with_provider(
+            SessionSource::Cli,
+            crate::model_provider_info::ModelProviderInfo::create_openai_provider(),
+            false,
+        );
+        let openai_without_feature_session = openai_without_feature.new_session();
+        assert_eq!(
+            openai_without_feature_session.responses_request_compression(Some(&chatgpt_auth)),
+            Compression::None
+        );
+
+        let custom_provider_client = test_model_client_with_provider(
+            SessionSource::Cli,
+            crate::model_provider_info::create_oss_provider_with_base_url(
+                "https://api.openai.com/v1",
+                crate::model_provider_info::WireApi::Responses,
+            ),
+            true,
+        );
+        let custom_provider_session = custom_provider_client.new_session();
+        assert_eq!(
+            custom_provider_session.responses_request_compression(Some(&chatgpt_auth)),
+            Compression::None
+        );
     }
 }

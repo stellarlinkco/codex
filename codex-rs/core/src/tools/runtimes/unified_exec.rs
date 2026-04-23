@@ -15,6 +15,7 @@ use crate::shell::ShellType;
 use crate::tools::network_approval::NetworkApprovalMode;
 use crate::tools::network_approval::NetworkApprovalSpec;
 use crate::tools::runtimes::build_command_spec;
+use crate::tools::runtimes::maybe_wait_for_shell_snapshot;
 use crate::tools::runtimes::maybe_wrap_shell_lc_with_snapshot;
 use crate::tools::runtimes::shell::zsh_fork_backend;
 use crate::tools::sandboxing::Approvable;
@@ -171,6 +172,9 @@ impl<'a> ToolRuntime<UnifiedExecRequest, UnifiedExecProcess> for UnifiedExecRunt
     ) -> Result<UnifiedExecProcess, ToolError> {
         let base_command = &req.command;
         let session_shell = ctx.session.user_shell();
+        if ctx.session.features().enabled(Feature::ShellSnapshot) {
+            maybe_wait_for_shell_snapshot(base_command, session_shell.as_ref()).await;
+        }
         let command = maybe_wrap_shell_lc_with_snapshot(
             base_command,
             session_shell.as_ref(),

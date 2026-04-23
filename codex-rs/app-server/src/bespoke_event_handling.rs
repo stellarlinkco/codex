@@ -736,6 +736,7 @@ pub(crate) async fn apply_bespoke_event_handling(
             if matches!(api_version, ApiVersion::V2) {
                 let call_id = request.call_id;
                 let turn_id = request.turn_id;
+                let namespace = request.namespace;
                 let tool = request.tool;
                 let arguments = request.arguments;
                 let item = ThreadItem::DynamicToolCall {
@@ -759,6 +760,7 @@ pub(crate) async fn apply_bespoke_event_handling(
                     thread_id: conversation_id.to_string(),
                     turn_id: turn_id.clone(),
                     call_id: call_id.clone(),
+                    namespace,
                     tool: tool.clone(),
                     arguments: arguments.clone(),
                 };

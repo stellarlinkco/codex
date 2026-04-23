@@ -1006,6 +1006,7 @@ mod tests {
             SessionSource::Cli,
             config.model_catalog.clone(),
             CollaborationModesConfig::default(),
+            config.model_provider.clone(),
         ));
         let (events_tx, _) = broadcast::channel(64);
         let kanban = crate::kanban::load_or_default(&config.codex_home).await;
@@ -1159,6 +1160,7 @@ mod tests {
             SessionSource::Cli,
             config.model_catalog.clone(),
             CollaborationModesConfig::default(),
+            config.model_provider.clone(),
         ));
         let (events_tx, _) = broadcast::channel(64);
         let kanban = crate::kanban::load_or_default(&config.codex_home).await;
@@ -1276,6 +1278,7 @@ mod tests {
             SessionSource::Cli,
             config.model_catalog.clone(),
             CollaborationModesConfig::default(),
+            config.model_provider.clone(),
         ));
         let (events_tx, _) = broadcast::channel(64);
         let kanban = crate::kanban::load_or_default(&config.codex_home).await;
@@ -1395,6 +1398,7 @@ mod tests {
             SessionSource::Cli,
             config.model_catalog.clone(),
             CollaborationModesConfig::default(),
+            config.model_provider.clone(),
         ));
         let (events_tx, _) = broadcast::channel(64);
         let kanban = crate::kanban::load_or_default(&config.codex_home).await;
@@ -1505,6 +1509,7 @@ mod tests {
             SessionSource::Cli,
             config.model_catalog.clone(),
             CollaborationModesConfig::default(),
+            config.model_provider.clone(),
         ));
         let (events_tx, _) = broadcast::channel(64);
         let kanban = crate::kanban::load_or_default(&config.codex_home).await;
@@ -2050,6 +2055,7 @@ mod tests {
             SessionSource::Cli,
             config.model_catalog.clone(),
             CollaborationModesConfig::default(),
+            config.model_provider.clone(),
         ));
         let (events_tx, _) = broadcast::channel(64);
         let kanban = crate::kanban::load_or_default(&config.codex_home).await;
@@ -2242,6 +2248,7 @@ pub async fn run(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> anyhow::
                 .features
                 .enabled(codex_core::features::Feature::DefaultModeRequestUserInput),
         },
+        config.model_provider.clone(),
     ));
 
     let static_dir = if cli.dev {
@@ -5817,7 +5824,7 @@ async fn build_session_json(session: &ActiveSession) -> Session {
 
 fn extract_reasoning_effort_from_history(history: &InitialHistory) -> Option<ReasoningEffort> {
     let items = match history {
-        InitialHistory::New => return None,
+        InitialHistory::New | InitialHistory::Cleared => return None,
         InitialHistory::Resumed(resumed) => &resumed.history,
         InitialHistory::Forked(items) => items,
     };
