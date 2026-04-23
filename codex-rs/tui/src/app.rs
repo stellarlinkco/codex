@@ -17,6 +17,8 @@ use crate::chatwidget::ThreadInputState;
 use crate::cwd_prompt::CwdPromptAction;
 use crate::diff_render::DiffSummary;
 use crate::exec_command::strip_bash_lc_and_escape;
+use crate::external_agent_config_migration_startup::ExternalAgentConfigMigrationStartupOutcome;
+use crate::external_agent_config_migration_startup::handle_external_agent_config_migration_prompt_if_needed;
 use crate::external_editor;
 use crate::file_search::FileSearchManager;
 use crate::history_cell;
@@ -1767,6 +1769,29 @@ impl App {
         if let Some(updated_model) = config.model.clone() {
             model = updated_model;
         }
+        let external_config_migration_success =
+            match handle_external_agent_config_migration_prompt_if_needed(
+                tui,
+                &mut config,
+                &cli_kv_overrides,
+                &harness_overrides,
+                &session_selection,
+            )
+            .await?
+            {
+                ExternalAgentConfigMigrationStartupOutcome::Continue { success_message } => {
+                    success_message
+                }
+                ExternalAgentConfigMigrationStartupOutcome::ExitRequested => {
+                    return Ok(AppExitInfo {
+                        token_usage: TokenUsage::default(),
+                        thread_id: None,
+                        thread_name: None,
+                        update_action: None,
+                        exit_reason: ExitReason::UserRequested,
+                    });
+                }
+            };
         let auth = auth_manager.auth().await;
         let auth_ref = auth.as_ref();
         // Determine who should see internal Slack routing. We treat
@@ -1954,6 +1979,25 @@ impl App {
             primary_session_configured: None,
             pending_primary_events: VecDeque::new(),
         };
+        if let Some(message) = external_config_migration_success {
+            let control = app
+                .handle_event(
+                    tui,
+                    AppEvent::InsertHistoryCell(Box::new(crate::history_cell::new_info_event(
+                        message, None,
+                    ))),
+                )
+                .await?;
+            if let AppRunControl::Exit(exit_reason) = control {
+                return Ok(AppExitInfo {
+                    token_usage: TokenUsage::default(),
+                    thread_id: None,
+                    thread_name: None,
+                    update_action: None,
+                    exit_reason,
+                });
+            }
+        }
 
         // On startup, if Agent mode (workspace-write) or ReadOnly is active, warn about world-writable dirs on Windows.
         #[cfg(target_os = "windows")]

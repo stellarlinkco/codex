@@ -14,6 +14,10 @@ call_id: string,
  */
 turn_id: string, 
 /**
+ * Optional dynamic tool namespace.
+ */
+namespace?: string | null, 
+/**
  * Dynamic tool name.
  */
 tool: string, 

@@ -1740,6 +1740,7 @@ mod tests {
                 codex_protocol::dynamic_tools::DynamicToolCallRequest {
                     call_id: "dyn-1".into(),
                     turn_id: "turn-1".into(),
+                    namespace: None,
                     tool: "lookup_ticket".into(),
                     arguments: serde_json::json!({"id":"ABC-123"}),
                 },
@@ -1747,6 +1748,7 @@ mod tests {
             EventMsg::DynamicToolCallResponse(DynamicToolCallResponseEvent {
                 call_id: "dyn-1".into(),
                 turn_id: "turn-1".into(),
+                namespace: None,
                 tool: "lookup_ticket".into(),
                 arguments: serde_json::json!({"id":"ABC-123"}),
                 content_items: vec![CoreDynamicToolCallOutputContentItem::InputText {

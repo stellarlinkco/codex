@@ -81,7 +81,7 @@ impl ToolEntry {
             .unwrap_or_default();
         let search_text = build_dynamic_tool_search_text(tool, &input_keys);
         Self {
-            name: tool.name.clone(),
+            name: tool.qualified_name(),
             server_name: "dynamic".to_string(),
             title: None,
             description: Some(tool.description.clone()),
@@ -297,7 +297,13 @@ fn build_search_text(name: &str, info: &ToolInfo, input_keys: &[String]) -> Stri
 }
 
 fn build_dynamic_tool_search_text(tool: &DynamicToolSpec, input_keys: &[String]) -> String {
-    let mut parts = vec![tool.name.clone()];
+    let mut parts = vec![tool.qualified_name(), tool.name.clone()];
+
+    if let Some(namespace) = tool.namespace.as_deref()
+        && !namespace.trim().is_empty()
+    {
+        parts.push(namespace.to_string());
+    }
 
     if !tool.description.trim().is_empty() {
         parts.push(tool.description.clone());
@@ -374,7 +380,16 @@ mod tests {
     }
 
     fn make_dynamic_tool(name: &str, defer_loading: bool) -> DynamicToolSpec {
+        make_dynamic_tool_with_namespace(None, name, defer_loading)
+    }
+
+    fn make_dynamic_tool_with_namespace(
+        namespace: Option<&str>,
+        name: &str,
+        defer_loading: bool,
+    ) -> DynamicToolSpec {
         DynamicToolSpec {
+            namespace: namespace.map(str::to_string),
             name: name.to_string(),
             description: format!("Dynamic tool {name}"),
             input_schema: json!({
@@ -487,6 +502,60 @@ mod tests {
         assert_eq!(
             session.get_dynamic_tool_selection().await,
             Some(vec!["deferred_weather_tool".to_string()])
+        );
+    }
+
+    #[tokio::test]
+    async fn search_tool_returns_namespaced_deferred_dynamic_tools_and_tracks_selection() {
+        let (session, turn, _rx) = make_session_and_context_with_dynamic_tools_and_rx(vec![
+            make_dynamic_tool("visible_dynamic_tool", false),
+            make_dynamic_tool_with_namespace(Some("calendar"), "deferred_weather_tool", true),
+        ])
+        .await;
+        let handler = SearchToolBm25Handler;
+        let tracker = Arc::new(Mutex::new(TurnDiffTracker::new()));
+
+        let output = handler
+            .handle(ToolInvocation {
+                session: Arc::clone(&session),
+                turn,
+                tracker,
+                call_id: "search-namespace-1".to_string(),
+                tool_name: SEARCH_TOOL_BM25_TOOL_NAME.to_string(),
+                payload: ToolPayload::Function {
+                    arguments: json!({
+                        "query": "calendar weather city",
+                        "limit": 2,
+                    })
+                    .to_string(),
+                },
+            })
+            .await
+            .expect("search tool should succeed");
+
+        let ToolOutput::Function {
+            body: FunctionCallOutputBody::Text(content),
+            ..
+        } = output
+        else {
+            panic!("expected text function output");
+        };
+        let payload: serde_json::Value =
+            serde_json::from_str(&content).expect("search payload should be json");
+
+        assert_eq!(payload["active_selected_mcp_tools"], json!([]));
+        assert_eq!(
+            payload["active_selected_dynamic_tools"],
+            json!(["calendar__deferred_weather_tool"])
+        );
+        assert_eq!(
+            payload["tools"][0]["name"],
+            json!("calendar__deferred_weather_tool")
+        );
+        assert_eq!(payload["tools"][0]["server"], json!("dynamic"));
+        assert_eq!(
+            session.get_dynamic_tool_selection().await,
+            Some(vec!["calendar__deferred_weather_tool".to_string()])
         );
     }
 }

@@ -395,15 +395,53 @@ pub struct ToolsV2 {
     pub view_image: Option<bool>,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
+#[derive(Serialize, Debug, Clone, PartialEq, JsonSchema, TS)]
 #[serde(rename_all = "camelCase")]
 #[ts(export_to = "v2/")]
 pub struct DynamicToolSpec {
+    #[ts(optional)]
+    pub namespace: Option<String>,
     pub name: String,
     pub description: String,
     pub input_schema: JsonValue,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub defer_loading: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DynamicToolSpecDe {
+    namespace: Option<String>,
+    name: String,
+    description: String,
+    input_schema: JsonValue,
+    defer_loading: Option<bool>,
+    expose_to_context: Option<bool>,
+}
+
+impl<'de> Deserialize<'de> for DynamicToolSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let DynamicToolSpecDe {
+            namespace,
+            name,
+            description,
+            input_schema,
+            defer_loading,
+            expose_to_context,
+        } = DynamicToolSpecDe::deserialize(deserializer)?;
+
+        Ok(Self {
+            namespace,
+            name,
+            description,
+            input_schema,
+            defer_loading: defer_loading
+                .unwrap_or_else(|| expose_to_context.map(|visible| !visible).unwrap_or(false)),
+        })
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -5008,6 +5046,8 @@ pub struct DynamicToolCallParams {
     pub thread_id: String,
     pub turn_id: String,
     pub call_id: String,
+    #[ts(optional = nullable)]
+    pub namespace: Option<String>,
     pub tool: String,
     pub arguments: JsonValue,
 }
@@ -6411,6 +6451,7 @@ mod tests {
     #[test]
     fn dynamic_tool_spec_round_trips_defer_loading() {
         let value = json!({
+            "namespace": "calendar",
             "name": "deferred-tool",
             "description": "only expose after selection",
             "inputSchema": {
@@ -6428,6 +6469,7 @@ mod tests {
         assert_eq!(
             spec,
             DynamicToolSpec {
+                namespace: Some("calendar".to_string()),
                 name: "deferred-tool".to_string(),
                 description: "only expose after selection".to_string(),
                 input_schema: json!({
@@ -6443,6 +6485,35 @@ mod tests {
 
         let serialized = serde_json::to_value(&spec).expect("spec should serialize");
         assert_eq!(serialized, value);
+    }
+
+    #[test]
+    fn dynamic_tool_spec_accepts_legacy_expose_to_context() {
+        let value = json!({
+            "name": "legacy-tool",
+            "description": "legacy visibility field",
+            "inputSchema": {
+                "type": "object",
+                "properties": {}
+            },
+            "exposeToContext": false
+        });
+
+        let spec: DynamicToolSpec = serde_json::from_value(value).expect("spec should deserialize");
+
+        assert_eq!(
+            spec,
+            DynamicToolSpec {
+                namespace: None,
+                name: "legacy-tool".to_string(),
+                description: "legacy visibility field".to_string(),
+                input_schema: json!({
+                    "type": "object",
+                    "properties": {}
+                }),
+                defer_loading: true,
+            }
+        );
     }
 
     #[test]

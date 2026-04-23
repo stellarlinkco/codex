@@ -241,6 +241,7 @@ use codex_protocol::config_types::ForcedLoginMethod;
 use codex_protocol::config_types::Personality;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::dynamic_tools::DynamicToolSpec as CoreDynamicToolSpec;
+use codex_protocol::dynamic_tools::dynamic_tool_qualified_name;
 use codex_protocol::items::TurnItem;
 use codex_protocol::models::ResponseItem;
 use codex_protocol::protocol::AgentStatus;
@@ -1911,6 +1912,7 @@ impl CodexMessageProcessor {
             dynamic_tools
                 .into_iter()
                 .map(|tool| CoreDynamicToolSpec {
+                    namespace: tool.namespace,
                     name: tool.name,
                     description: tool.description,
                     input_schema: tool.input_schema,
@@ -6756,6 +6758,19 @@ fn errors_to_info(
 fn validate_dynamic_tools(tools: &[ApiDynamicToolSpec]) -> Result<(), String> {
     let mut seen = HashSet::new();
     for tool in tools {
+        let namespace = tool.namespace.as_deref().map(str::trim);
+        if let Some(namespace) = namespace {
+            if namespace.is_empty() {
+                return Err("dynamic tool namespace must not be empty".to_string());
+            }
+            if Some(namespace) != tool.namespace.as_deref() {
+                return Err(format!(
+                    "dynamic tool namespace has leading/trailing whitespace: {}",
+                    tool.namespace.as_deref().unwrap_or_default()
+                ));
+            }
+        }
+
         let name = tool.name.trim();
         if name.is_empty() {
             return Err("dynamic tool name must not be empty".to_string());
@@ -6766,16 +6781,17 @@ fn validate_dynamic_tools(tools: &[ApiDynamicToolSpec]) -> Result<(), String> {
                 tool.name
             ));
         }
-        if name == "mcp" || name.starts_with("mcp__") {
-            return Err(format!("dynamic tool name is reserved: {name}"));
+        let qualified_name = dynamic_tool_qualified_name(namespace, name);
+        if qualified_name == "mcp" || qualified_name.starts_with("mcp__") {
+            return Err(format!("dynamic tool name is reserved: {qualified_name}"));
         }
-        if !seen.insert(name.to_string()) {
-            return Err(format!("duplicate dynamic tool name: {name}"));
+        if !seen.insert(qualified_name.clone()) {
+            return Err(format!("duplicate dynamic tool name: {qualified_name}"));
         }
 
         if let Err(err) = codex_core::parse_tool_input_schema(&tool.input_schema) {
             return Err(format!(
-                "dynamic tool input schema is not supported for {name}: {err}"
+                "dynamic tool input schema is not supported for {qualified_name}: {err}"
             ));
         }
     }
@@ -7369,6 +7385,7 @@ mod tests {
     #[test]
     fn validate_dynamic_tools_rejects_unsupported_input_schema() {
         let tools = vec![ApiDynamicToolSpec {
+            namespace: None,
             name: "my_tool".to_string(),
             description: "test".to_string(),
             input_schema: json!({"type": "null"}),
@@ -7381,6 +7398,7 @@ mod tests {
     #[test]
     fn validate_dynamic_tools_accepts_sanitizable_input_schema() {
         let tools = vec![ApiDynamicToolSpec {
+            namespace: None,
             name: "my_tool".to_string(),
             description: "test".to_string(),
             // Missing `type` is common; core sanitizes these to a supported schema.
@@ -7388,6 +7406,51 @@ mod tests {
             defer_loading: false,
         }];
         validate_dynamic_tools(&tools).expect("valid schema");
+    }
+
+    #[test]
+    fn validate_dynamic_tools_allows_same_name_in_distinct_namespaces() {
+        let tools = vec![
+            ApiDynamicToolSpec {
+                namespace: Some("calendar".to_string()),
+                name: "lookup".to_string(),
+                description: "calendar lookup".to_string(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                defer_loading: false,
+            },
+            ApiDynamicToolSpec {
+                namespace: Some("crm".to_string()),
+                name: "lookup".to_string(),
+                description: "crm lookup".to_string(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                defer_loading: false,
+            },
+        ];
+
+        validate_dynamic_tools(&tools).expect("namespaced duplicates should be allowed");
+    }
+
+    #[test]
+    fn validate_dynamic_tools_rejects_duplicate_qualified_names() {
+        let tools = vec![
+            ApiDynamicToolSpec {
+                namespace: Some("calendar".to_string()),
+                name: "lookup".to_string(),
+                description: "calendar lookup".to_string(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                defer_loading: false,
+            },
+            ApiDynamicToolSpec {
+                namespace: Some("calendar".to_string()),
+                name: "lookup".to_string(),
+                description: "calendar lookup again".to_string(),
+                input_schema: json!({"type": "object", "properties": {}}),
+                defer_loading: false,
+            },
+        ];
+
+        let err = validate_dynamic_tools(&tools).expect_err("duplicate qualified name");
+        assert!(err.contains("calendar__lookup"), "unexpected error: {err}");
     }
 
     #[test]

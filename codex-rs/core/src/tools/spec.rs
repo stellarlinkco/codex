@@ -2006,7 +2006,7 @@ fn dynamic_tool_to_openai_tool(
     let input_schema = parse_tool_input_schema(&tool.input_schema)?;
 
     Ok(ResponsesApiTool {
-        name: tool.name.clone(),
+        name: tool.qualified_name(),
         description: tool.description.clone(),
         strict: false,
         parameters: input_schema,
@@ -2025,7 +2025,8 @@ pub(crate) fn visible_dynamic_tools(
     dynamic_tools
         .iter()
         .filter(|tool| {
-            !tool.defer_loading || selected_dynamic_tool_names.contains(tool.name.as_str())
+            !tool.defer_loading
+                || selected_dynamic_tool_names.contains(tool.qualified_name().as_str())
         })
         .cloned()
         .collect()
@@ -2462,12 +2463,12 @@ pub(crate) fn build_specs_with_selection(
             match dynamic_tool_to_openai_tool(tool) {
                 Ok(converted_tool) => {
                     builder.push_spec(ToolSpec::Function(converted_tool));
-                    builder.register_handler(tool.name.clone(), dynamic_tool_handler.clone());
+                    builder.register_handler(tool.qualified_name(), dynamic_tool_handler.clone());
                 }
                 Err(e) => {
                     tracing::error!(
                         "Failed to convert dynamic tool {:?} to OpenAI tool: {e:?}",
-                        tool.name
+                        tool.qualified_name()
                     );
                 }
             }
@@ -2510,7 +2511,16 @@ mod tests {
     }
 
     fn dynamic_tool(name: &str, defer_loading: bool) -> DynamicToolSpec {
+        dynamic_tool_with_namespace(None, name, defer_loading)
+    }
+
+    fn dynamic_tool_with_namespace(
+        namespace: Option<&str>,
+        name: &str,
+        defer_loading: bool,
+    ) -> DynamicToolSpec {
         DynamicToolSpec {
+            namespace: namespace.map(str::to_string),
             name: name.to_string(),
             description: format!("Dynamic tool {name}"),
             input_schema: serde_json::json!({
@@ -3773,6 +3783,25 @@ mod tests {
             vec![
                 dynamic_tool("visible_dynamic_tool", false),
                 dynamic_tool("deferred_dynamic_tool", true),
+            ]
+        );
+    }
+
+    #[test]
+    fn test_visible_dynamic_tools_restores_selected_namespaced_deferred_tools() {
+        let visible_tools = visible_dynamic_tools(
+            &[
+                dynamic_tool("visible_dynamic_tool", false),
+                dynamic_tool_with_namespace(Some("calendar"), "deferred_dynamic_tool", true),
+            ],
+            &["calendar__deferred_dynamic_tool".to_string()],
+        );
+
+        assert_eq!(
+            visible_tools,
+            vec![
+                dynamic_tool("visible_dynamic_tool", false),
+                dynamic_tool_with_namespace(Some("calendar"), "deferred_dynamic_tool", true),
             ]
         );
     }

@@ -31,9 +31,9 @@ const SHORT_TIMEOUT_MS: u64 = 200;
 const SHORT_TIMEOUT_MS: u64 = 5_000;
 
 #[cfg(not(target_arch = "aarch64"))]
-const LONG_TIMEOUT_MS: u64 = 1_000;
+pub(super) const LONG_TIMEOUT_MS: u64 = 1_000;
 #[cfg(target_arch = "aarch64")]
-const LONG_TIMEOUT_MS: u64 = 5_000;
+pub(super) const LONG_TIMEOUT_MS: u64 = 5_000;
 
 #[cfg(not(target_arch = "aarch64"))]
 const NETWORK_TIMEOUT_MS: u64 = 2_000;
@@ -102,7 +102,7 @@ async fn run_cmd_result_with_writable_roots(
 }
 
 #[expect(clippy::expect_used)]
-async fn run_cmd_result_with_policies(
+pub(super) async fn run_cmd_result_with_policies(
     cmd: &[&str],
     sandbox_policy: SandboxPolicy,
     file_system_sandbox_policy: FileSystemSandboxPolicy,
@@ -150,7 +150,7 @@ fn is_bwrap_unavailable_output(output: &codex_core::exec::ExecToolCallOutput) ->
                 || output.stderr.text.contains("Invalid argument")))
 }
 
-async fn should_skip_bwrap_tests() -> bool {
+pub(super) async fn should_skip_bwrap_tests() -> bool {
     match run_cmd_result_with_writable_roots(
         &["bash", "-lc", "true"],
         &[],
@@ -171,7 +171,7 @@ async fn should_skip_bwrap_tests() -> bool {
     }
 }
 
-fn expect_denied(
+pub(super) fn expect_denied(
     result: Result<codex_core::exec::ExecToolCallOutput>,
     context: &str,
 ) -> codex_core::exec::ExecToolCallOutput {

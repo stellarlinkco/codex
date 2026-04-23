@@ -2968,6 +2968,7 @@ await codex.emitImage({ bytes: png, mimeType: "image/png", detail: "ultra" });
 
         let (session, turn, rx_event) =
             make_session_and_context_with_dynamic_tools_and_rx(vec![DynamicToolSpec {
+                namespace: None,
                 name: "inline_image".to_string(),
                 description: "Returns inline text and image content.".to_string(),
                 input_schema: serde_json::json!({

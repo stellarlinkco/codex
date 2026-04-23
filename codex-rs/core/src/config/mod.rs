@@ -1981,8 +1981,12 @@ impl Config {
             let profile = resolve_permission_profile(permissions, default_permissions)?;
             let configured_network_proxy_config =
                 network_proxy_config_from_profile_network(profile.network.as_ref());
-            let (mut file_system_sandbox_policy, network_sandbox_policy) =
-                compile_permission_profile(permissions, default_permissions)?;
+            let (
+                mut file_system_sandbox_policy,
+                network_sandbox_policy,
+                permission_startup_warnings,
+            ) = compile_permission_profile(permissions, default_permissions, &resolved_cwd)?;
+            startup_warnings.extend(permission_startup_warnings);
             let mut sandbox_policy = file_system_sandbox_policy
                 .to_legacy_sandbox_policy(network_sandbox_policy, &resolved_cwd)?;
             if matches!(sandbox_policy, SandboxPolicy::WorkspaceWrite { .. }) {
@@ -2994,6 +2998,7 @@ allowed_domains = ["openai.com"]
                     "default".to_string(),
                     PermissionProfileToml {
                         filesystem: Some(FilesystemPermissionsToml {
+                            glob_scan_max_depth: None,
                             entries: BTreeMap::from([(
                                 ":project_roots".to_string(),
                                 FilesystemPermissionToml::Access(
@@ -3039,6 +3044,7 @@ allowed_domains = ["openai.com"]
                     "default".to_string(),
                     PermissionProfileToml {
                         filesystem: Some(FilesystemPermissionsToml {
+                            glob_scan_max_depth: None,
                             entries: BTreeMap::from([(
                                 ":project_roots".to_string(),
                                 FilesystemPermissionToml::Access(

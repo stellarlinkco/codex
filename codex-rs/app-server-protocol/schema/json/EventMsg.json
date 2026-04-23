@@ -1975,6 +1975,13 @@
             "callId": {
               "type": "string"
             },
+            "namespace": {
+              "default": null,
+              "type": [
+                "string",
+                "null"
+              ]
+            },
             "tool": {
               "type": "string"
             },
@@ -2025,6 +2032,13 @@
             },
             "error": {
               "description": "Optional error text when the tool call failed before producing a response.",
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "namespace": {
+              "description": "Optional dynamic tool namespace.",
               "type": [
                 "string",
                 "null"
@@ -7845,6 +7859,13 @@
         "callId": {
           "type": "string"
         },
+        "namespace": {
+          "default": null,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
         "tool": {
           "type": "string"
         },
@@ -7895,6 +7916,13 @@
         },
         "error": {
           "description": "Optional error text when the tool call failed before producing a response.",
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "namespace": {
+          "description": "Optional dynamic tool namespace.",
           "type": [
             "string",
             "null"

@@ -96,6 +96,9 @@ pub enum FileSystemSandboxKind {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema, TS)]
 pub struct FileSystemSandboxPolicy {
     pub kind: FileSystemSandboxKind,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub glob_scan_max_depth: Option<usize>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub entries: Vec<FileSystemSandboxEntry>,
 }
@@ -105,6 +108,7 @@ pub struct FileSystemSandboxPolicy {
 #[ts(tag = "type")]
 pub enum FileSystemPath {
     Path { path: AbsolutePathBuf },
+    GlobPattern { pattern: String },
     Special { value: FileSystemSpecialPath },
 }
 
@@ -112,6 +116,7 @@ impl Default for FileSystemSandboxPolicy {
     fn default() -> Self {
         Self {
             kind: FileSystemSandboxKind::Restricted,
+            glob_scan_max_depth: None,
             entries: vec![FileSystemSandboxEntry {
                 path: FileSystemPath::Special {
                     value: FileSystemSpecialPath::Root,
@@ -145,6 +150,7 @@ impl FileSystemSandboxPolicy {
     pub fn unrestricted() -> Self {
         Self {
             kind: FileSystemSandboxKind::Unrestricted,
+            glob_scan_max_depth: None,
             entries: Vec::new(),
         }
     }
@@ -152,6 +158,7 @@ impl FileSystemSandboxPolicy {
     pub fn external_sandbox() -> Self {
         Self {
             kind: FileSystemSandboxKind::ExternalSandbox,
+            glob_scan_max_depth: None,
             entries: Vec::new(),
         }
     }
@@ -159,6 +166,7 @@ impl FileSystemSandboxPolicy {
     pub fn restricted(entries: Vec<FileSystemSandboxEntry>) -> Self {
         Self {
             kind: FileSystemSandboxKind::Restricted,
+            glob_scan_max_depth: None,
             entries,
         }
     }
@@ -301,6 +309,23 @@ impl FileSystemSandboxPolicy {
         )
     }
 
+    /// Returns explicit unreadable glob patterns for runtime-specific
+    /// enforcement that must expand them into concrete paths.
+    pub fn get_unreadable_globs_with_cwd(&self, _cwd: &Path) -> Vec<String> {
+        if !matches!(self.kind, FileSystemSandboxKind::Restricted) {
+            return Vec::new();
+        }
+
+        self.entries
+            .iter()
+            .filter(|entry| entry.access == FileSystemAccessMode::None)
+            .filter_map(|entry| match &entry.path {
+                FileSystemPath::GlobPattern { pattern } => Some(pattern.clone()),
+                FileSystemPath::Path { .. } | FileSystemPath::Special { .. } => None,
+            })
+            .collect()
+    }
+
     pub fn to_legacy_sandbox_policy(
         &self,
         network_policy: NetworkSandboxPolicy,
@@ -347,6 +372,7 @@ impl FileSystemSandboxPolicy {
                                 readable_roots.push(path.clone());
                             }
                         }
+                        FileSystemPath::GlobPattern { .. } => {}
                         FileSystemPath::Special { value } => match value {
                             FileSystemSpecialPath::Root => match entry.access {
                                 FileSystemAccessMode::None => {}
@@ -588,6 +614,7 @@ fn resolve_file_system_path(
 ) -> Option<AbsolutePathBuf> {
     match path {
         FileSystemPath::Path { path } => Some(path.clone()),
+        FileSystemPath::GlobPattern { .. } => None,
         FileSystemPath::Special { value } => resolve_file_system_special_path(value, cwd),
     }
 }

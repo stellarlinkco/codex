@@ -9,14 +9,20 @@
 //! The overall Linux sandbox is composed of:
 //! - seccomp + `PR_SET_NO_NEW_PRIVS` applied in-process, and
 //! - bubblewrap used to construct the filesystem view before exec.
+use std::collections::BTreeMap;
 use std::collections::BTreeSet;
 use std::collections::HashSet;
+use std::ffi::OsString;
 use std::fs;
 use std::fs::File;
+use std::io;
 use std::os::fd::AsRawFd;
+use std::os::unix::ffi::OsStringExt;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Command;
 
+use codex_core::error::CodexErr;
 use codex_core::error::Result;
 use codex_protocol::protocol::FileSystemSandboxPolicy;
 use codex_utils_absolute_path::AbsolutePathBuf;
@@ -36,6 +42,8 @@ const LINUX_PLATFORM_DEFAULT_READ_ROOTS: &[&str] = &[
     "/nix/store",
     "/run/current-system/sw",
 ];
+
+const MAX_UNREADABLE_GLOB_MATCHES: usize = 8192;
 
 /// Options that control how bubblewrap is invoked.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,7 +227,15 @@ fn create_filesystem_args(
         .into_iter()
         .filter(|writable_root| writable_root.root.as_path().exists())
         .collect::<Vec<_>>();
-    let unreadable_roots = file_system_sandbox_policy.get_unreadable_roots_with_cwd(cwd);
+    let unreadable_globs = file_system_sandbox_policy.get_unreadable_globs_with_cwd(cwd);
+    let mut unreadable_roots = file_system_sandbox_policy.get_unreadable_roots_with_cwd(cwd);
+    unreadable_roots.extend(expand_unreadable_globs_with_ripgrep(
+        &unreadable_globs,
+        cwd,
+        file_system_sandbox_policy.glob_scan_max_depth,
+    )?);
+    unreadable_roots.sort();
+    unreadable_roots.dedup();
 
     let mut args = if file_system_sandbox_policy.has_full_disk_read_access() {
         // Read-only root, then mount a minimal device tree.
@@ -412,6 +428,161 @@ fn create_filesystem_args(
         args,
         preserved_files,
     })
+}
+
+fn expand_unreadable_globs_with_ripgrep(
+    patterns: &[String],
+    cwd: &Path,
+    max_depth: Option<usize>,
+) -> Result<Vec<AbsolutePathBuf>> {
+    if patterns.is_empty() || max_depth == Some(0) {
+        return Ok(Vec::new());
+    }
+
+    let mut patterns_by_search_root: BTreeMap<AbsolutePathBuf, Vec<String>> = BTreeMap::new();
+    for pattern in patterns {
+        if let Some((search_root, glob)) = split_pattern_for_ripgrep(pattern, cwd)
+            && search_root.as_path().is_dir()
+        {
+            patterns_by_search_root
+                .entry(search_root)
+                .or_default()
+                .push(glob);
+        }
+    }
+
+    let mut expanded_paths = BTreeSet::new();
+    for (search_root, globs) in patterns_by_search_root {
+        for path in ripgrep_files(search_root.as_path(), &globs, max_depth)? {
+            if let Some(target) = canonical_target_if_symlinked_path(path.as_path()) {
+                expanded_paths.insert(AbsolutePathBuf::from_absolute_path_checked(target)?);
+            }
+            expanded_paths.insert(path);
+            if expanded_paths.len() > MAX_UNREADABLE_GLOB_MATCHES {
+                return Err(CodexErr::Fatal(format!(
+                    "unreadable glob expansion for {} matched more than {MAX_UNREADABLE_GLOB_MATCHES} paths",
+                    search_root.display()
+                )));
+            }
+        }
+    }
+
+    Ok(expanded_paths.into_iter().collect())
+}
+
+fn split_pattern_for_ripgrep(pattern: &str, cwd: &Path) -> Option<(AbsolutePathBuf, String)> {
+    let absolute_pattern = AbsolutePathBuf::resolve_path_against_base(pattern, cwd).ok()?;
+    let pattern = absolute_pattern.to_string_lossy();
+    let first_glob_index = pattern
+        .char_indices()
+        .find_map(|(index, ch)| matches!(ch, '*' | '?' | '[' | ']').then_some(index))?;
+    let static_prefix = &pattern[..first_glob_index];
+    if static_prefix.is_empty() || static_prefix == "/" {
+        return None;
+    }
+    let search_root_end = if static_prefix.ends_with('/') {
+        static_prefix.len() - 1
+    } else {
+        static_prefix.rfind('/').unwrap_or(0)
+    };
+    let search_root = if search_root_end == 0 {
+        PathBuf::from("/")
+    } else {
+        PathBuf::from(&pattern[..search_root_end])
+    };
+    let search_root = AbsolutePathBuf::from_absolute_path_checked(search_root).ok()?;
+    let glob = escape_unclosed_glob_classes(&pattern[search_root_end + 1..]);
+    (!glob.is_empty()).then_some((search_root, glob))
+}
+
+fn escape_unclosed_glob_classes(glob: &str) -> String {
+    let mut escaped = String::with_capacity(glob.len());
+    let mut chars = glob.chars();
+
+    while let Some(ch) = chars.next() {
+        if ch != '[' {
+            escaped.push(ch);
+            continue;
+        }
+
+        let mut class = String::new();
+        let mut closed = false;
+        for class_ch in chars.by_ref() {
+            if class_ch == ']' {
+                closed = true;
+                break;
+            }
+            class.push(class_ch);
+        }
+
+        if closed {
+            escaped.push('[');
+            escaped.push_str(&class);
+            escaped.push(']');
+        } else {
+            escaped.push_str(r"\[");
+            escaped.push_str(&class);
+        }
+    }
+
+    escaped
+}
+
+fn ripgrep_files(
+    search_root: &Path,
+    globs: &[String],
+    max_depth: Option<usize>,
+) -> Result<Vec<AbsolutePathBuf>> {
+    let mut command = Command::new("rg");
+    command
+        .arg("--files")
+        .arg("--hidden")
+        .arg("--no-ignore")
+        .arg("--null");
+    if let Some(max_depth) = max_depth {
+        command.arg("--max-depth").arg(max_depth.to_string());
+    }
+    for glob in globs {
+        command.arg("--glob").arg(glob);
+    }
+    command.arg("--").arg(search_root);
+
+    let output = match command.output() {
+        Ok(output) => output,
+        Err(err) if err.kind() == io::ErrorKind::NotFound => {
+            return Err(CodexErr::Fatal(format!(
+                "ripgrep is required for unreadable glob expansion on Linux: {err}"
+            )));
+        }
+        Err(err) => return Err(err.into()),
+    };
+    if !output.status.success() {
+        if output.status.code() == Some(1) && output.stderr.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(CodexErr::Fatal(format!(
+            "ripgrep unreadable glob scan failed for {}: {stderr}",
+            search_root.display()
+        )));
+    }
+
+    output
+        .stdout
+        .split(|byte| *byte == b'\0')
+        .filter(|path| !path.is_empty())
+        .map(|path| {
+            let path = PathBuf::from(OsString::from_vec(path.to_vec()));
+            if path.is_absolute() {
+                path
+            } else {
+                search_root.join(path)
+            }
+        })
+        .map(AbsolutePathBuf::from_absolute_path_checked)
+        .collect::<io::Result<Vec<_>>>()
+        .map_err(Into::into)
 }
 
 fn path_to_string(path: &Path) -> String {

@@ -51,6 +51,7 @@ WHERE id = ?
         let rows = sqlx::query(
             r#"
 SELECT name, description, input_schema, defer_loading
+     , namespace
 FROM thread_dynamic_tools
 WHERE thread_id = ?
 ORDER BY position ASC
@@ -67,6 +68,7 @@ ORDER BY position ASC
             let input_schema: String = row.try_get("input_schema")?;
             let input_schema = serde_json::from_str::<Value>(input_schema.as_str())?;
             tools.push(DynamicToolSpec {
+                namespace: row.try_get("namespace")?,
                 name: row.try_get("name")?,
                 description: row.try_get("description")?,
                 input_schema,
@@ -411,16 +413,18 @@ ON CONFLICT(id) DO UPDATE SET
 INSERT INTO thread_dynamic_tools (
     thread_id,
     position,
+    namespace,
     name,
     description,
     input_schema,
     defer_loading
-) VALUES (?, ?, ?, ?, ?, ?)
+) VALUES (?, ?, ?, ?, ?, ?, ?)
 ON CONFLICT(thread_id, position) DO NOTHING
                 "#,
             )
             .bind(thread_id.as_str())
             .bind(position)
+            .bind(tool.namespace.as_deref())
             .bind(tool.name.as_str())
             .bind(tool.description.as_str())
             .bind(input_schema)
@@ -755,6 +759,7 @@ mod tests {
         let metadata = test_thread_metadata(&codex_home, thread_id, codex_home.clone());
         let tools = vec![
             DynamicToolSpec {
+                namespace: Some("calendar".to_string()),
                 name: "deferred-search".to_string(),
                 description: "search after selection".to_string(),
                 input_schema: json!({
@@ -767,6 +772,7 @@ mod tests {
                 defer_loading: true,
             },
             DynamicToolSpec {
+                namespace: None,
                 name: "eager-tool".to_string(),
                 description: "always visible".to_string(),
                 input_schema: json!({

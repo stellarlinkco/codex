@@ -8055,7 +8055,16 @@ mod tests {
     }
 
     fn make_dynamic_tool(name: &str, defer_loading: bool) -> DynamicToolSpec {
+        make_dynamic_tool_with_namespace(None, name, defer_loading)
+    }
+
+    fn make_dynamic_tool_with_namespace(
+        namespace: Option<&str>,
+        name: &str,
+        defer_loading: bool,
+    ) -> DynamicToolSpec {
         DynamicToolSpec {
+            namespace: namespace.map(str::to_string),
             name: name.to_string(),
             description: format!("Dynamic tool {name}"),
             input_schema: json!({
@@ -8492,6 +8501,68 @@ mod tests {
             tool_names
                 .iter()
                 .any(|name| name == "deferred_dynamic_tool")
+        );
+    }
+
+    #[tokio::test]
+    async fn built_tools_hides_namespaced_deferred_dynamic_tools_until_selected() {
+        let (session, turn_context, _rx) =
+            make_session_and_context_with_dynamic_tools_and_rx(vec![
+                make_dynamic_tool("visible_dynamic_tool", false),
+                make_dynamic_tool_with_namespace(Some("calendar"), "deferred_dynamic_tool", true),
+            ])
+            .await;
+
+        let router = built_tools(
+            session.as_ref(),
+            turn_context.as_ref(),
+            &[],
+            &HashSet::new(),
+            None,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("build tools before selection");
+        let tool_names: Vec<_> = router
+            .specs()
+            .into_iter()
+            .map(|tool| tool.name().to_string())
+            .collect();
+        assert!(tool_names.iter().any(|name| name == "visible_dynamic_tool"));
+        assert!(
+            !tool_names
+                .iter()
+                .any(|name| name == "calendar__deferred_dynamic_tool")
+        );
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == SEARCH_TOOL_BM25_TOOL_NAME)
+        );
+
+        session
+            .set_dynamic_tool_selection(vec!["calendar__deferred_dynamic_tool".to_string()])
+            .await;
+
+        let router = built_tools(
+            session.as_ref(),
+            turn_context.as_ref(),
+            &[],
+            &HashSet::new(),
+            None,
+            &tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("build tools after selection");
+        let tool_names: Vec<_> = router
+            .specs()
+            .into_iter()
+            .map(|tool| tool.name().to_string())
+            .collect();
+        assert!(
+            tool_names
+                .iter()
+                .any(|name| name == "calendar__deferred_dynamic_tool")
         );
     }
 
